@@ -61,7 +61,7 @@ impl SettingsForm {
 
             ui.label(RichText::new("AI CLIs").strong());
             ui.label(
-                RichText::new("Projects choose one of the ticked tools for the ▶ button.")
+                RichText::new("Projects choose one of the enabled tools for the ▶ button.")
                     .small()
                     .color(theme::TEXT_MUTED),
             );
@@ -71,7 +71,12 @@ impl SettingsForm {
                 .show(ui, |ui| {
                     for (n, (cli, on)) in AI_CLIS.iter().zip(&mut self.clis).enumerate() {
                         ui.horizontal(|ui| {
-                            super::pointer(ui.checkbox(on, cli.name));
+                            super::toggle(ui, on);
+                            // The name toggles too, like a checkbox label.
+                            let name = ui.add(egui::Label::new(cli.name).sense(egui::Sense::click()));
+                            if super::pointer(name).clicked() {
+                                *on = !*on;
+                            }
                             if self.installed.iter().any(|id| id == cli.id) {
                                 ui.label(RichText::new("installed").small().color(theme::ACCENT));
                             }
@@ -135,7 +140,7 @@ impl SettingsForm {
                     self.reset();
                 }
                 if !valid {
-                    ui.label(RichText::new("Tick at least one AI CLI").color(theme::TEXT_MUTED));
+                    ui.label(RichText::new("Turn on at least one AI CLI").color(theme::TEXT_MUTED));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add_enabled_ui(valid, |ui| accent_button(ui, "Save")).inner.clicked() {
@@ -203,5 +208,25 @@ mod tests {
         assert_eq!(s.terminal_font_size, 13.0);
         assert_eq!(s.shell, None);
         assert_eq!(s.ai_clis, Some(detect_ai_clis()));
+    }
+
+    #[test]
+    fn clicking_a_cli_name_toggles_it() {
+        use egui_kittest::kittest::Queryable;
+        let settings = Settings {
+            ai_clis: Some(vec!["claude".into()]),
+            ..Default::default()
+        };
+        let mut h = egui_kittest::Harness::new_ui_state(
+            |ui, f: &mut SettingsForm| _ = f.show(ui.ctx()),
+            SettingsForm::new(&settings),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(egui::vec2(900.0, 900.0));
+        h.run_steps(3);
+        h.get_by_label("Gemini CLI").click();
+        h.run();
+        let ids = h.state().to_settings().ai_clis.unwrap();
+        assert_eq!(ids, ["claude", "gemini"]);
     }
 }

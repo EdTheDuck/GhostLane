@@ -32,6 +32,28 @@ pub fn show_modal<R>(
     })
 }
 
+/// On/off switch. Track turns the accent colour when on; the knob slides across.
+pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(36.0, 20.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let (enabled, value) = (ui.is_enabled(), *on);
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, value, ""));
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool_responsive(response.id, *on);
+        let radius = rect.height() / 2.0;
+        let track = if *on { theme::ACCENT } else { theme::CARD_HOVER };
+        let knob = if *on { theme::ACCENT_TEXT } else { theme::TEXT_MUTED };
+        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+        let painter = ui.painter();
+        painter.rect_filled(rect, radius, track);
+        painter.circle_filled(egui::pos2(x, rect.center().y), radius - 3.0, knob);
+    }
+    pointer(response)
+}
+
 /// Inner padding for every text input, in line with button padding.
 pub const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 12);
 

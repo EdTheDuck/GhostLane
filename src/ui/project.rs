@@ -162,7 +162,7 @@ impl ProjectForm {
                             ui.selectable_value(&mut self.ai_cli, id.clone(), name(id));
                         }
                     });
-                super::pointer(combo.response).on_hover_text("Used by the ▶ button. Tick more tools in Settings.");
+                super::pointer(combo.response).on_hover_text("Used by the ▶ button. Turn on more tools in Settings.");
             });
             ui.add_space(8.0);
 
