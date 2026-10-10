@@ -198,13 +198,6 @@ impl Project {
         Ok(())
     }
 
-    pub fn find(&self, path: &Path) -> Option<(usize, usize)> {
-        self.tickets
-            .iter()
-            .enumerate()
-            .find_map(|(c, ts)| ts.iter().position(|t| t.path == path).map(|i| (c, i)))
-    }
-
     pub fn set_sort(&mut self, col: usize, sort: Sort) -> io::Result<()> {
         self.meta.columns[col].sort = sort;
         ticket::sort(&mut self.tickets[col], sort.by, sort.dir);

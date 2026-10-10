@@ -1,0 +1,216 @@
+use std::collections::HashMap;
+
+use egui::text::LayoutJob;
+use egui::{
+    Align, Area, CornerRadius, FontId, Frame, Id, Layout, Margin, Order, Popup, RichText, ScrollArea, Sense,
+    Stroke, Ui, UiBuilder, vec2,
+};
+use egui_phosphor::regular as icon;
+
+use super::{icon_button, priority_icon};
+use crate::app::{Action, OpenProject};
+use crate::project::{Column, Sort, SortBy, SortDir};
+use crate::theme;
+use crate::ticket::Ticket;
+
+const COLUMN_WIDTH: f32 = 300.0;
+
+/// Drag payload for a ticket card.
+pub struct DragTicket(pub u32);
+
+pub fn show(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
+    let Ok(project) = &op.project else { return };
+    ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let height = ui.available_height();
+            for (col, column) in project.meta.columns.iter().enumerate() {
+                ui.allocate_ui_with_layout(vec2(COLUMN_WIDTH, height), Layout::top_down(Align::Min), |ui| {
+                    column_ui(ui, col, column, &project.tickets[col], &mut op.search, actions);
+                });
+            }
+        });
+    });
+}
+
+fn column_ui(
+    ui: &mut Ui,
+    col: usize,
+    column: &Column,
+    tickets: &[Ticket],
+    search: &mut HashMap<String, String>,
+    actions: &mut Vec<Action>,
+) {
+    let mut prepared = Frame::new()
+        .fill(theme::PANEL)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(8))
+        .begin(ui);
+    {
+        let ui = &mut prepared.content_ui;
+        ui.set_width(COLUMN_WIDTH - 16.0);
+        ui.set_min_height(ui.available_height());
+
+        let mut focus_search = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&column.name).strong().size(15.0));
+            ui.label(RichText::new(format!("({})", tickets.len())).color(theme::TEXT_MUTED));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icon_button(ui, icon::PLUS, "Add ticket").clicked() {
+                    actions.push(Action::NewTicket(col));
+                }
+                let sort_btn = icon_button(ui, icon::ARROWS_DOWN_UP, "Sort");
+                Popup::menu(&sort_btn).show(|ui| sort_menu(ui, col, column.sort, actions));
+                if icon_button(ui, icon::MAGNIFYING_GLASS, "Search").clicked()
+                    && search.remove(&column.folder).is_none()
+                {
+                    search.insert(column.folder.clone(), String::new());
+                    focus_search = true;
+                }
+            });
+        });
+
+        let mut close_search = false;
+        if let Some(q) = search.get_mut(&column.folder) {
+            let resp = ui.add(
+                egui::TextEdit::singleline(q)
+                    .hint_text(format!("{} Search {}", icon::MAGNIFYING_GLASS, column.name))
+                    .desired_width(f32::INFINITY),
+            );
+            if focus_search {
+                resp.request_focus();
+            }
+            close_search = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
+        }
+        if close_search {
+            search.remove(&column.folder);
+        }
+        let query = search.get(&column.folder).map_or("", String::as_str);
+        ui.add_space(4.0);
+
+        ScrollArea::vertical().id_salt(("column", col)).auto_shrink(false).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            for t in tickets.iter().filter(|t| t.matches(query)) {
+                card(ui, t, actions);
+            }
+        });
+    }
+    let response = prepared.allocate_space(ui);
+    if let Some(payload) = response.dnd_hover_payload::<DragTicket>() {
+        let from_here = tickets.iter().any(|t| t.id == payload.0);
+        if !from_here {
+            prepared.frame.stroke = Stroke::new(2.0, theme::ACCENT);
+        }
+    }
+    if let Some(payload) = response.dnd_release_payload::<DragTicket>() {
+        actions.push(Action::MoveTicket { id: payload.0, to_col: col });
+    }
+    prepared.paint(ui);
+}
+
+fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
+    ui.label(RichText::new("Sort by").color(theme::TEXT_MUTED));
+    for (by, label) in [(SortBy::Id, "ID"), (SortBy::Priority, "Priority"), (SortBy::Title, "Title")] {
+        if ui.radio(sort.by == by, label).clicked() {
+            actions.push(Action::SetSort { col, sort: Sort { by, ..sort } });
+        }
+    }
+    ui.separator();
+    for (dir, label) in [(SortDir::Asc, "Ascending"), (SortDir::Desc, "Descending")] {
+        if ui.radio(sort.dir == dir, label).clicked() {
+            actions.push(Action::SetSort { col, sort: Sort { dir, ..sort } });
+        }
+    }
+}
+
+fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
+    let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
+    let response = ui
+        .scope_builder(builder, |ui| {
+            let r = ui.response();
+            let fill = if r.hovered() || r.dragged() { theme::CARD_HOVER } else { theme::CARD };
+            let alpha = if r.dragged() { 0.4 } else { 1.0 };
+            ui.set_opacity(alpha);
+            Frame::new()
+                .fill(fill)
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| card_contents(ui, t, actions));
+        })
+        .response;
+
+    if response.drag_started() {
+        response.dnd_set_drag_payload(DragTicket(t.id));
+    }
+    if response.dragged() {
+        drag_preview(ui, t);
+    }
+    if response.clicked() {
+        actions.push(Action::ViewTicket(t.id));
+    }
+    response.context_menu(|ui| {
+        if ui.button(format!("{}  Edit Ticket", icon::PENCIL_SIMPLE)).clicked() {
+            actions.push(Action::EditTicket(t.id));
+        }
+        if ui.button(format!("{}  Duplicate Ticket", icon::COPY)).clicked() {
+            actions.push(Action::DuplicateTicket(t.id));
+        }
+        if ui.button(RichText::new(format!("{}  Delete Ticket", icon::TRASH)).color(theme::DANGER)).clicked() {
+            actions.push(Action::AskDelete(t.id));
+        }
+    });
+}
+
+fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
+    let width = (ui.available_width() - 30.0).max(40.0);
+    let text_rect = ui
+        .allocate_ui(vec2(width, 0.0), |ui| {
+            ui.set_width(width);
+            ui.horizontal(|ui| {
+                ui.label(priority_icon(t.priority)).on_hover_text(t.priority.label());
+                ui.label(RichText::new(t.id_str()).monospace().color(theme::TEXT_MUTED));
+                if t.malformed {
+                    ui.label(RichText::new(icon::WARNING).color(theme::DANGER))
+                        .on_hover_text("This ticket file's header couldn't be read");
+                }
+            });
+            ui.label(title_job(ui, &t.title, width));
+        })
+        .response
+        .rect;
+    let play = egui::Rect::from_center_size(egui::pos2(text_rect.right() + 16.0, text_rect.center().y), vec2(26.0, 26.0));
+    let btn = egui::Button::new(RichText::new(icon::PLAY).size(16.0).color(theme::ACCENT)).frame_when_inactive(false);
+    if ui.put(play, btn).on_hover_text("Complete task with AI").clicked() {
+        actions.push(Action::RunAi(t.id));
+    }
+}
+
+/// Title wrapped to at most two lines, then an ellipsis.
+fn title_job(ui: &Ui, title: &str, width: f32) -> LayoutJob {
+    let mut job = LayoutJob::simple(title.to_owned(), FontId::proportional(14.0), ui.visuals().text_color(), width);
+    job.wrap.max_rows = 2;
+    job.wrap.break_anywhere = false;
+    job
+}
+
+fn drag_preview(ui: &Ui, t: &Ticket) {
+    let Some(pos) = ui.ctx().pointer_interact_pos() else { return };
+    Area::new(Id::new("ticket_drag_preview"))
+        .order(Order::Tooltip)
+        .fixed_pos(pos + vec2(12.0, 8.0))
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            Frame::new()
+                .fill(theme::CARD_HOVER)
+                .stroke(Stroke::new(1.0, theme::ACCENT))
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(priority_icon(t.priority));
+                        ui.label(RichText::new(t.id_str()).monospace().color(theme::TEXT_MUTED));
+                        ui.label(&t.title);
+                    });
+                });
+        });
+}

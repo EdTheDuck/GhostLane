@@ -33,7 +33,6 @@ impl Default for Settings {
 pub struct AppConfig {
     pub open_projects: Vec<PathBuf>,
     pub active_project: Option<PathBuf>,
-    pub terminal_height: f32,
     pub terminal_collapsed: bool,
     pub settings: Settings,
 }
@@ -43,7 +42,6 @@ impl Default for AppConfig {
         Self {
             open_projects: Vec::new(),
             active_project: None,
-            terminal_height: 240.0,
             terminal_collapsed: false,
             settings: Settings::default(),
         }
@@ -110,8 +108,8 @@ mod tests {
 
     #[test]
     fn partial_yaml_fills_defaults() {
-        let cfg: AppConfig = serde_yaml_ng::from_str("terminal_height: 100\nsettings:\n  ui_scale: 1.5\n").unwrap();
-        assert_eq!(cfg.terminal_height, 100.0);
+        let cfg: AppConfig = serde_yaml_ng::from_str("terminal_collapsed: true\nsettings:\n  ui_scale: 1.5\n").unwrap();
+        assert!(cfg.terminal_collapsed);
         assert_eq!(cfg.settings.ui_scale, 1.5);
         assert_eq!(cfg.settings.ai_command, DEFAULT_AI_COMMAND);
     }
