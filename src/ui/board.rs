@@ -13,30 +13,40 @@ use crate::project::{Column, Sort, SortBy, SortDir};
 use crate::theme;
 use crate::ticket::Ticket;
 
-const COLUMN_WIDTH: f32 = 300.0;
+const MIN_COLUMN_WIDTH: f32 = 300.0;
+const COLUMN_GAP: f32 = 12.0;
 
 /// Drag payload for a ticket card.
 pub struct DragTicket(pub u32);
 
 pub fn show(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
     let Ok(project) = &op.project else { return };
+    let width = column_width(ui.available_width(), project.meta.columns.len());
     ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
         ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.spacing_mut().item_spacing.x = COLUMN_GAP;
             let height = ui.available_height();
             for (col, column) in project.meta.columns.iter().enumerate() {
-                ui.allocate_ui_with_layout(vec2(COLUMN_WIDTH, height), Layout::top_down(Align::Min), |ui| {
-                    column_ui(ui, col, column, &project.tickets[col], &mut op.search, actions);
+                ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
+                    column_ui(ui, col, column, width, &project.tickets[col], &mut op.search, actions);
                 });
             }
         });
     });
 }
 
+/// Columns share the board width equally, but never shrink below `MIN_COLUMN_WIDTH`
+/// (the board scrolls sideways instead).
+fn column_width(available: f32, columns: usize) -> f32 {
+    let n = columns.max(1) as f32;
+    ((available - COLUMN_GAP * (n - 1.0)) / n).floor().max(MIN_COLUMN_WIDTH)
+}
+
 fn column_ui(
     ui: &mut Ui,
     col: usize,
     column: &Column,
+    width: f32,
     tickets: &[Ticket],
     search: &mut HashMap<String, String>,
     actions: &mut Vec<Action>,
@@ -48,7 +58,7 @@ fn column_ui(
         .begin(ui);
     {
         let ui = &mut prepared.content_ui;
-        ui.set_width(COLUMN_WIDTH - 16.0);
+        ui.set_width(width - 16.0);
         ui.set_min_height(ui.available_height());
 
         let mut focus_search = false;
@@ -332,7 +342,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut h = harness(d.path());
         let from = h.get_by_label("Hello").rect().center();
-        let to = egui::pos2(from.x + COLUMN_WIDTH + 12.0, from.y + 120.0);
+        let done = h.get_by_label("Done").rect().center();
+        let to = egui::pos2(done.x, from.y + 120.0);
         h.hover_at(from);
         h.drag_at(from);
         h.run();
@@ -366,6 +377,19 @@ mod tests {
             rights.iter().all(|r| (r - rights[0]).abs() < 0.5),
             "play buttons misaligned: {rights:?}"
         );
-        assert!(rights[0] < COLUMN_WIDTH, "card overflows the column: {rights:?}");
+        let next_column = h.get_by_label("Done").rect().left();
+        assert!(rights[0] < next_column, "card overflows the column: {rights:?}");
+    }
+
+    #[test]
+    fn columns_stretch_but_keep_minimum() {
+        assert_eq!(column_width(1012.0, 2), 500.0);
+        assert_eq!(column_width(500.0, 5), MIN_COLUMN_WIDTH);
+        assert_eq!(column_width(1000.0, 0), 1000.0);
+
+        // In the 1000px harness two columns split the space, so "Done" starts near the middle.
+        let d = tempfile::tempdir().unwrap();
+        let h = harness(d.path());
+        assert!(h.get_by_label("Done").rect().left() > 490.0);
     }
 }
