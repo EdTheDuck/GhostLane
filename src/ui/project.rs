@@ -117,7 +117,7 @@ impl ProjectForm {
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ProjectOutcome> {
         let mut outcome = None;
-        let modal = super::modal(ctx, "project_modal").show(ctx, |ui| {
+        let modal = super::show_modal(ctx, "project_modal", |ui| {
             ui.set_width(540.0);
             let title = if self.editing { "Edit Project" } else { "New Project" };
             ui.label(RichText::new(title).size(20.0).strong());

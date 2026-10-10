@@ -32,7 +32,7 @@ impl SettingsForm {
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<SettingsOutcome> {
         let mut outcome = None;
-        let modal = super::modal(ctx, "settings_modal").show(ctx, |ui| {
+        let modal = super::show_modal(ctx, "settings_modal", |ui| {
             ui.set_width(560.0);
             ui.label(RichText::new("Settings").size(20.0).strong());
             ui.add_space(12.0);

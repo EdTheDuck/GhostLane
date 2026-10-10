@@ -18,14 +18,21 @@ pub fn pointer(response: Response) -> Response {
     }
 }
 
-/// Modal with generous padding between its content and its edge.
-pub fn modal(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug) -> egui::Modal {
+/// Shows a modal with generous padding to its edge and extra room between items.
+pub fn show_modal<R>(
+    ctx: &egui::Context,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::ModalResponse<R> {
     let frame = egui::Frame::popup(&ctx.style_of(egui::Theme::Dark)).inner_margin(egui::Margin::same(20));
-    egui::Modal::new(egui::Id::new(id)).frame(frame)
+    egui::Modal::new(egui::Id::new(id)).frame(frame).show(ctx, |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+        add_contents(ui)
+    })
 }
 
 /// Inner padding for every text input, in line with button padding.
-pub const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
+pub const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 12);
 
 /// Frameless icon button that shows a frame on hover.
 pub fn icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {

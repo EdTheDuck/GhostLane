@@ -18,7 +18,11 @@ fn markdown(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
     if text.trim().is_empty() {
         ui.label(RichText::new("Nothing here yet.").italics().color(theme::TEXT_MUTED));
     } else {
-        CommonMarkViewer::new().show(ui, cache, text);
+        // Rendered markdown keeps egui's default spacing; the app's taller rows misalign list bullets.
+        ui.scope(|ui| {
+            *ui.spacing_mut() = egui::Spacing::default();
+            CommonMarkViewer::new().show(ui, cache, text);
+        });
     }
 }
 
@@ -30,7 +34,7 @@ pub enum ViewOutcome {
 pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Option<ViewOutcome> {
     let mut outcome = None;
     let size = modal_size(ctx);
-    let modal = super::modal(ctx, "view_ticket").show(ctx, |ui| {
+    let modal = super::show_modal(ctx, "view_ticket", |ui| {
         ui.set_width(size.x);
         ui.set_height(size.y);
         ui.horizontal(|ui| {
@@ -127,7 +131,7 @@ impl TicketForm {
         let mut outcome = None;
         let mut close = false;
         let size = modal_size(ctx);
-        let modal = super::modal(ctx, "edit_ticket").show(ctx, |ui| {
+        let modal = super::show_modal(ctx, "edit_ticket", |ui| {
             ui.set_width(size.x);
             ui.set_height(size.y);
             let heading = match self.mode {
@@ -139,12 +143,16 @@ impl TicketForm {
 
             let t = &mut self.ticket;
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t.id_str())
-                        .monospace()
-                        .size(16.0)
-                        .color(theme::TEXT_MUTED),
-                );
+                // Same height as the title input so the ID sits on its centre line.
+                let row_h = ui.text_style_height(&egui::TextStyle::Heading) + super::INPUT_MARGIN.sum().y;
+                ui.allocate_ui_with_layout(vec2(0.0, row_h), Layout::left_to_right(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(t.id_str())
+                            .monospace()
+                            .size(16.0)
+                            .color(theme::TEXT_MUTED),
+                    );
+                });
                 let title = ui.add(
                     TextEdit::singleline(&mut t.title)
                         .margin(super::INPUT_MARGIN)
@@ -235,7 +243,7 @@ impl TicketForm {
 pub fn confirm(ctx: &egui::Context, id: &str, message: &str, cancel: &str, ok: &str) -> Option<bool> {
     let mut result = None;
     let danger = ok == "Delete" || ok == "Discard";
-    let modal = super::modal(ctx, ("confirm", id)).show(ctx, |ui| {
+    let modal = super::show_modal(ctx, ("confirm", id), |ui| {
         ui.set_width(360.0);
         ui.label(RichText::new(message).size(16.0));
         ui.add_space(12.0);
