@@ -84,7 +84,11 @@ impl Ticket {
 
     pub fn parse(id: u32, path: PathBuf, text: &str) -> Ticket {
         let text = text.replace("\r\n", "\n");
-        let mut t = Ticket { id, path, ..Default::default() };
+        let mut t = Ticket {
+            id,
+            path,
+            ..Default::default()
+        };
 
         let front = split_frontmatter(&text).and_then(|(yaml, body)| {
             let map: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(yaml).ok()?;
@@ -172,9 +176,10 @@ fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     if let Some(body) = rest.strip_prefix("---\n") {
         return Some(("", body));
     }
-    let end = rest.find("\n---\n").map(|i| (i, i + 5)).or_else(|| {
-        rest.strip_suffix("\n---").map(|r| (r.len(), rest.len()))
-    })?;
+    let end = rest
+        .find("\n---\n")
+        .map(|i| (i, i + 5))
+        .or_else(|| rest.strip_suffix("\n---").map(|r| (r.len(), rest.len())))?;
     Some((&rest[..end.0], &rest[end.1..]))
 }
 
@@ -252,7 +257,12 @@ mod tests {
 
     #[test]
     fn round_trip_without_scope_omits_heading() {
-        let t = Ticket { id: 1, path: p(), title: "T".into(), ..Default::default() };
+        let t = Ticket {
+            id: 1,
+            path: p(),
+            title: "T".into(),
+            ..Default::default()
+        };
         let s = t.serialize();
         assert!(!s.contains("Test Scope"));
         assert_eq!(Ticket::parse(1, p(), &s), t);
@@ -294,7 +304,12 @@ mod tests {
 
     #[test]
     fn search() {
-        let t = Ticket { id: 12, title: "Login Page".into(), test_scope: "OAuth".into(), ..Default::default() };
+        let t = Ticket {
+            id: 12,
+            title: "Login Page".into(),
+            test_scope: "OAuth".into(),
+            ..Default::default()
+        };
         assert!(t.matches("login"));
         assert!(t.matches("oauth"));
         assert!(t.matches("00012"));
@@ -304,7 +319,12 @@ mod tests {
 
     #[test]
     fn sorting() {
-        let mk = |id, title: &str, priority| Ticket { id, title: title.into(), priority, ..Default::default() };
+        let mk = |id, title: &str, priority| Ticket {
+            id,
+            title: title.into(),
+            priority,
+            ..Default::default()
+        };
         let mut v = vec![
             mk(3, "b", Priority::Low),
             mk(1, "C", Priority::High),

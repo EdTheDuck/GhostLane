@@ -28,24 +28,13 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub open_projects: Vec<PathBuf>,
     pub active_project: Option<PathBuf>,
     pub terminal_collapsed: bool,
     pub settings: Settings,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            open_projects: Vec::new(),
-            active_project: None,
-            terminal_collapsed: false,
-            settings: Settings::default(),
-        }
-    }
 }
 
 impl AppConfig {
@@ -78,7 +67,11 @@ impl AppConfig {
     pub fn prune_missing(&mut self) -> bool {
         let before = self.clone();
         self.open_projects.retain(|p| p.is_file());
-        if self.active_project.as_ref().is_none_or(|a| !self.open_projects.contains(a)) {
+        if self
+            .active_project
+            .as_ref()
+            .is_none_or(|a| !self.open_projects.contains(a))
+        {
             self.active_project = self.open_projects.first().cloned();
         }
         *self != before
@@ -101,7 +94,7 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.prune_missing());
-        assert_eq!(cfg.open_projects, [real.clone()]);
+        assert_eq!(cfg.open_projects, std::slice::from_ref(&real));
         assert_eq!(cfg.active_project, Some(real));
         assert!(!cfg.prune_missing());
     }

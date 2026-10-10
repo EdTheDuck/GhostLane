@@ -1,7 +1,7 @@
 use egui::text::{CCursor, CCursorRange};
 use egui::{
-    Align, ComboBox, DragValue, Id, Key, KeyboardShortcut, Layout, Modal, Modifiers, RichText, ScrollArea,
-    TextEdit, Ui, vec2,
+    Align, ComboBox, DragValue, Id, Key, KeyboardShortcut, Layout, Modal, Modifiers, RichText, ScrollArea, TextEdit,
+    Ui, vec2,
 };
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_phosphor::regular as icon;
@@ -35,7 +35,12 @@ pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Opt
         ui.set_width(size.x);
         ui.set_height(size.y);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(t.id_str()).monospace().size(16.0).color(theme::TEXT_MUTED));
+            ui.label(
+                RichText::new(t.id_str())
+                    .monospace()
+                    .size(16.0)
+                    .color(theme::TEXT_MUTED),
+            );
             ui.label(priority_icon(t.priority).size(16.0));
             ui.label(RichText::new(t.priority.label()).color(theme::TEXT_MUTED));
             ui.label(RichText::new(format!("·  Runs: {}", t.run_count)).color(theme::TEXT_MUTED));
@@ -99,7 +104,13 @@ impl TicketForm {
     }
 
     fn new(mode: FormMode, ticket: Ticket) -> Self {
-        TicketForm { mode, original: ticket.clone(), ticket, confirm_discard: false, error: None }
+        TicketForm {
+            mode,
+            original: ticket.clone(),
+            ticket,
+            confirm_discard: false,
+            error: None,
+        }
     }
 
     fn dirty(&self) -> bool {
@@ -129,7 +140,12 @@ impl TicketForm {
 
             let t = &mut self.ticket;
             ui.horizontal(|ui| {
-                ui.label(RichText::new(t.id_str()).monospace().size(16.0).color(theme::TEXT_MUTED));
+                ui.label(
+                    RichText::new(t.id_str())
+                        .monospace()
+                        .size(16.0)
+                        .color(theme::TEXT_MUTED),
+                );
                 let title = ui.add(
                     TextEdit::singleline(&mut t.title)
                         .hint_text("Title (required)")
@@ -160,16 +176,19 @@ impl TicketForm {
 
             let footer = 48.0;
             let body_h = (ui.available_height() - footer).max(200.0);
-            ScrollArea::vertical().max_height(body_h).auto_shrink(false).show(ui, |ui| {
-                ui.label(RichText::new("Description").strong());
-                markdown_editor(ui, "description", &mut t.description, (body_h * 0.6).max(160.0), cache);
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Test Scope").strong());
-                    ui.label(RichText::new("optional").small().color(theme::TEXT_MUTED));
+            ScrollArea::vertical()
+                .max_height(body_h)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Description").strong());
+                    markdown_editor(ui, "description", &mut t.description, (body_h * 0.6).max(160.0), cache);
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Test Scope").strong());
+                        ui.label(RichText::new("optional").small().color(theme::TEXT_MUTED));
+                    });
+                    markdown_editor(ui, "test_scope", &mut t.test_scope, (body_h * 0.35).max(120.0), cache);
                 });
-                markdown_editor(ui, "test_scope", &mut t.test_scope, (body_h * 0.35).max(120.0), cache);
-            });
 
             ui.separator();
             ui.horizontal(|ui| {
@@ -180,7 +199,11 @@ impl TicketForm {
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let can_save = !self.ticket.title.trim().is_empty();
-                    if ui.add_enabled_ui(can_save, |ui| accent_button(ui, "Save")).inner.clicked() {
+                    if ui
+                        .add_enabled_ui(can_save, |ui| accent_button(ui, "Save"))
+                        .inner
+                        .clicked()
+                    {
                         outcome = Some(FormOutcome::Save);
                     }
                     if ui.button("Close").clicked() {
@@ -279,12 +302,19 @@ fn markdown_editor(ui: &mut Ui, id: &str, text: &mut String, height: f32, cache:
 
     let wide = ui.available_width() > 720.0;
     let editor = |ui: &mut Ui, text: &mut String, w: f32| {
-        ScrollArea::vertical().id_salt((id, "src")).max_height(height).show(ui, |ui| {
-            ui.add_sized(
-                vec2(w, height),
-                TextEdit::multiline(text).id(edit_id).code_editor().desired_width(w).hint_text("Write markdown…"),
-            );
-        });
+        ScrollArea::vertical()
+            .id_salt((id, "src"))
+            .max_height(height)
+            .show(ui, |ui| {
+                ui.add_sized(
+                    vec2(w, height),
+                    TextEdit::multiline(text)
+                        .id(edit_id)
+                        .code_editor()
+                        .desired_width(w)
+                        .hint_text("Write markdown…"),
+                );
+            });
     };
     let preview = |ui: &mut Ui, text: &str, w: f32, cache: &mut CommonMarkCache| {
         egui::Frame::new()
@@ -294,10 +324,14 @@ fn markdown_editor(ui: &mut Ui, id: &str, text: &mut String, height: f32, cache:
             .show(ui, |ui| {
                 ui.set_width(w - 16.0);
                 ui.set_min_height(height - 16.0);
-                ScrollArea::vertical().id_salt((id, "preview")).max_height(height - 16.0).min_scrolled_height(height - 16.0).show(ui, |ui| {
-                    ui.set_width(w - 16.0);
-                    markdown(ui, cache, text);
-                });
+                ScrollArea::vertical()
+                    .id_salt((id, "preview"))
+                    .max_height(height - 16.0)
+                    .min_scrolled_height(height - 16.0)
+                    .show(ui, |ui| {
+                        ui.set_width(w - 16.0);
+                        markdown(ui, cache, text);
+                    });
             });
     };
     if wide {
@@ -329,7 +363,9 @@ fn apply_format(ctx: &egui::Context, edit_id: Id, text: &mut String, format: &Fo
         Format::LinePrefix(prefix) => prefix_lines(text, start, end, prefix),
     };
     *text = new_text;
-    state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(sel.0), CCursor::new(sel.1))));
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::two(CCursor::new(sel.0), CCursor::new(sel.1))));
     state.store(ctx, edit_id);
     ctx.memory_mut(|m| m.request_focus(edit_id));
 }
@@ -351,7 +387,10 @@ fn prefix_lines(text: &str, start: usize, end: usize, prefix: &str) -> (String, 
     let (bs, be) = (byte_at(text, start), byte_at(text, end));
     let line_start = text[..bs].rfind('\n').map_or(0, |i| i + 1);
     let line_end = text[be..].find('\n').map_or(text.len(), |i| be + i);
-    let block: Vec<String> = text[line_start..line_end].split('\n').map(|l| format!("{prefix}{l}")).collect();
+    let block: Vec<String> = text[line_start..line_end]
+        .split('\n')
+        .map(|l| format!("{prefix}{l}"))
+        .collect();
     let block = block.join("\n");
     let out = format!("{}{}{}", &text[..line_start], block, &text[line_end..]);
     let sel_start = text[..line_start].chars().count();
@@ -374,12 +413,19 @@ mod tests {
         let ctx = egui::Context::default();
         let id = Id::new("editor");
         let mut state = egui::text_edit::TextEditState::default();
-        state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(9), CCursor::new(5))));
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::two(CCursor::new(9), CCursor::new(5))));
         state.store(&ctx, id);
         let mut text = "make bold".to_string();
         apply_format(&ctx, id, &mut text, &Format::Wrap("**", "**"));
         assert_eq!(text, "make **bold**");
-        let sel = TextEdit::load_state(&ctx, id).unwrap().cursor.char_range().unwrap().as_sorted_char_range();
+        let sel = TextEdit::load_state(&ctx, id)
+            .unwrap()
+            .cursor
+            .char_range()
+            .unwrap()
+            .as_sorted_char_range();
         assert_eq!((sel.start.0, sel.end.0), (7, 11));
 
         // No stored selection: append at the end.

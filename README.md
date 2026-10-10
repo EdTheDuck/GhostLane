@@ -138,7 +138,7 @@ To open an existing project, click **Open Project** and select its `.ghost` file
 You need a recent stable [Rust toolchain](https://rustup.rs).
 
 ```sh
-git clone <this repo>
+git clone https://github.com/EdTheDuck/GhostLane.git
 cd GhostLane
 cargo build --release
 ```

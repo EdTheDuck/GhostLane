@@ -89,9 +89,7 @@ pub fn folder_name(name: &str) -> Option<String> {
         return None;
     }
     let reserved = matches!(s.as_str(), "con" | "prn" | "aux" | "nul")
-        || ((s.starts_with("com") || s.starts_with("lpt"))
-            && s.len() == 4
-            && matches!(s.as_bytes()[3], b'1'..=b'9'));
+        || ((s.starts_with("com") || s.starts_with("lpt")) && s.len() == 4 && matches!(s.as_bytes()[3], b'1'..=b'9'));
     if reserved {
         s.push('_');
     }
@@ -121,7 +119,12 @@ impl Project {
         let meta: GhostFile = serde_yaml_ng::from_str(&text)
             .map_err(|e| err(format!("{} is not a valid .ghost file: {e}", ghost_path.display())))?;
         let root = ghost_path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let mut p = Project { ghost_path: ghost_path.to_path_buf(), root, meta, tickets: Vec::new() };
+        let mut p = Project {
+            ghost_path: ghost_path.to_path_buf(),
+            root,
+            meta,
+            tickets: Vec::new(),
+        };
         p.rescan()?;
         Ok(p)
     }
@@ -133,18 +136,36 @@ impl Project {
             return Err(err("Project name is required"));
         }
         if let Some(existing) = find_ghost_file(dir) {
-            return Err(err(format!("{} already contains a project ({})", dir.display(), existing.display())));
+            return Err(err(format!(
+                "{} already contains a project ({})",
+                dir.display(),
+                existing.display()
+            )));
         }
         let folders = validate_columns(column_names).map_err(err)?;
         let slug = folder_name(name).unwrap_or_else(|| "project".into());
         let columns = column_names
             .iter()
             .zip(folders)
-            .map(|(n, f)| Column { name: n.trim().to_string(), folder: f, sort: Sort::default() })
+            .map(|(n, f)| Column {
+                name: n.trim().to_string(),
+                folder: f,
+                sort: Sort::default(),
+            })
             .collect();
-        let meta = GhostFile { version: 1, name: name.to_string(), next_ticket_id: 1, columns };
+        let meta = GhostFile {
+            version: 1,
+            name: name.to_string(),
+            next_ticket_id: 1,
+            columns,
+        };
         let ghost_path = dir.join(format!("{slug}.ghost"));
-        let p = Project { ghost_path: ghost_path.clone(), root: dir.to_path_buf(), meta, tickets: Vec::new() };
+        let p = Project {
+            ghost_path: ghost_path.clone(),
+            root: dir.to_path_buf(),
+            meta,
+            tickets: Vec::new(),
+        };
         for i in 0..p.meta.columns.len() {
             fs::create_dir_all(p.column_dir(i))?;
         }
@@ -304,7 +325,11 @@ impl Project {
                     .and_then(|o| old_cols.iter().find(|c| &c.folder == o))
                     .map(|c| c.sort)
                     .unwrap_or_default();
-                Column { name: e.name.trim().to_string(), folder, sort }
+                Column {
+                    name: e.name.trim().to_string(),
+                    folder,
+                    sort,
+                }
             })
             .collect();
         self.save_meta()?;
@@ -353,7 +378,14 @@ mod tests {
     }
 
     fn add(p: &mut Project, col: usize, title: &str) -> Ticket {
-        p.add_ticket(col, Ticket { title: title.into(), ..Default::default() }).unwrap()
+        p.add_ticket(
+            col,
+            Ticket {
+                title: title.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
     }
 
     #[test]
@@ -399,7 +431,10 @@ mod tests {
         let a = add(&mut p, 0, "in a");
         add(&mut p, 1, "in b");
         add(&mut p, 2, "in c");
-        let edit = |name: &str, orig: Option<&str>| ColumnEdit { name: name.into(), orig_folder: orig.map(Into::into) };
+        let edit = |name: &str, orig: Option<&str>| ColumnEdit {
+            name: name.into(),
+            orig_folder: orig.map(Into::into),
+        };
         // Swap A and B by name, drop C into the renamed "A" (old b), add D.
         let edits = [edit("B", Some("a")), edit("A", Some("b")), edit("D", None)];
         let targets = HashMap::from([("c".to_string(), 1)]);

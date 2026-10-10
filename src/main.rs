@@ -63,7 +63,11 @@ pub mod theme {
 }
 
 fn window_icon() -> Option<egui::IconData> {
-    let size = egui::SizeHint::Size { width: 256, height: 256, maintain_aspect_ratio: true };
+    let size = egui::SizeHint::Size {
+        width: 256,
+        height: 256,
+        maintain_aspect_ratio: true,
+    };
     let img = egui_extras::image::load_svg_bytes_with_size(GHOST_SVG, size, &Default::default()).ok()?;
     Some(egui::IconData {
         rgba: img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect(),
@@ -82,7 +86,10 @@ fn main() -> eframe::Result {
     }
     eframe::run_native(
         "GhostLane",
-        eframe::NativeOptions { viewport, ..Default::default() },
+        eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        },
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
 }

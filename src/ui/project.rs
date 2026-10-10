@@ -40,8 +40,16 @@ pub struct ProjectForm {
 
 pub enum ProjectOutcome {
     Cancel,
-    Create { dir: PathBuf, name: String, columns: Vec<String> },
-    Save { name: String, edits: Vec<ColumnEdit>, targets: HashMap<String, usize> },
+    Create {
+        dir: PathBuf,
+        name: String,
+        columns: Vec<String>,
+    },
+    Save {
+        name: String,
+        edits: Vec<ColumnEdit>,
+        targets: HashMap<String, usize>,
+    },
     OpenExisting(PathBuf),
 }
 
@@ -50,7 +58,12 @@ impl ProjectForm {
         let rows = DEFAULT_COLUMNS
             .iter()
             .enumerate()
-            .map(|(i, n)| ColumnRow { key: i as u64, name: n.to_string(), orig_folder: None, tickets: 0 })
+            .map(|(i, n)| ColumnRow {
+                key: i as u64,
+                name: n.to_string(),
+                orig_folder: None,
+                tickets: 0,
+            })
             .collect();
         ProjectForm {
             editing: false,
@@ -111,7 +124,11 @@ impl ProjectForm {
             ui.add_space(12.0);
 
             ui.label("Name");
-            ui.add(TextEdit::singleline(&mut self.name).hint_text("My Project").desired_width(f32::INFINITY));
+            ui.add(
+                TextEdit::singleline(&mut self.name)
+                    .hint_text("My Project")
+                    .desired_width(f32::INFINITY),
+            );
             ui.add_space(8.0);
 
             if !self.editing {
@@ -125,7 +142,12 @@ impl ProjectForm {
             });
             self.columns_ui(ui);
             if ui.button(format!("{}  Add column", icon::PLUS)).clicked() {
-                self.rows.push(ColumnRow { key: self.next_key, name: "New Column".into(), orig_folder: None, tickets: 0 });
+                self.rows.push(ColumnRow {
+                    key: self.next_key,
+                    name: "New Column".into(),
+                    orig_folder: None,
+                    tickets: 0,
+                });
                 self.next_key += 1;
             }
             self.removed_ui(ui);
@@ -140,7 +162,11 @@ impl ProjectForm {
             ui.separator();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let label = if self.editing { "Save" } else { "Create" };
-                if ui.add_enabled_ui(valid.is_ok(), |ui| accent_button(ui, label)).inner.clicked() {
+                if ui
+                    .add_enabled_ui(valid.is_ok(), |ui| accent_button(ui, label))
+                    .inner
+                    .clicked()
+                {
                     outcome = Some(self.submit());
                 }
                 if ui.button("Cancel").clicked() {
@@ -157,7 +183,11 @@ impl ProjectForm {
     fn location_ui(&mut self, ui: &mut Ui, outcome: &mut Option<ProjectOutcome>) {
         ui.label("Location");
         ui.horizontal(|ui| {
-            let mut shown = self.location.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+            let mut shown = self
+                .location
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             ui.add(
                 TextEdit::singleline(&mut shown)
                     .hint_text("Folder for the .ghost file and tickets")
@@ -187,21 +217,40 @@ impl ProjectForm {
         dnd(ui, "project_columns").show_vec(&mut self.rows, |ui, row, handle, _state| {
             ui.horizontal(|ui| {
                 handle.ui(ui, |ui| {
-                    ui.label(RichText::new(icon::DOTS_SIX_VERTICAL).size(18.0).color(theme::TEXT_MUTED));
+                    ui.label(
+                        RichText::new(icon::DOTS_SIX_VERTICAL)
+                            .size(18.0)
+                            .color(theme::TEXT_MUTED),
+                    );
                 });
                 ui.add(TextEdit::singleline(&mut row.name).desired_width(220.0));
                 let folder = match folder_name(&row.name) {
-                    Some(f) => RichText::new(format!("tickets/{f}")).color(theme::TEXT_MUTED).monospace().small(),
+                    Some(f) => RichText::new(format!("tickets/{f}"))
+                        .color(theme::TEXT_MUTED)
+                        .monospace()
+                        .small(),
                     None => RichText::new("invalid name").color(theme::DANGER),
                 };
                 ui.label(folder);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let tip = if only_one { "A project needs at least one column" } else { "Remove column" };
-                    if ui.add_enabled_ui(!only_one, |ui| icon_button(ui, icon::TRASH, tip)).inner.clicked() {
+                    let tip = if only_one {
+                        "A project needs at least one column"
+                    } else {
+                        "Remove column"
+                    };
+                    if ui
+                        .add_enabled_ui(!only_one, |ui| icon_button(ui, icon::TRASH, tip))
+                        .inner
+                        .clicked()
+                    {
                         remove = Some(row.key);
                     }
                     if row.tickets > 0 {
-                        ui.label(RichText::new(plural(row.tickets, "ticket")).color(theme::TEXT_MUTED).small());
+                        ui.label(
+                            RichText::new(plural(row.tickets, "ticket"))
+                                .color(theme::TEXT_MUTED)
+                                .small(),
+                        );
                     }
                 });
             });
@@ -226,16 +275,22 @@ impl ProjectForm {
                 r.target = None;
             }
             ui.horizontal(|ui| {
-                ui.label(format!("Move {} from \"{}\" to", plural(r.row.tickets, "ticket"), r.row.name));
+                ui.label(format!(
+                    "Move {} from \"{}\" to",
+                    plural(r.row.tickets, "ticket"),
+                    r.row.name
+                ));
                 let selected = r
                     .target
                     .and_then(|k| self.rows.iter().find(|row| row.key == k))
                     .map_or("Choose column…".to_string(), |row| row.name.clone());
-                ComboBox::from_id_salt(("removed_target", r.row.key)).selected_text(selected).show_ui(ui, |ui| {
-                    for row in &self.rows {
-                        ui.selectable_value(&mut r.target, Some(row.key), &row.name);
-                    }
-                });
+                ComboBox::from_id_salt(("removed_target", r.row.key))
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for row in &self.rows {
+                            ui.selectable_value(&mut r.target, Some(row.key), &row.name);
+                        }
+                    });
                 if ui.small_button("Restore").clicked() {
                     restore = Some(i);
                 }
@@ -259,7 +314,10 @@ impl ProjectForm {
         let edits = self
             .rows
             .iter()
-            .map(|r| ColumnEdit { name: r.name.trim().to_string(), orig_folder: r.orig_folder.clone() })
+            .map(|r| ColumnEdit {
+                name: r.name.trim().to_string(),
+                orig_folder: r.orig_folder.clone(),
+            })
             .collect();
         let targets = self
             .removed
@@ -274,5 +332,9 @@ impl ProjectForm {
 }
 
 fn plural(n: usize, word: &str) -> String {
-    if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
+    }
 }

@@ -9,7 +9,12 @@ const UNSAFE: &[char] = &['"', '\'', '`', '$', ';', '&', '|', '<', '>', '\n', '\
 
 /// Fills `{ticket_path}`, `{ticket_id}` and `{project_dir}` in the AI command template.
 /// Values are refused rather than escaped, since the shell may be PowerShell, cmd or POSIX.
-pub fn build_ai_command(template: &str, ticket_path: &Path, ticket_id: &str, project_dir: &Path) -> Result<String, String> {
+pub fn build_ai_command(
+    template: &str,
+    ticket_path: &Path,
+    ticket_id: &str,
+    project_dir: &Path,
+) -> Result<String, String> {
     let values = [
         ("{ticket_path}", ticket_path.display().to_string()),
         ("{ticket_id}", ticket_id.to_string()),
@@ -24,7 +29,9 @@ pub fn build_ai_command(template: &str, ticket_path: &Path, ticket_id: &str, pro
             continue;
         }
         if value.contains(UNSAFE) {
-            return Err(format!("Not running the AI command: {key} contains characters that aren't safe in a shell command ({value})"));
+            return Err(format!(
+                "Not running the AI command: {key} contains characters that aren't safe in a shell command ({value})"
+            ));
         }
         cmd = cmd.replace(key, &value);
     }
@@ -42,10 +49,20 @@ pub fn detect_shell(custom: Option<&str>) -> (String, Vec<String>) {
                 return (path.display().to_string(), vec!["-NoLogo".into()]);
             }
         }
-        (std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()), Vec::new())
+        (
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+            Vec::new(),
+        )
     } else {
-        let fallback = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| fallback.into());
+        let fallback = if cfg!(target_os = "macos") {
+            "/bin/zsh"
+        } else {
+            "/bin/bash"
+        };
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| fallback.into());
         // Login shell so PATH from the user's profile (where CLIs like `claude` live) is loaded.
         (shell, vec!["-l".into()])
     }
@@ -78,7 +95,12 @@ pub struct Terminals {
 impl Terminals {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        Terminals { sessions: HashMap::new(), next_id: 0, tx, rx }
+        Terminals {
+            sessions: HashMap::new(),
+            next_id: 0,
+            tx,
+            rx,
+        }
     }
 
     /// Marks sessions whose shell has exited; they stay until `restart`.
@@ -101,12 +123,17 @@ impl Terminals {
     ) -> Result<&mut Session, String> {
         if !self.sessions.contains_key(key) {
             let (shell, args) = detect_shell(shell);
-            let settings = BackendSettings { shell: shell.clone(), args, working_directory: Some(cwd.to_path_buf()) };
+            let settings = BackendSettings {
+                shell: shell.clone(),
+                args,
+                working_directory: Some(cwd.to_path_buf()),
+            };
             let id = self.next_id;
             self.next_id += 1;
             let backend = TerminalBackend::new(id, ctx.clone(), self.tx.clone(), settings)
                 .map_err(|e| format!("Couldn't start {shell}: {e}"))?;
-            self.sessions.insert(key.to_path_buf(), (id, Session { backend, exited: false }));
+            self.sessions
+                .insert(key.to_path_buf(), (id, Session { backend, exited: false }));
         }
         Ok(&mut self.sessions.get_mut(key).expect("just inserted").1)
     }
@@ -118,7 +145,8 @@ impl Terminals {
 
 impl Session {
     pub fn run(&mut self, command: &str) {
-        self.backend.process_command(BackendCommand::Write(format!("{command}\r").into_bytes()));
+        self.backend
+            .process_command(BackendCommand::Write(format!("{command}\r").into_bytes()));
     }
 }
 

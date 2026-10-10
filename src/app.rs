@@ -29,7 +29,11 @@ pub struct OpenProject {
 impl OpenProject {
     fn load(path: PathBuf) -> Self {
         let project = Project::load(&path).map_err(|e| e.to_string());
-        OpenProject { path, project, search: HashMap::new() }
+        OpenProject {
+            path,
+            project,
+            search: HashMap::new(),
+        }
     }
 
     pub fn name(&self) -> String {
@@ -117,7 +121,8 @@ impl App {
         };
         for p in &app.projects {
             if let Err(e) = &p.project {
-                app.toasts.push((format!("Couldn't load {}: {e}", p.path.display()), Instant::now()));
+                app.toasts
+                    .push((format!("Couldn't load {}: {e}", p.path.display()), Instant::now()));
             }
         }
         app.watch_active(ctx);
@@ -141,7 +146,10 @@ impl App {
     /// (column, ticket) of a ticket in the active project.
     pub fn find_ticket(&self, id: u32) -> Option<(usize, &Ticket)> {
         let p = self.active_project()?;
-        p.tickets.iter().enumerate().find_map(|(c, ts)| ts.iter().find(|t| t.id == id).map(|t| (c, t)))
+        p.tickets
+            .iter()
+            .enumerate()
+            .find_map(|(c, ts)| ts.iter().find(|t| t.id == id).map(|t| (c, t)))
     }
 
     fn save_config(&mut self) {
@@ -219,7 +227,11 @@ impl App {
         let i = match self.projects.iter().position(|p| p.path == path) {
             Some(i) => i,
             None => {
-                self.projects.push(OpenProject { path, project: Err(String::new()), search: HashMap::new() });
+                self.projects.push(OpenProject {
+                    path,
+                    project: Err(String::new()),
+                    search: HashMap::new(),
+                });
                 self.projects.len() - 1
             }
         };
@@ -228,7 +240,10 @@ impl App {
     }
 
     fn open_project_dialog(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new().add_filter("GhostLane project", &["ghost"]).pick_file() else {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("GhostLane project", &["ghost"])
+            .pick_file()
+        else {
             return;
         };
         self.open_path(path, ctx);
@@ -276,11 +291,16 @@ impl App {
             }
             Action::NewTicket(col) => {
                 let Some(p) = self.active_project() else { return };
-                let t = Ticket { id: p.meta.next_ticket_id, ..Default::default() };
+                let t = Ticket {
+                    id: p.meta.next_ticket_id,
+                    ..Default::default()
+                };
                 self.modal = Some(Modal::EditTicket(TicketForm::create(col, t)));
             }
             Action::DuplicateTicket(id) => {
-                let Some(next) = self.active_project().map(|p| p.meta.next_ticket_id) else { return };
+                let Some(next) = self.active_project().map(|p| p.meta.next_ticket_id) else {
+                    return;
+                };
                 let Some((col, t)) = self.find_ticket(id) else { return };
                 let copy = Ticket {
                     id: next,
@@ -310,7 +330,11 @@ impl App {
             self.save_config();
         }
         let shell = self.config.settings.shell.clone();
-        if self.terminals.get_or_start(&key, &root, shell.as_deref(), ctx).is_ok_and(|s| s.exited) {
+        if self
+            .terminals
+            .get_or_start(&key, &root, shell.as_deref(), ctx)
+            .is_ok_and(|s| s.exited)
+        {
             self.terminals.restart(&key);
         }
         match self.terminals.get_or_start(&key, &root, shell.as_deref(), ctx) {
@@ -329,7 +353,9 @@ impl App {
         match self.active_project() {
             Some(p) => (p.ghost_path.clone(), p.root.clone()),
             None => {
-                let home = directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()).unwrap_or_default();
+                let home = directories::UserDirs::new()
+                    .map(|d| d.home_dir().to_path_buf())
+                    .unwrap_or_default();
                 (PathBuf::new(), home)
             }
         }
@@ -340,15 +366,24 @@ impl App {
         let collapsed = self.config.terminal_collapsed;
         let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 6));
         let panel = if collapsed {
-            egui::Panel::bottom("terminal_collapsed").resizable(false).exact_size(34.0)
+            egui::Panel::bottom("terminal_collapsed")
+                .resizable(false)
+                .exact_size(34.0)
         } else {
             let max = (ui.available_height() - 160.0).max(120.0);
-            egui::Panel::bottom("terminal").resizable(true).default_size(260.0).size_range(100.0..=max)
+            egui::Panel::bottom("terminal")
+                .resizable(true)
+                .default_size(260.0)
+                .size_range(100.0..=max)
         };
         let (key, cwd) = self.terminal_target();
         panel.frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (glyph, tip) = if collapsed { (icon::CARET_UP, "Show terminal") } else { (icon::CARET_DOWN, "Hide terminal") };
+                let (glyph, tip) = if collapsed {
+                    (icon::CARET_UP, "Show terminal")
+                } else {
+                    (icon::CARET_DOWN, "Hide terminal")
+                };
                 if icon_button(ui, glyph, tip).clicked() {
                     self.config.terminal_collapsed = !collapsed;
                     if let Err(e) = self.config.save() {
@@ -356,7 +391,11 @@ impl App {
                     }
                 }
                 ui.label(RichText::new(format!("{}  Terminal", icon::TERMINAL_WINDOW)).strong());
-                ui.label(RichText::new(cwd.display().to_string()).small().color(theme::TEXT_MUTED));
+                ui.label(
+                    RichText::new(cwd.display().to_string())
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
             });
             if collapsed {
                 return;
@@ -451,7 +490,9 @@ impl App {
     }
 
     fn save_ticket_form(&mut self) {
-        let Some(Modal::EditTicket(form)) = &self.modal else { return };
+        let Some(Modal::EditTicket(form)) = &self.modal else {
+            return;
+        };
         let (mode, mut ticket) = (form.mode, form.ticket.clone());
         ticket.title = ticket.title.trim().to_string();
         let current_path = self.find_ticket(ticket.id).map(|(_, t)| t.path.clone());
@@ -513,7 +554,9 @@ impl App {
         let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(12, 8));
         egui::Panel::top("top_bar").frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::Image::new(egui::include_image!("../assets/ghost.svg")).fit_to_exact_size(vec2(28.0, 28.0)));
+                ui.add(
+                    egui::Image::new(egui::include_image!("../assets/ghost.svg")).fit_to_exact_size(vec2(28.0, 28.0)),
+                );
                 ui.label(RichText::new("GhostLane").size(20.0).strong());
                 ui.add_space(16.0);
                 if !self.projects.is_empty() {
@@ -553,7 +596,10 @@ impl App {
             }
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(format!("{}  Open Project", icon::FOLDER_OPEN)).min_size(vec2(0.0, 28.0))).clicked() {
+                if ui
+                    .add(egui::Button::new(format!("{}  Open Project", icon::FOLDER_OPEN)).min_size(vec2(0.0, 28.0)))
+                    .clicked()
+                {
                     actions.push(Action::OpenProjectDialog);
                 }
                 if accent_button(ui, &format!("{}  New Project", icon::PLUS)).clicked() {
@@ -575,11 +621,16 @@ impl App {
                 let width = 2.0 * 170.0 + ui.spacing().item_spacing.x;
                 ui.add_space((ui.available_width() - width) / 2.0);
                 let size = vec2(170.0, 40.0);
-                if ui.add_sized(size, egui::Button::new(format!("{}  Open Project", icon::FOLDER_OPEN))).clicked() {
+                if ui
+                    .add_sized(size, egui::Button::new(format!("{}  Open Project", icon::FOLDER_OPEN)))
+                    .clicked()
+                {
                     actions.push(Action::OpenProjectDialog);
                 }
                 let new = egui::Button::new(
-                    RichText::new(format!("{}  New Project", icon::PLUS)).color(theme::ACCENT_TEXT).strong(),
+                    RichText::new(format!("{}  New Project", icon::PLUS))
+                        .color(theme::ACCENT_TEXT)
+                        .strong(),
                 )
                 .fill(theme::ACCENT);
                 if ui.add_sized(size, new).clicked() {
@@ -642,10 +693,12 @@ impl eframe::App for App {
         self.terminal_panel(ui);
 
         let central = Frame::new().fill(theme::BG).inner_margin(Margin::same(12));
-        egui::CentralPanel::default().frame(central).show(ui, |ui| match self.active {
-            Some(i) if self.projects[i].project.is_ok() => ui::board::show(ui, &mut self.projects[i], &mut actions),
-            _ => Self::empty_state(ui, &mut actions),
-        });
+        egui::CentralPanel::default()
+            .frame(central)
+            .show(ui, |ui| match self.active {
+                Some(i) if self.projects[i].project.is_ok() => ui::board::show(ui, &mut self.projects[i], &mut actions),
+                _ => Self::empty_state(ui, &mut actions),
+            });
 
         for action in actions {
             self.apply(action, &ctx);

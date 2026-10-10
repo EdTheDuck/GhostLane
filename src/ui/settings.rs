@@ -38,7 +38,11 @@ impl SettingsForm {
             ui.add_space(12.0);
 
             ui.label(RichText::new("AI command").strong());
-            ui.add(TextEdit::singleline(&mut self.ai_command).code_editor().desired_width(f32::INFINITY));
+            ui.add(
+                TextEdit::singleline(&mut self.ai_command)
+                    .code_editor()
+                    .desired_width(f32::INFINITY),
+            );
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new("Run by the ▶ button. Placeholders: {ticket_path}  {ticket_id}  {project_dir}")
@@ -71,14 +75,22 @@ impl SettingsForm {
             );
             ui.add_space(12.0);
 
-            Grid::new("settings_grid").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                ui.label(RichText::new("Terminal font size").strong());
-                ui.add(DragValue::new(&mut self.terminal_font_size).range(8.0..=32.0).speed(0.2).suffix(" pt"));
-                ui.end_row();
-                ui.label(RichText::new("UI scale").strong());
-                ui.add(Slider::new(&mut self.ui_scale, 0.75..=2.0).step_by(0.05).suffix("×"));
-                ui.end_row();
-            });
+            Grid::new("settings_grid")
+                .num_columns(2)
+                .spacing([16.0, 10.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Terminal font size").strong());
+                    ui.add(
+                        DragValue::new(&mut self.terminal_font_size)
+                            .range(8.0..=32.0)
+                            .speed(0.2)
+                            .suffix(" pt"),
+                    );
+                    ui.end_row();
+                    ui.label(RichText::new("UI scale").strong());
+                    ui.add(Slider::new(&mut self.ui_scale, 0.75..=2.0).step_by(0.05).suffix("×"));
+                    ui.end_row();
+                });
 
             ui.add_space(12.0);
             ui.separator();
@@ -114,7 +126,10 @@ mod tests {
 
     #[test]
     fn blank_shell_means_auto_detect() {
-        let mut form = SettingsForm::new(&Settings { shell: Some("fish".into()), ..Default::default() });
+        let mut form = SettingsForm::new(&Settings {
+            shell: Some("fish".into()),
+            ..Default::default()
+        });
         form.shell = "   ".into();
         form.ai_command = "  my-ai {ticket_path} ".into();
         let s = form.to_settings();

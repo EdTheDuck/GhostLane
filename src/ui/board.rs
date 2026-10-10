@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use egui::text::LayoutJob;
 use egui::{
-    Align, Area, CornerRadius, FontId, Frame, Id, Layout, Margin, Order, Popup, RichText, ScrollArea, Sense,
-    Stroke, Ui, UiBuilder, vec2,
+    Align, Area, CornerRadius, FontId, Frame, Id, Layout, Margin, Order, Popup, RichText, ScrollArea, Sense, Stroke,
+    Ui, UiBuilder, vec2,
 };
 use egui_phosphor::regular as icon;
 
@@ -88,12 +88,15 @@ fn column_ui(
         let query = search.get(&column.folder).map_or("", String::as_str);
         ui.add_space(4.0);
 
-        ScrollArea::vertical().id_salt(("column", col)).auto_shrink(false).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            for t in tickets.iter().filter(|t| t.matches(query)) {
-                card(ui, t, actions);
-            }
-        });
+        ScrollArea::vertical()
+            .id_salt(("column", col))
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                for t in tickets.iter().filter(|t| t.matches(query)) {
+                    card(ui, t, actions);
+                }
+            });
     }
     let response = prepared.allocate_space(ui);
     if let Some(payload) = response.dnd_hover_payload::<DragTicket>() {
@@ -103,22 +106,35 @@ fn column_ui(
         }
     }
     if let Some(payload) = response.dnd_release_payload::<DragTicket>() {
-        actions.push(Action::MoveTicket { id: payload.0, to_col: col });
+        actions.push(Action::MoveTicket {
+            id: payload.0,
+            to_col: col,
+        });
     }
     prepared.paint(ui);
 }
 
 fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
     ui.label(RichText::new("Sort by").color(theme::TEXT_MUTED));
-    for (by, label) in [(SortBy::Id, "ID"), (SortBy::Priority, "Priority"), (SortBy::Title, "Title")] {
+    for (by, label) in [
+        (SortBy::Id, "ID"),
+        (SortBy::Priority, "Priority"),
+        (SortBy::Title, "Title"),
+    ] {
         if ui.radio(sort.by == by, label).clicked() {
-            actions.push(Action::SetSort { col, sort: Sort { by, ..sort } });
+            actions.push(Action::SetSort {
+                col,
+                sort: Sort { by, ..sort },
+            });
         }
     }
     ui.separator();
     for (dir, label) in [(SortDir::Asc, "Ascending"), (SortDir::Desc, "Descending")] {
         if ui.radio(sort.dir == dir, label).clicked() {
-            actions.push(Action::SetSort { col, sort: Sort { dir, ..sort } });
+            actions.push(Action::SetSort {
+                col,
+                sort: Sort { dir, ..sort },
+            });
         }
     }
 }
@@ -129,7 +145,11 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
         .scope_builder(builder, |ui| {
             ui.style_mut().interaction.selectable_labels = false;
             let r = ui.response();
-            let fill = if r.hovered() || r.dragged() { theme::CARD_HOVER } else { theme::CARD };
+            let fill = if r.hovered() || r.dragged() {
+                theme::CARD_HOVER
+            } else {
+                theme::CARD
+            };
             let alpha = if r.dragged() { 0.4 } else { 1.0 };
             ui.set_opacity(alpha);
             Frame::new()
@@ -156,7 +176,10 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
         if ui.button(format!("{}  Duplicate Ticket", icon::COPY)).clicked() {
             actions.push(Action::DuplicateTicket(t.id));
         }
-        if ui.button(RichText::new(format!("{}  Delete Ticket", icon::TRASH)).color(theme::DANGER)).clicked() {
+        if ui
+            .button(RichText::new(format!("{}  Delete Ticket", icon::TRASH)).color(theme::DANGER))
+            .clicked()
+        {
             actions.push(Action::AskDelete(t.id));
         }
     });
@@ -179,7 +202,10 @@ fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
         })
         .response
         .rect;
-    let play = egui::Rect::from_center_size(egui::pos2(text_rect.right() + 16.0, text_rect.center().y), vec2(26.0, 26.0));
+    let play = egui::Rect::from_center_size(
+        egui::pos2(text_rect.right() + 16.0, text_rect.center().y),
+        vec2(26.0, 26.0),
+    );
     let btn = egui::Button::new(RichText::new(icon::PLAY).size(16.0).color(theme::ACCENT)).frame_when_inactive(false);
     if ui.put(play, btn).on_hover_text("Complete task with AI").clicked() {
         actions.push(Action::RunAi(t.id));
@@ -188,14 +214,21 @@ fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
 
 /// Title wrapped to at most two lines, then an ellipsis.
 fn title_job(ui: &Ui, title: &str, width: f32) -> LayoutJob {
-    let mut job = LayoutJob::simple(title.to_owned(), FontId::proportional(14.0), ui.visuals().text_color(), width);
+    let mut job = LayoutJob::simple(
+        title.to_owned(),
+        FontId::proportional(14.0),
+        ui.visuals().text_color(),
+        width,
+    );
     job.wrap.max_rows = 2;
     job.wrap.break_anywhere = false;
     job
 }
 
 fn drag_preview(ui: &Ui, t: &Ticket) {
-    let Some(pos) = ui.ctx().pointer_interact_pos() else { return };
+    let Some(pos) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
     Area::new(Id::new("ticket_drag_preview"))
         .order(Order::Tooltip)
         .fixed_pos(pos + vec2(12.0, 8.0))
@@ -227,8 +260,19 @@ mod tests {
 
     fn harness(dir: &std::path::Path) -> Harness<'static, State> {
         let mut p = Project::create(dir, "P", &["To Do".into(), "Done".into()]).unwrap();
-        p.add_ticket(0, Ticket { title: "Hello".into(), ..Default::default() }).unwrap();
-        let op = OpenProject { path: p.ghost_path.clone(), project: Ok(p), search: HashMap::new() };
+        p.add_ticket(
+            0,
+            Ticket {
+                title: "Hello".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let op = OpenProject {
+            path: p.ghost_path.clone(),
+            project: Ok(p),
+            search: HashMap::new(),
+        };
         let mut h = Harness::new_ui_state(|ui, (op, actions): &mut State| show(ui, op, actions), (op, Vec::new()));
         h.set_size(vec2(1000.0, 600.0));
         h.run();
@@ -279,6 +323,11 @@ mod tests {
         }
         h.drop_at(to);
         h.run();
-        assert!(h.state().1.iter().any(|a| matches!(a, Action::MoveTicket { id: 1, to_col: 1 })));
+        assert!(
+            h.state()
+                .1
+                .iter()
+                .any(|a| matches!(a, Action::MoveTicket { id: 1, to_col: 1 }))
+        );
     }
 }
