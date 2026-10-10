@@ -4,38 +4,115 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use egui_term::{BackendCommand, BackendSettings, ColorPalette, PtyEvent, TerminalBackend, TerminalTheme};
 
-/// Characters that would let a substituted value break out of the command.
-const UNSAFE: &[char] = &['"', '\'', '`', '$', ';', '&', '|', '<', '>', '\n', '\r'];
+/// An AI coding CLI the play button can hand a ticket to.
+pub struct AiCli {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub program: &'static str,
+    /// Flag that starts an interactive session with an initial prompt; `None` = positional prompt.
+    pub prompt_flag: Option<&'static str>,
+}
 
-/// Fills `{ticket_path}`, `{ticket_id}` and `{project_dir}` in the AI command template.
-/// Values are refused rather than escaped, since the shell may be PowerShell, cmd or POSIX.
+pub const DEFAULT_CLI: &str = "claude";
+
+pub const AI_CLIS: [AiCli; 7] = [
+    AiCli {
+        id: "claude",
+        name: "Claude Code",
+        program: "claude",
+        prompt_flag: None,
+    },
+    AiCli {
+        id: "codex",
+        name: "OpenAI Codex",
+        program: "codex",
+        prompt_flag: None,
+    },
+    AiCli {
+        id: "gemini",
+        name: "Gemini CLI",
+        program: "gemini",
+        prompt_flag: Some("-i"),
+    },
+    AiCli {
+        id: "copilot",
+        name: "GitHub Copilot CLI",
+        program: "copilot",
+        prompt_flag: Some("-i"),
+    },
+    AiCli {
+        id: "cursor",
+        name: "Cursor",
+        program: "cursor-agent",
+        prompt_flag: None,
+    },
+    AiCli {
+        id: "opencode",
+        name: "opencode",
+        program: "opencode",
+        prompt_flag: Some("--prompt"),
+    },
+    AiCli {
+        id: "aider",
+        name: "Aider",
+        program: "aider",
+        prompt_flag: Some("--message"),
+    },
+];
+
+pub fn ai_cli(id: &str) -> Option<&'static AiCli> {
+    AI_CLIS.iter().find(|c| c.id == id)
+}
+
+/// IDs of the AI CLIs found on PATH; Claude Code when none are.
+pub fn detect_ai_clis() -> Vec<String> {
+    let found: Vec<String> = AI_CLIS
+        .iter()
+        .filter(|c| which::which(c.program).is_ok())
+        .map(|c| c.id.to_string())
+        .collect();
+    if found.is_empty() {
+        vec![DEFAULT_CLI.to_string()]
+    } else {
+        found
+    }
+}
+
+/// Quotes one argument for the shell that will run it.
+fn quote(shell: &str, arg: &str) -> String {
+    let name = Path::new(shell)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match name.as_str() {
+        // ponytail: double quotes are dropped for PowerShell/cmd; Windows PowerShell 5.1 mangles them in native args.
+        "pwsh" | "powershell" => format!("'{}'", arg.replace('"', "").replace('\'', "''")),
+        "cmd" => format!("\"{}\"", arg.replace(['"', '%'], "")),
+        _ => format!("'{}'", arg.replace('\'', r"'\''")),
+    }
+}
+
+/// `cli`'s command with the prompt template filled in (`{ticket_path}`, `{ticket_id}`, `{project_dir}`)
+/// and quoted as a single argument for `shell`.
 pub fn build_ai_command(
-    template: &str,
+    cli: &AiCli,
+    prompt: &str,
     ticket_path: &Path,
     ticket_id: &str,
     project_dir: &Path,
+    shell: &str,
 ) -> Result<String, String> {
-    let values = [
-        ("{ticket_path}", ticket_path.display().to_string()),
-        ("{ticket_id}", ticket_id.to_string()),
-        ("{project_dir}", project_dir.display().to_string()),
-    ];
-    let mut cmd = template.trim().to_string();
-    if cmd.is_empty() {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
         return Err("Set an AI command in Settings first".into());
     }
-    for (key, value) in values {
-        if !cmd.contains(key) {
-            continue;
-        }
-        if value.contains(UNSAFE) {
-            return Err(format!(
-                "Not running the AI command: {key} contains characters that aren't safe in a shell command ({value})"
-            ));
-        }
-        cmd = cmd.replace(key, &value);
-    }
-    Ok(cmd)
+    let filled = prompt
+        .replace("{ticket_path}", &ticket_path.display().to_string())
+        .replace("{ticket_id}", ticket_id)
+        .replace("{project_dir}", &project_dir.display().to_string())
+        .replace(['\n', '\r'], " ");
+    let flag = cli.prompt_flag.map(|f| format!("{f} ")).unwrap_or_default();
+    Ok(format!("{} {flag}{}", cli.program, quote(shell, &filled)))
 }
 
 /// Shell program and arguments. `custom` wins when set.
@@ -154,24 +231,46 @@ impl Session {
 mod tests {
     use super::*;
 
-    #[test]
-    fn substitutes_placeholders() {
-        let cmd = build_ai_command(
-            "claude \"Do {ticket_id} at {ticket_path} in {project_dir}\"",
-            Path::new("/p/tickets/to_do/00007.md"),
-            "00007",
-            Path::new("/p"),
-        )
-        .unwrap();
-        assert_eq!(cmd, "claude \"Do 00007 at /p/tickets/to_do/00007.md in /p\"");
+    fn claude() -> &'static AiCli {
+        ai_cli("claude").unwrap()
     }
 
     #[test]
-    fn refuses_unsafe_values() {
-        let bad = Path::new("/tmp/x\"; rm -rf ~; \"/00001.md");
-        assert!(build_ai_command("run {ticket_path}", bad, "00001", Path::new("/tmp")).is_err());
-        assert!(build_ai_command("run {ticket_id}", Path::new("/a$b"), "1", Path::new("/")).is_ok()); // unused placeholder
-        assert!(build_ai_command("  ", Path::new("/a"), "1", Path::new("/")).is_err());
+    fn builds_command_per_cli_and_shell() {
+        let path = Path::new("/p/tickets/to_do/00007.md");
+        let prompt = "Do {ticket_id} at {ticket_path} in {project_dir}";
+        let posix = build_ai_command(claude(), prompt, path, "00007", Path::new("/p"), "/bin/zsh").unwrap();
+        assert_eq!(posix, "claude 'Do 00007 at /p/tickets/to_do/00007.md in /p'");
+        let gemini = build_ai_command(ai_cli("gemini").unwrap(), "Go", path, "1", Path::new("/p"), "/bin/bash");
+        assert_eq!(gemini.unwrap(), "gemini -i 'Go'");
+        let ps = build_ai_command(
+            claude(),
+            "it's {ticket_id}",
+            path,
+            "7",
+            Path::new("/p"),
+            r"C:\pwsh\pwsh.exe",
+        );
+        assert_eq!(ps.unwrap(), "claude 'it''s 7'");
+        let cmd = build_ai_command(claude(), "say \"%PATH%\"", path, "7", Path::new("/p"), "cmd.exe");
+        assert_eq!(cmd.unwrap(), "claude \"say PATH\"");
+        assert!(build_ai_command(claude(), "  ", path, "1", Path::new("/p"), "/bin/sh").is_err());
+    }
+
+    #[test]
+    fn hostile_paths_stay_inside_the_quotes() {
+        let bad = Path::new("/tmp/x'; rm -rf ~; echo '/00001.md");
+        let posix = build_ai_command(claude(), "{ticket_path}", bad, "1", Path::new("/tmp"), "/bin/bash").unwrap();
+        assert_eq!(posix, r"claude '/tmp/x'\''; rm -rf ~; echo '\''/00001.md'");
+        let ps = build_ai_command(claude(), "{ticket_path}", bad, "1", Path::new("/tmp"), "powershell.exe").unwrap();
+        assert_eq!(ps, "claude '/tmp/x''; rm -rf ~; echo ''/00001.md'");
+    }
+
+    #[test]
+    fn detection_never_comes_back_empty() {
+        let found = detect_ai_clis();
+        assert!(!found.is_empty());
+        assert!(found.iter().all(|id| ai_cli(id).is_some()));
     }
 
     #[test]

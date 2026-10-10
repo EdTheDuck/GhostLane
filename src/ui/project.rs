@@ -35,6 +35,9 @@ pub struct ProjectForm {
     rows: Vec<ColumnRow>,
     removed: Vec<Removed>,
     next_key: u64,
+    /// AI CLI id for the play button, chosen from `cli_options`.
+    ai_cli: String,
+    cli_options: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -44,17 +47,20 @@ pub enum ProjectOutcome {
         dir: PathBuf,
         name: String,
         columns: Vec<String>,
+        ai_cli: String,
     },
     Save {
         name: String,
         edits: Vec<ColumnEdit>,
         targets: HashMap<String, usize>,
+        ai_cli: String,
     },
     OpenExisting(PathBuf),
 }
 
 impl ProjectForm {
-    pub fn new_project() -> Self {
+    /// `clis`: AI CLI ids ticked in Settings (never empty).
+    pub fn new_project(clis: Vec<String>) -> Self {
         let rows = DEFAULT_COLUMNS
             .iter()
             .enumerate()
@@ -72,11 +78,18 @@ impl ProjectForm {
             rows,
             removed: Vec::new(),
             next_key: DEFAULT_COLUMNS.len() as u64,
+            ai_cli: clis[0].clone(),
+            cli_options: clis,
             error: None,
         }
     }
 
-    pub fn edit(p: &Project) -> Self {
+    pub fn edit(p: &Project, mut clis: Vec<String>) -> Self {
+        let ai_cli = p.meta.ai_cli.clone().unwrap_or_else(|| clis[0].clone());
+        // Keep the project's current choice selectable even if it was unticked in Settings.
+        if !clis.contains(&ai_cli) {
+            clis.push(ai_cli.clone());
+        }
         let rows: Vec<ColumnRow> = p
             .meta
             .columns
@@ -96,6 +109,8 @@ impl ProjectForm {
             next_key: rows.len() as u64,
             rows,
             removed: Vec::new(),
+            ai_cli,
+            cli_options: clis,
             error: None,
         }
     }
@@ -136,6 +151,20 @@ impl ProjectForm {
                 self.location_ui(ui, &mut outcome);
                 ui.add_space(8.0);
             }
+
+            ui.horizontal(|ui| {
+                ui.label("AI CLI");
+                let name = |id: &str| crate::terminal::ai_cli(id).map_or(id.to_string(), |c| c.name.to_string());
+                let combo = ComboBox::from_id_salt("project_ai_cli")
+                    .selected_text(name(&self.ai_cli))
+                    .show_ui(ui, |ui| {
+                        for id in &self.cli_options {
+                            ui.selectable_value(&mut self.ai_cli, id.clone(), name(id));
+                        }
+                    });
+                super::pointer(combo.response).on_hover_text("Used by the ▶ button. Tick more tools in Settings.");
+            });
+            ui.add_space(8.0);
 
             ui.horizontal(|ui| {
                 ui.label("Columns");
@@ -316,6 +345,7 @@ impl ProjectForm {
                 dir: self.location.clone().expect("validated"),
                 name,
                 columns: self.rows.iter().map(|r| r.name.trim().to_string()).collect(),
+                ai_cli: self.ai_cli.clone(),
             };
         }
         let edits = self
@@ -334,7 +364,12 @@ impl ProjectForm {
                 Some((r.row.orig_folder.clone()?, idx))
             })
             .collect();
-        ProjectOutcome::Save { name, edits, targets }
+        ProjectOutcome::Save {
+            name,
+            edits,
+            targets,
+            ai_cli: self.ai_cli.clone(),
+        }
     }
 }
 

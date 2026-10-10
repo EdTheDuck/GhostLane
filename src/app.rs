@@ -91,8 +91,12 @@ impl App {
         egui_extras::install_image_loaders(ctx);
         theme::apply(ctx);
 
-        let config = AppConfig::load();
-        ctx.set_zoom_factor(config.settings.ui_scale);
+        let mut config = AppConfig::load();
+        if config.settings.ai_clis.is_none() {
+            // First launch: offer the AI CLIs installed on this machine.
+            config.settings.ai_clis = Some(terminal::detect_ai_clis());
+            let _ = config.save();
+        }
         let projects: Vec<OpenProject> = config.open_projects.iter().cloned().map(OpenProject::load).collect();
         let active = config
             .active_project
@@ -273,10 +277,14 @@ impl App {
                     self.toast(format!("Couldn't save sort order: {e}"));
                 }
             }
-            Action::NewProject => self.modal = Some(Modal::Project(ProjectForm::new_project())),
+            Action::NewProject => {
+                let clis = self.config.settings.enabled_clis();
+                self.modal = Some(Modal::Project(ProjectForm::new_project(clis)));
+            }
             Action::EditProject => {
+                let clis = self.config.settings.enabled_clis();
                 if let Some(p) = self.active_project() {
-                    self.modal = Some(Modal::Project(ProjectForm::edit(p)));
+                    self.modal = Some(Modal::Project(ProjectForm::edit(p, clis)));
                 }
             }
             Action::ViewTicket(id) => self.modal = Some(Modal::ViewTicket(id)),
@@ -317,7 +325,17 @@ impl App {
         let Some(p) = self.active_project() else { return };
         let Some((_, t)) = self.find_ticket(id) else { return };
         let (key, root, mut t) = (p.ghost_path.clone(), p.root.clone(), t.clone());
-        let cmd = match terminal::build_ai_command(&self.config.settings.ai_command, &t.path, &t.id_str(), &root) {
+        let settings = &self.config.settings;
+        let cli_id = p
+            .meta
+            .ai_cli
+            .clone()
+            .unwrap_or_else(|| settings.enabled_clis()[0].clone());
+        let Some(cli) = terminal::ai_cli(&cli_id) else {
+            return self.toast(format!("Unknown AI CLI \"{cli_id}\"; pick one in the project settings"));
+        };
+        let shell = terminal::detect_shell(settings.shell.as_deref()).0;
+        let cmd = match terminal::build_ai_command(cli, &settings.ai_prompt, &t.path, &t.id_str(), &root, &shell) {
             Ok(cmd) => cmd,
             Err(e) => return self.toast(e),
         };
@@ -459,7 +477,6 @@ impl App {
             Some(Modal::Settings(form)) => match form.show(ctx) {
                 Some(SettingsOutcome::Save(settings)) => {
                     self.modal = None;
-                    ctx.set_zoom_factor(settings.ui_scale);
                     self.config.settings = settings;
                     self.save_config();
                 }
@@ -527,9 +544,18 @@ impl App {
                 self.modal = None;
                 self.open_path(path, ctx);
             }
-            ProjectOutcome::Create { dir, name, columns } => match Project::create(&dir, &name, &columns) {
-                Ok(p) => {
+            ProjectOutcome::Create {
+                dir,
+                name,
+                columns,
+                ai_cli,
+            } => match Project::create(&dir, &name, &columns) {
+                Ok(mut p) => {
                     self.modal = None;
+                    p.meta.ai_cli = Some(ai_cli);
+                    if let Err(e) = p.save_meta() {
+                        self.toast(format!("Couldn't save the project's AI CLI: {e}"));
+                    }
                     self.add_project(p, ctx);
                 }
                 Err(e) => {
@@ -538,9 +564,15 @@ impl App {
                     }
                 }
             },
-            ProjectOutcome::Save { name, edits, targets } => {
+            ProjectOutcome::Save {
+                name,
+                edits,
+                targets,
+                ai_cli,
+            } => {
                 self.modal = None;
                 let Some(p) = self.active_project_mut() else { return };
+                p.meta.ai_cli = Some(ai_cli);
                 if let Err(e) = p.apply_columns(&name, &edits, &targets) {
                     self.toast(format!("Couldn't update project: {e}"));
                     self.reload_active();

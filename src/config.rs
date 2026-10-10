@@ -5,25 +5,37 @@ use std::path::PathBuf;
 
 use crate::ticket::write_atomic;
 
-pub const DEFAULT_AI_COMMAND: &str = "claude \"Complete the ticket at {ticket_path}\"";
+pub const DEFAULT_AI_PROMPT: &str = "Complete the ticket at {ticket_path}";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub ai_command: String,
+    /// Prompt handed to the project's AI CLI by the play button.
+    pub ai_prompt: String,
+    /// AI CLI ids offered to projects. `None` until detected on first launch.
+    pub ai_clis: Option<Vec<String>>,
     /// `None` = auto-detect.
     pub shell: Option<String>,
     pub terminal_font_size: f32,
-    pub ui_scale: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            ai_command: DEFAULT_AI_COMMAND.into(),
+            ai_prompt: DEFAULT_AI_PROMPT.into(),
+            ai_clis: None,
             shell: None,
             terminal_font_size: 13.0,
-            ui_scale: 1.0,
+        }
+    }
+}
+
+impl Settings {
+    /// Ticked AI CLIs, never empty.
+    pub fn enabled_clis(&self) -> Vec<String> {
+        match &self.ai_clis {
+            Some(ids) if !ids.is_empty() => ids.clone(),
+            _ => vec![crate::terminal::DEFAULT_CLI.to_string()],
         }
     }
 }
@@ -100,10 +112,16 @@ mod tests {
     }
 
     #[test]
-    fn partial_yaml_fills_defaults() {
-        let cfg: AppConfig = serde_yaml_ng::from_str("terminal_collapsed: true\nsettings:\n  ui_scale: 1.5\n").unwrap();
+    fn partial_yaml_fills_defaults_and_ignores_old_keys() {
+        let yaml = "terminal_collapsed: true
+settings:
+  ui_scale: 1.5
+  ai_command: claude x
+";
+        let cfg: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.terminal_collapsed);
-        assert_eq!(cfg.settings.ui_scale, 1.5);
-        assert_eq!(cfg.settings.ai_command, DEFAULT_AI_COMMAND);
+        assert_eq!(cfg.settings.ai_prompt, DEFAULT_AI_PROMPT);
+        assert_eq!(cfg.settings.ai_clis, None);
+        assert_eq!(cfg.settings.enabled_clis(), ["claude"]);
     }
 }

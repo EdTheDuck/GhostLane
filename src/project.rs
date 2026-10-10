@@ -53,6 +53,9 @@ pub struct GhostFile {
     pub next_ticket_id: u32,
     #[serde(default)]
     pub columns: Vec<Column>,
+    /// AI CLI id the play button uses for this project (see `terminal::AI_CLIS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_cli: Option<String>,
 }
 
 /// A column as edited in the project modal. `orig_folder` links it to an existing column.
@@ -160,6 +163,7 @@ impl Project {
             name: name.to_string(),
             next_ticket_id: 1,
             columns,
+            ai_cli: None,
         };
         let ghost_path = dir.join(format!("{slug}.ghost"));
         let p = Project {
@@ -397,8 +401,12 @@ mod tests {
         assert!(d.path().join("my_project.ghost").is_file());
         assert!(d.path().join("tickets/ready_for_test").is_dir());
         assert!(Project::create(d.path(), "Other", &s(&["A"])).is_err());
+        let mut p = p;
+        p.meta.ai_cli = Some("codex".into());
+        p.save_meta().unwrap();
         let back = Project::load(&p.ghost_path).unwrap();
         assert_eq!(back.meta, p.meta);
+        assert_eq!(back.meta.ai_cli.as_deref(), Some("codex"));
         assert!(back.root.is_absolute());
         assert_eq!(back.root, d.path());
     }
