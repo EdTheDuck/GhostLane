@@ -15,6 +15,7 @@ use crate::terminal::{self, Terminals};
 use crate::theme;
 use crate::ticket::Ticket;
 use crate::ui::project::{ProjectForm, ProjectOutcome};
+use crate::ui::settings::{SettingsForm, SettingsOutcome};
 use crate::ui::ticket::{self as ticket_ui, FormMode, FormOutcome, TicketForm, ViewOutcome};
 use crate::ui::{self, accent_button, icon_button};
 
@@ -61,6 +62,7 @@ pub enum Modal {
     ViewTicket(u32),
     EditTicket(TicketForm),
     ConfirmDelete(u32),
+    Settings(SettingsForm),
 }
 
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
@@ -291,7 +293,7 @@ impl App {
             }
             Action::AskDelete(id) => self.modal = Some(Modal::ConfirmDelete(id)),
             Action::RunAi(id) => self.run_ai(id, ctx),
-            Action::OpenSettings => {}
+            Action::OpenSettings => self.modal = Some(Modal::Settings(SettingsForm::new(&self.config.settings))),
         }
     }
 
@@ -414,6 +416,16 @@ impl App {
             Some(Modal::EditTicket(form)) => match form.show(ctx, &mut self.md_cache) {
                 Some(FormOutcome::Close) => self.modal = None,
                 Some(FormOutcome::Save) => self.save_ticket_form(),
+                None => {}
+            },
+            Some(Modal::Settings(form)) => match form.show(ctx) {
+                Some(SettingsOutcome::Save(settings)) => {
+                    self.modal = None;
+                    ctx.set_zoom_factor(settings.ui_scale);
+                    self.config.settings = settings;
+                    self.save_config();
+                }
+                Some(SettingsOutcome::Cancel) => self.modal = None,
                 None => {}
             },
             Some(Modal::ConfirmDelete(id)) => {
