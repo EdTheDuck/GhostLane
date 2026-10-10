@@ -127,6 +127,7 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
     let response = ui
         .scope_builder(builder, |ui| {
+            ui.style_mut().interaction.selectable_labels = false;
             let r = ui.response();
             let fill = if r.hovered() || r.dragged() { theme::CARD_HOVER } else { theme::CARD };
             let alpha = if r.dragged() { 0.4 } else { 1.0 };

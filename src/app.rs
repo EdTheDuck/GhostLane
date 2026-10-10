@@ -4,6 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use egui::{Align, Align2, Area, CornerRadius, Frame, Id, Layout, Margin, Order, Popup, RichText, Ui, vec2};
+use egui_commonmark::CommonMarkCache;
 use egui_phosphor::regular as icon;
 use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
@@ -13,6 +14,7 @@ use crate::project::{Project, Sort};
 use crate::theme;
 use crate::ticket::Ticket;
 use crate::ui::project::{ProjectForm, ProjectOutcome};
+use crate::ui::ticket::{self as ticket_ui, FormMode, FormOutcome, TicketForm, ViewOutcome};
 use crate::ui::{self, accent_button, icon_button};
 
 pub struct OpenProject {
@@ -55,6 +57,9 @@ pub enum Action {
 
 pub enum Modal {
     Project(ProjectForm),
+    ViewTicket(u32),
+    EditTicket(TicketForm),
+    ConfirmDelete(u32),
 }
 
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
@@ -64,6 +69,7 @@ pub struct App {
     pub projects: Vec<OpenProject>,
     pub active: Option<usize>,
     pub modal: Option<Modal>,
+    md_cache: CommonMarkCache,
     toasts: Vec<(String, Instant)>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
@@ -96,6 +102,7 @@ impl App {
             projects,
             active,
             modal: None,
+            md_cache: CommonMarkCache::default(),
             toasts: Vec::new(),
             watcher: None,
             watch_tx,
@@ -254,23 +261,108 @@ impl App {
                     self.modal = Some(Modal::Project(ProjectForm::edit(p)));
                 }
             }
-            Action::OpenSettings
-            | Action::ViewTicket(_)
-            | Action::EditTicket(_)
-            | Action::NewTicket(_)
-            | Action::DuplicateTicket(_)
-            | Action::AskDelete(_)
-            | Action::RunAi(_) => {}
+            Action::ViewTicket(id) => self.modal = Some(Modal::ViewTicket(id)),
+            Action::EditTicket(id) => {
+                if let Some((_, t)) = self.find_ticket(id) {
+                    self.modal = Some(Modal::EditTicket(TicketForm::edit(t)));
+                }
+            }
+            Action::NewTicket(col) => {
+                let Some(p) = self.active_project() else { return };
+                let t = Ticket { id: p.meta.next_ticket_id, ..Default::default() };
+                self.modal = Some(Modal::EditTicket(TicketForm::create(col, t)));
+            }
+            Action::DuplicateTicket(id) => {
+                let Some(next) = self.active_project().map(|p| p.meta.next_ticket_id) else { return };
+                let Some((col, t)) = self.find_ticket(id) else { return };
+                let copy = Ticket {
+                    id: next,
+                    path: PathBuf::new(),
+                    title: format!("Duplicate: {}", t.title),
+                    malformed: false,
+                    ..t.clone()
+                };
+                self.modal = Some(Modal::EditTicket(TicketForm::create(col, copy)));
+            }
+            Action::AskDelete(id) => self.modal = Some(Modal::ConfirmDelete(id)),
+            Action::OpenSettings | Action::RunAi(_) => {}
         }
     }
 
     fn show_modal(&mut self, ctx: &egui::Context) {
-        let outcome = match &mut self.modal {
-            Some(Modal::Project(form)) => form.show(ctx),
-            None => return,
+        match &mut self.modal {
+            None => {}
+            Some(Modal::Project(form)) => {
+                if let Some(outcome) = form.show(ctx) {
+                    self.project_outcome(outcome, ctx);
+                }
+            }
+            Some(Modal::ViewTicket(id)) => {
+                let id = *id;
+                let Some(t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
+                    self.modal = None;
+                    return;
+                };
+                match ticket_ui::view(ctx, &t, &mut self.md_cache) {
+                    Some(ViewOutcome::Close) => self.modal = None,
+                    Some(ViewOutcome::Edit) => self.modal = Some(Modal::EditTicket(TicketForm::edit(&t))),
+                    None => {}
+                }
+            }
+            Some(Modal::EditTicket(form)) => match form.show(ctx, &mut self.md_cache) {
+                Some(FormOutcome::Close) => self.modal = None,
+                Some(FormOutcome::Save) => self.save_ticket_form(),
+                None => {}
+            },
+            Some(Modal::ConfirmDelete(id)) => {
+                let id = *id;
+                let Some(t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
+                    self.modal = None;
+                    return;
+                };
+                let msg = format!("Delete ticket {} – {}?", t.id_str(), t.title);
+                match ticket_ui::confirm(ctx, "delete", &msg, "Cancel", "Delete") {
+                    Some(true) => {
+                        self.modal = None;
+                        match trash::delete(&t.path) {
+                            Ok(()) => self.reload_active(),
+                            Err(e) => self.toast(format!("Couldn't delete {}: {e}", t.id_str())),
+                        }
+                    }
+                    Some(false) => self.modal = None,
+                    None => {}
+                }
+            }
+        }
+    }
+
+    fn save_ticket_form(&mut self) {
+        let Some(Modal::EditTicket(form)) = &self.modal else { return };
+        let (mode, mut ticket) = (form.mode, form.ticket.clone());
+        ticket.title = ticket.title.trim().to_string();
+        let current_path = self.find_ticket(ticket.id).map(|(_, t)| t.path.clone());
+        let Some(p) = self.active_project_mut() else { return };
+        let result = match mode {
+            FormMode::Edit => match current_path {
+                Some(path) => {
+                    ticket.path = path;
+                    ticket.save().and_then(|()| p.rescan()).map(|()| ticket.id)
+                }
+                None => Err(std::io::Error::other("this ticket no longer exists on disk")),
+            },
+            FormMode::Create { col } => {
+                let col = col.min(p.meta.columns.len().saturating_sub(1));
+                p.add_ticket(col, ticket).map(|t| t.id)
+            }
         };
-        if let Some(outcome) = outcome {
-            self.project_outcome(outcome, ctx);
+        match (result, mode) {
+            (Ok(id), FormMode::Edit) => self.modal = Some(Modal::ViewTicket(id)),
+            (Ok(_), FormMode::Create { .. }) => self.modal = None,
+            (Err(e), _) => {
+                if let Some(Modal::EditTicket(form)) = &mut self.modal {
+                    form.error = Some(format!("Couldn't save: {e}"));
+                }
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 pub mod board;
 pub mod project;
+pub mod ticket;
 
 use egui::{Button, Color32, Response, RichText, Ui};
 use egui_phosphor::regular as icon;
