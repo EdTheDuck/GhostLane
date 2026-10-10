@@ -215,3 +215,70 @@ fn drag_preview(ui: &Ui, t: &Ticket) {
                 });
         });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::Project;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    type State = (OpenProject, Vec<Action>);
+
+    fn harness(dir: &std::path::Path) -> Harness<'static, State> {
+        let mut p = Project::create(dir, "P", &["To Do".into(), "Done".into()]).unwrap();
+        p.add_ticket(0, Ticket { title: "Hello".into(), ..Default::default() }).unwrap();
+        let op = OpenProject { path: p.ghost_path.clone(), project: Ok(p), search: HashMap::new() };
+        let mut h = Harness::new_ui_state(|ui, (op, actions): &mut State| show(ui, op, actions), (op, Vec::new()));
+        h.set_size(vec2(1000.0, 600.0));
+        h.run();
+        h
+    }
+
+    #[test]
+    fn clicking_card_opens_ticket() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        h.get_by_label("Hello").click();
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::ViewTicket(1))));
+    }
+
+    #[test]
+    fn play_button_runs_ai() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        h.get_by_label(icon::PLAY).click();
+        h.run();
+        let actions = &h.state().1;
+        assert!(actions.iter().any(|a| matches!(a, Action::RunAi(1))));
+        assert!(!actions.iter().any(|a| matches!(a, Action::ViewTicket(_))));
+    }
+
+    #[test]
+    fn add_button_creates_in_column() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        h.get_all_by_label(icon::PLUS).nth(1).unwrap().click();
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::NewTicket(1))));
+    }
+
+    #[test]
+    fn dragging_card_to_other_column_moves_it() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        let from = h.get_by_label("Hello").rect().center();
+        let to = egui::pos2(from.x + COLUMN_WIDTH + 12.0, from.y + 120.0);
+        h.hover_at(from);
+        h.drag_at(from);
+        h.run();
+        for i in 1..=10 {
+            h.hover_at(from + (to - from) * (i as f32 / 10.0));
+            h.run();
+        }
+        h.drop_at(to);
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::MoveTicket { id: 1, to_col: 1 })));
+    }
+}

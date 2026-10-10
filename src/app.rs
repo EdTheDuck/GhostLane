@@ -11,6 +11,7 @@ use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, ne
 
 use crate::config::AppConfig;
 use crate::project::{Project, Sort};
+use crate::terminal::{self, Terminals};
 use crate::theme;
 use crate::ticket::Ticket;
 use crate::ui::project::{ProjectForm, ProjectOutcome};
@@ -70,6 +71,8 @@ pub struct App {
     pub active: Option<usize>,
     pub modal: Option<Modal>,
     md_cache: CommonMarkCache,
+    terminals: Terminals,
+    terminal_focused: bool,
     toasts: Vec<(String, Instant)>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
@@ -103,6 +106,8 @@ impl App {
             active,
             modal: None,
             md_cache: CommonMarkCache::default(),
+            terminals: Terminals::new(),
+            terminal_focused: false,
             toasts: Vec::new(),
             watcher: None,
             watch_tx,
@@ -285,8 +290,105 @@ impl App {
                 self.modal = Some(Modal::EditTicket(TicketForm::create(col, copy)));
             }
             Action::AskDelete(id) => self.modal = Some(Modal::ConfirmDelete(id)),
-            Action::OpenSettings | Action::RunAi(_) => {}
+            Action::RunAi(id) => self.run_ai(id, ctx),
+            Action::OpenSettings => {}
         }
+    }
+
+    fn run_ai(&mut self, id: u32, ctx: &egui::Context) {
+        let Some(p) = self.active_project() else { return };
+        let Some((_, t)) = self.find_ticket(id) else { return };
+        let (key, root, mut t) = (p.ghost_path.clone(), p.root.clone(), t.clone());
+        let cmd = match terminal::build_ai_command(&self.config.settings.ai_command, &t.path, &t.id_str(), &root) {
+            Ok(cmd) => cmd,
+            Err(e) => return self.toast(e),
+        };
+        if self.config.terminal_collapsed {
+            self.config.terminal_collapsed = false;
+            self.save_config();
+        }
+        let shell = self.config.settings.shell.clone();
+        if self.terminals.get_or_start(&key, &root, shell.as_deref(), ctx).is_ok_and(|s| s.exited) {
+            self.terminals.restart(&key);
+        }
+        match self.terminals.get_or_start(&key, &root, shell.as_deref(), ctx) {
+            Ok(session) => session.run(&cmd),
+            Err(e) => return self.toast(e),
+        }
+        t.run_count += 1;
+        if let Err(e) = t.save() {
+            self.toast(format!("Couldn't update run count for {}: {e}", t.id_str()));
+        }
+        self.reload_active();
+    }
+
+    /// Key and working directory for the terminal: the active project, or the home folder.
+    fn terminal_target(&self) -> (PathBuf, PathBuf) {
+        match self.active_project() {
+            Some(p) => (p.ghost_path.clone(), p.root.clone()),
+            None => {
+                let home = directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()).unwrap_or_default();
+                (PathBuf::new(), home)
+            }
+        }
+    }
+
+    fn terminal_panel(&mut self, ui: &mut Ui) {
+        self.terminals.poll();
+        let collapsed = self.config.terminal_collapsed;
+        let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 6));
+        let panel = if collapsed {
+            egui::Panel::bottom("terminal_collapsed").resizable(false).exact_size(34.0)
+        } else {
+            let max = (ui.available_height() - 160.0).max(120.0);
+            egui::Panel::bottom("terminal").resizable(true).default_size(260.0).size_range(100.0..=max)
+        };
+        let (key, cwd) = self.terminal_target();
+        panel.frame(frame).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (glyph, tip) = if collapsed { (icon::CARET_UP, "Show terminal") } else { (icon::CARET_DOWN, "Hide terminal") };
+                if icon_button(ui, glyph, tip).clicked() {
+                    self.config.terminal_collapsed = !collapsed;
+                    if let Err(e) = self.config.save() {
+                        eprintln!("couldn't save settings: {e}");
+                    }
+                }
+                ui.label(RichText::new(format!("{}  Terminal", icon::TERMINAL_WINDOW)).strong());
+                ui.label(RichText::new(cwd.display().to_string()).small().color(theme::TEXT_MUTED));
+            });
+            if collapsed {
+                return;
+            }
+            let shell = self.config.settings.shell.clone();
+            match self.terminals.get_or_start(&key, &cwd, shell.as_deref(), ui.ctx()) {
+                Ok(session) if session.exited => {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Shell exited.").color(theme::TEXT_MUTED));
+                        if ui.button("Restart shell").clicked() {
+                            self.terminals.restart(&key);
+                        }
+                    });
+                }
+                Ok(session) => {
+                    let font = egui_term::TerminalFont::new(egui_term::FontSettings {
+                        font_type: egui::FontId::monospace(self.config.settings.terminal_font_size),
+                    });
+                    let view = egui_term::TerminalView::new(ui, &mut session.backend)
+                        .set_focus(self.terminal_focused && self.modal.is_none())
+                        .set_font(font)
+                        .set_theme(terminal::theme())
+                        .set_size(ui.available_size());
+                    let response = ui.add(view);
+                    if ui.input(|i| i.pointer.any_pressed()) {
+                        self.terminal_focused = response.contains_pointer();
+                    }
+                }
+                Err(e) => {
+                    ui.label(RichText::new(e).color(theme::DANGER));
+                }
+            }
+        });
     }
 
     fn show_modal(&mut self, ctx: &egui::Context) {
@@ -525,6 +627,7 @@ impl eframe::App for App {
         let mut actions = Vec::new();
 
         self.top_bar(ui, &mut actions);
+        self.terminal_panel(ui);
 
         let central = Frame::new().fill(theme::BG).inner_margin(Margin::same(12));
         egui::CentralPanel::default().frame(central).show(ui, |ui| match self.active {

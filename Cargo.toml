@@ -20,4 +20,5 @@ trash = "5.2.9"
 which = "8.0.6"
 
 [dev-dependencies]
+egui_kittest = "0.35"
 tempfile = "3.27.0"
