@@ -390,11 +390,6 @@ impl App {
                     }
                 }
                 ui.label(RichText::new(format!("{}  Terminal", icon::TERMINAL_WINDOW)).strong());
-                ui.label(
-                    RichText::new(cwd.display().to_string())
-                        .small()
-                        .color(theme::TEXT_MUTED),
-                );
             });
             if collapsed {
                 return;
