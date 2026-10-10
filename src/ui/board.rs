@@ -226,7 +226,7 @@ fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
     );
     let clicked = ui
         .put(slot, |ui: &mut Ui| {
-            super::glyph_button(ui, icon::PLAY, theme::ACCENT, true)
+            super::glyph_button(ui, icon::PLAY, theme::ACCENT, theme::ACCENT, true)
         })
         .on_hover_text("Complete task with AI")
         .clicked();

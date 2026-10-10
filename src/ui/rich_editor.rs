@@ -254,7 +254,9 @@ impl RichEditor {
         ui.horizontal(|ui| {
             let btn = |ui: &mut Ui, glyph: &str, tip: &str, on: bool| {
                 let idle = if on { theme::ACCENT } else { theme::TEXT };
-                glyph_button(ui, glyph, idle, false).on_hover_text(tip).clicked()
+                glyph_button(ui, glyph, idle, theme::ACCENT, false)
+                    .on_hover_text(tip)
+                    .clicked()
             };
             if btn(ui, icon::TEXT_B, "Bold (Ctrl+B)", false) {
                 inline = Some(Flag::Bold);

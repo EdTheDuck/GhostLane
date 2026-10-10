@@ -135,8 +135,15 @@ impl ProjectForm {
         let modal = super::show_modal(ctx, "project_modal", |ui| {
             ui.set_width(540.0);
             let title = if self.editing { "Edit Project" } else { "New Project" };
-            ui.label(RichText::new(title).size(20.0).strong());
-            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).size(20.0).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, icon::X, "Close").clicked() {
+                        outcome = Some(ProjectOutcome::Cancel);
+                    }
+                });
+            });
+            ui.add_space(6.0);
 
             ui.label("Name");
             ui.add(
@@ -166,12 +173,17 @@ impl ProjectForm {
             });
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                ui.label("Columns");
-                ui.label(RichText::new("drag to reorder").color(theme::TEXT_MUTED).small());
-            });
-            self.columns_ui(ui);
-            if ui.button(format!("{}  Add column", icon::PLUS)).clicked() {
+            let add = ui
+                .horizontal(|ui| {
+                    ui.label("Columns");
+                    ui.label(RichText::new("drag to reorder").color(theme::TEXT_MUTED).small());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.button(format!("{}  Add column", icon::PLUS)).clicked()
+                    })
+                    .inner
+                })
+                .inner;
+            if add {
                 self.rows.push(ColumnRow {
                     key: self.next_key,
                     name: "New Column".into(),
@@ -180,6 +192,7 @@ impl ProjectForm {
                 });
                 self.next_key += 1;
             }
+            self.columns_ui(ui);
             self.removed_ui(ui);
 
             ui.add_space(12.0);
@@ -198,9 +211,6 @@ impl ProjectForm {
                     .clicked()
                 {
                     outcome = Some(self.submit());
-                }
-                if ui.button("Cancel").clicked() {
-                    outcome = Some(ProjectOutcome::Cancel);
                 }
             });
         });
@@ -274,7 +284,7 @@ impl ProjectForm {
                         "Remove column"
                     };
                     if ui
-                        .add_enabled_ui(!only_one, |ui| icon_button(ui, icon::TRASH, tip))
+                        .add_enabled_ui(!only_one, |ui| super::danger_icon_button(ui, icon::TRASH, tip))
                         .inner
                         .clicked()
                     {
@@ -378,5 +388,45 @@ fn plural(n: usize, word: &str) -> String {
         format!("1 {word}")
     } else {
         format!("{n} {word}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    fn harness() -> Harness<'static, (ProjectForm, Option<bool>)> {
+        let form = ProjectForm::new_project(vec!["claude".into()]);
+        let mut h = Harness::new_ui_state(
+            |ui, (form, cancelled): &mut (ProjectForm, Option<bool>)| {
+                if let Some(outcome) = form.show(ui.ctx()) {
+                    *cancelled = Some(matches!(outcome, ProjectOutcome::Cancel));
+                }
+            },
+            (form, None),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(egui::vec2(900.0, 1000.0));
+        h.run_steps(3);
+        h
+    }
+
+    #[test]
+    fn x_closes_and_there_is_no_cancel_button() {
+        let mut h = harness();
+        assert!(h.query_by_label("Cancel").is_none());
+        h.get_by_label(icon::X).click();
+        h.run();
+        assert_eq!(h.state().1, Some(true));
+    }
+
+    #[test]
+    fn add_column_appends_a_row() {
+        let mut h = harness();
+        h.get_by_label_contains("Add column").click();
+        h.run();
+        assert_eq!(h.state().0.rows.len(), DEFAULT_COLUMNS.len() + 1);
     }
 }

@@ -59,12 +59,17 @@ pub const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 12);
 
 /// Frameless icon button that shows a frame on hover.
 pub fn icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
-    glyph_button(ui, glyph, theme::TEXT, false).on_hover_text(tooltip)
+    glyph_button(ui, glyph, theme::TEXT, theme::ACCENT, false).on_hover_text(tooltip)
 }
 
-/// Icon-only button: no background or border; the icon turns the accent colour on hover.
+/// Icon button for destructive actions: turns red on hover.
+pub fn danger_icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
+    glyph_button(ui, glyph, theme::TEXT, theme::DANGER, false).on_hover_text(tooltip)
+}
+
+/// Icon-only button: no background or border; the icon turns `hover` colour on hover.
 /// With `fill_on_hover` it also switches to the filled Phosphor glyph.
-pub fn glyph_button(ui: &mut Ui, glyph: &str, idle: Color32, fill_on_hover: bool) -> Response {
+pub fn glyph_button(ui: &mut Ui, glyph: &str, idle: Color32, hover: Color32, fill_on_hover: bool) -> Response {
     let enabled = ui.is_enabled();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, glyph));
@@ -76,7 +81,7 @@ pub fn glyph_button(ui: &mut Ui, glyph: &str, idle: Color32, fill_on_hover: bool
         } else {
             egui::FontFamily::Proportional
         };
-        let color = if hot { theme::ACCENT } else { idle };
+        let color = if hot { hover } else { idle };
         let font = egui::FontId::new(16.0, family);
         ui.painter()
             .text(rect.center(), egui::Align2::CENTER_CENTER, glyph, font, color);
