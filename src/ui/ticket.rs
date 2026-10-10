@@ -143,11 +143,18 @@ impl TicketForm {
                 FormMode::Edit => "Edit Ticket",
                 FormMode::Create { .. } => "New Ticket",
             };
-            ui.label(
-                RichText::new(format!("{heading} - {}", self.ticket.id_str()))
-                    .size(20.0)
-                    .strong(),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{heading} - {}", self.ticket.id_str()))
+                        .size(20.0)
+                        .strong(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, icon::X, "Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
             ui.add_space(4.0);
 
             let t = &mut self.ticket;
@@ -237,9 +244,6 @@ impl TicketForm {
                     {
                         outcome = Some(FormOutcome::Save);
                     }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
                 });
             });
         });
@@ -309,4 +313,34 @@ pub fn confirm(ctx: &egui::Context, id: &str, message: &str, cancel: &str, ok: &
         result = Some(false);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn x_in_header_closes_the_form() {
+        let ticket = Ticket {
+            id: 1,
+            title: "T".into(),
+            ..Default::default()
+        };
+        let state = (TicketForm::edit(&ticket), false);
+        let mut h = Harness::new_ui_state(
+            |ui, (form, closed): &mut (TicketForm, bool)| {
+                *closed |= matches!(form.show(ui.ctx()), Some(FormOutcome::Close));
+            },
+            state,
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 800.0));
+        h.run_steps(3); // modals centre themselves once their size is known
+        assert!(h.query_by_label("Close").is_none(), "no Close button at the bottom");
+        h.get_by_label(icon::X).click();
+        h.run();
+        assert!(h.state().1);
+    }
 }
