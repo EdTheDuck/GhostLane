@@ -81,11 +81,10 @@ pub fn detect_ai_clis() -> Vec<String> {
 
 /// Quotes one argument for the shell that will run it.
 fn quote(shell: &str, arg: &str) -> String {
-    let name = Path::new(shell)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    match name.as_str() {
+    // Split on both separators: a Windows shell path must be recognised whatever OS parses it.
+    let file = shell.rsplit(['/', '\\']).next().unwrap_or(shell).to_lowercase();
+    let name = file.strip_suffix(".exe").unwrap_or(&file);
+    match name {
         // ponytail: double quotes are dropped for PowerShell/cmd; Windows PowerShell 5.1 mangles them in native args.
         "pwsh" | "powershell" => format!("'{}'", arg.replace('"', "").replace('\'', "''")),
         "cmd" => format!("\"{}\"", arg.replace(['"', '%'], "")),
@@ -345,6 +344,8 @@ mod tests {
         assert_eq!(ps.unwrap(), "claude 'it''s 7'");
         let cmd = build_ai_command(claude(), "say \"%PATH%\"", path, "7", Path::new("/p"), "cmd.exe");
         assert_eq!(cmd.unwrap(), "claude \"say PATH\"");
+        let pwsh_unix = build_ai_command(claude(), "it's", path, "7", Path::new("/p"), "/usr/bin/pwsh");
+        assert_eq!(pwsh_unix.unwrap(), "claude 'it''s'");
         assert!(build_ai_command(claude(), "  ", path, "1", Path::new("/p"), "/bin/sh").is_err());
     }
 
