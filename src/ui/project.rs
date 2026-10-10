@@ -291,7 +291,7 @@ impl ProjectForm {
                             ui.selectable_value(&mut r.target, Some(row.key), &row.name);
                         }
                     });
-                if ui.small_button("Restore").clicked() {
+                if ui.button("Restore").clicked() {
                     restore = Some(i);
                 }
             });

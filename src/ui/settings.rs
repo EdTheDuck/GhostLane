@@ -49,7 +49,7 @@ impl SettingsForm {
                         .small()
                         .color(theme::TEXT_MUTED),
                 );
-                if ui.small_button("Reset").clicked() {
+                if ui.button("Reset").clicked() {
                     self.ai_command = DEFAULT_AI_COMMAND.into();
                 }
             });

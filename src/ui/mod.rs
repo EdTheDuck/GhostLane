@@ -11,16 +11,16 @@ use crate::ticket::Priority;
 
 /// Frameless icon button that shows a frame on hover.
 pub fn icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
-    ui.add(Button::new(RichText::new(glyph).size(16.0)).frame_when_inactive(false))
-        .on_hover_text(tooltip)
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(7.0, 4.0);
+        ui.add(Button::new(RichText::new(glyph).size(16.0)).frame_when_inactive(false))
+    })
+    .inner
+    .on_hover_text(tooltip)
 }
 
 pub fn accent_button(ui: &mut Ui, text: &str) -> Response {
-    ui.add(
-        Button::new(RichText::new(text).color(theme::ACCENT_TEXT).strong())
-            .fill(theme::ACCENT)
-            .min_size(egui::vec2(0.0, 28.0)),
-    )
+    ui.add(Button::new(RichText::new(text).color(theme::ACCENT_TEXT).strong()).fill(theme::ACCENT))
 }
 
 pub fn priority_color(p: Priority) -> Color32 {

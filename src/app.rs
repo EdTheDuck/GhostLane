@@ -94,6 +94,11 @@ impl App {
         ctx.set_fonts(fonts);
         ctx.set_theme(egui::Theme::Dark);
         ctx.set_visuals_of(egui::Theme::Dark, theme::visuals());
+        ctx.all_styles_mut(|s| {
+            // Roomy, uniform buttons: text never touches the edge and all buttons share one height.
+            s.spacing.button_padding = vec2(12.0, 6.0);
+            s.spacing.interact_size.y = 30.0;
+        });
 
         let config = AppConfig::load();
         ctx.set_zoom_factor(config.settings.ui_scale);
@@ -562,9 +567,19 @@ impl App {
                 if !self.projects.is_empty() {
                     self.project_dropdown(ui, actions);
                 }
+                if self.active_project().is_some() && icon_button(ui, icon::PENCIL_SIMPLE, "Edit project").clicked() {
+                    actions.push(Action::EditProject);
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if icon_button(ui, icon::GEAR, "Settings").clicked() {
                         actions.push(Action::OpenSettings);
+                    }
+                    ui.add_space(8.0);
+                    if accent_button(ui, &format!("{}  New Project", icon::PLUS)).clicked() {
+                        actions.push(Action::NewProject);
+                    }
+                    if ui.button(format!("{}  Open Project", icon::FOLDER_OPEN)).clicked() {
+                        actions.push(Action::OpenProjectDialog);
                     }
                 });
             });
@@ -591,21 +606,6 @@ impl App {
                     actions.push(Action::SwitchProject(i));
                 }
             }
-            if self.active.is_some() && ui.button(format!("{}  Edit Project", icon::PENCIL_SIMPLE)).clicked() {
-                actions.push(Action::EditProject);
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Button::new(format!("{}  Open Project", icon::FOLDER_OPEN)).min_size(vec2(0.0, 28.0)))
-                    .clicked()
-                {
-                    actions.push(Action::OpenProjectDialog);
-                }
-                if accent_button(ui, &format!("{}  New Project", icon::PLUS)).clicked() {
-                    actions.push(Action::NewProject);
-                }
-            });
         });
     }
 
