@@ -12,6 +12,7 @@ use crate::config::AppConfig;
 use crate::project::{Project, Sort};
 use crate::theme;
 use crate::ticket::Ticket;
+use crate::ui::project::{ProjectForm, ProjectOutcome};
 use crate::ui::{self, accent_button, icon_button};
 
 pub struct OpenProject {
@@ -52,7 +53,9 @@ pub enum Action {
     RunAi(u32),
 }
 
-pub enum Modal {}
+pub enum Modal {
+    Project(ProjectForm),
+}
 
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
 
@@ -214,6 +217,10 @@ impl App {
         let Some(path) = rfd::FileDialog::new().add_filter("GhostLane project", &["ghost"]).pick_file() else {
             return;
         };
+        self.open_path(path, ctx);
+    }
+
+    fn open_path(&mut self, path: PathBuf, ctx: &egui::Context) {
         let path = std::fs::canonicalize(&path).map(strip_unc).unwrap_or(path);
         match Project::load(&path) {
             Ok(p) => self.add_project(p, ctx),
@@ -241,15 +248,58 @@ impl App {
                     self.toast(format!("Couldn't save sort order: {e}"));
                 }
             }
-            Action::NewProject
-            | Action::EditProject
-            | Action::OpenSettings
+            Action::NewProject => self.modal = Some(Modal::Project(ProjectForm::new_project())),
+            Action::EditProject => {
+                if let Some(p) = self.active_project() {
+                    self.modal = Some(Modal::Project(ProjectForm::edit(p)));
+                }
+            }
+            Action::OpenSettings
             | Action::ViewTicket(_)
             | Action::EditTicket(_)
             | Action::NewTicket(_)
             | Action::DuplicateTicket(_)
             | Action::AskDelete(_)
             | Action::RunAi(_) => {}
+        }
+    }
+
+    fn show_modal(&mut self, ctx: &egui::Context) {
+        let outcome = match &mut self.modal {
+            Some(Modal::Project(form)) => form.show(ctx),
+            None => return,
+        };
+        if let Some(outcome) = outcome {
+            self.project_outcome(outcome, ctx);
+        }
+    }
+
+    fn project_outcome(&mut self, outcome: ProjectOutcome, ctx: &egui::Context) {
+        match outcome {
+            ProjectOutcome::Cancel => self.modal = None,
+            ProjectOutcome::OpenExisting(path) => {
+                self.modal = None;
+                self.open_path(path, ctx);
+            }
+            ProjectOutcome::Create { dir, name, columns } => match Project::create(&dir, &name, &columns) {
+                Ok(p) => {
+                    self.modal = None;
+                    self.add_project(p, ctx);
+                }
+                Err(e) => {
+                    if let Some(Modal::Project(form)) = &mut self.modal {
+                        form.error = Some(e.to_string());
+                    }
+                }
+            },
+            ProjectOutcome::Save { name, edits, targets } => {
+                self.modal = None;
+                let Some(p) = self.active_project_mut() else { return };
+                if let Err(e) = p.apply_columns(&name, &edits, &targets) {
+                    self.toast(format!("Couldn't update project: {e}"));
+                    self.reload_active();
+                }
+            }
         }
     }
 
@@ -297,7 +347,7 @@ impl App {
             }
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button(format!("{}  Open Project", icon::FOLDER_OPEN)).clicked() {
+                if ui.add(egui::Button::new(format!("{}  Open Project", icon::FOLDER_OPEN)).min_size(vec2(0.0, 28.0))).clicked() {
                     actions.push(Action::OpenProjectDialog);
                 }
                 if accent_button(ui, &format!("{}  New Project", icon::PLUS)).clicked() {
@@ -393,6 +443,7 @@ impl eframe::App for App {
         for action in actions {
             self.apply(action, &ctx);
         }
+        self.show_modal(&ctx);
         self.show_toasts(&ctx);
     }
 }
