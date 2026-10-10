@@ -17,6 +17,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 trash = "5.2.9"
 which = "8.0.6"
 

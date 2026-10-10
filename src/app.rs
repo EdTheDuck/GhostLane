@@ -321,39 +321,55 @@ impl App {
         }
     }
 
+    /// The AI CLI a project's play button and terminal use.
+    fn project_cli(&self, p: &Project) -> Result<&'static terminal::AiCli, String> {
+        let id = p
+            .meta
+            .ai_cli
+            .clone()
+            .unwrap_or_else(|| self.config.settings.enabled_clis()[0].clone());
+        terminal::ai_cli(&id).ok_or_else(|| format!("Unknown AI CLI \"{id}\"; pick one in the project settings"))
+    }
+
     fn run_ai(&mut self, id: u32, ctx: &egui::Context) {
         let Some(p) = self.active_project() else { return };
         let Some((_, t)) = self.find_ticket(id) else { return };
         let (key, root, mut t) = (p.ghost_path.clone(), p.root.clone(), t.clone());
-        let settings = &self.config.settings;
-        let cli_id = p
-            .meta
-            .ai_cli
-            .clone()
-            .unwrap_or_else(|| settings.enabled_clis()[0].clone());
-        let Some(cli) = terminal::ai_cli(&cli_id) else {
-            return self.toast(format!("Unknown AI CLI \"{cli_id}\"; pick one in the project settings"));
-        };
-        let shell = terminal::detect_shell(settings.shell.as_deref()).0;
-        let cmd = match terminal::build_ai_command(cli, &settings.ai_prompt, &t.path, &t.id_str(), &root, &shell) {
-            Ok(cmd) => cmd,
+        let cli = match self.project_cli(p) {
+            Ok(cli) => cli,
             Err(e) => return self.toast(e),
         };
+        let settings = &self.config.settings;
+        let prompt = match terminal::fill_prompt(&settings.ai_prompt, &t.path, &t.id_str(), &root) {
+            Ok(prompt) => prompt,
+            Err(e) => return self.toast(e),
+        };
+        let shell = settings.shell.clone();
+        let command = terminal::cli_command(cli, &prompt, &terminal::detect_shell(shell.as_deref()).0);
         if self.config.terminal_collapsed {
             self.config.terminal_collapsed = false;
             self.save_config();
         }
-        let shell = self.config.settings.shell.clone();
-        if self
-            .terminals
-            .get_or_start(&key, &root, shell.as_deref(), ctx)
-            .is_ok_and(|s| s.exited)
-        {
+        if !self.terminals.is_live(&key) {
+            // No shell yet (or it exited): start one that launches the CLI with this prompt.
             self.terminals.restart(&key);
-        }
-        match self.terminals.get_or_start(&key, &root, shell.as_deref(), ctx) {
-            Ok(session) => session.run(&cmd),
-            Err(e) => return self.toast(e),
+            if let Err(e) = self
+                .terminals
+                .get_or_start(&key, &root, shell.as_deref(), Some(&command), ctx)
+            {
+                return self.toast(e);
+            }
+        } else {
+            let session = self
+                .terminals
+                .get_or_start(&key, &root, shell.as_deref(), None, ctx)
+                .expect("session is live");
+            if terminal::runs_program(session.shell_pid(), cli.program) {
+                // The CLI is already open in the terminal: hand it the prompt directly.
+                session.type_prompt(&prompt, ctx);
+            } else {
+                session.run(&command);
+            }
         }
         t.run_count += 1;
         if let Err(e) = t.save() {
@@ -410,7 +426,15 @@ impl App {
                 return;
             }
             let shell = self.config.settings.shell.clone();
-            match self.terminals.get_or_start(&key, &cwd, shell.as_deref(), ui.ctx()) {
+            // A project's terminal opens with its AI CLI running, ready to use.
+            let startup = self
+                .active_project()
+                .and_then(|p| self.project_cli(p).ok())
+                .map(|c| c.program);
+            match self
+                .terminals
+                .get_or_start(&key, &cwd, shell.as_deref(), startup, ui.ctx())
+            {
                 Ok(session) if session.exited => {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {

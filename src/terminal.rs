@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use egui_term::{BackendCommand, BackendSettings, ColorPalette, PtyEvent, TerminalBackend, TerminalTheme};
 
@@ -92,27 +93,51 @@ fn quote(shell: &str, arg: &str) -> String {
     }
 }
 
-/// `cli`'s command with the prompt template filled in (`{ticket_path}`, `{ticket_id}`, `{project_dir}`)
-/// and quoted as a single argument for `shell`.
-pub fn build_ai_command(
-    cli: &AiCli,
-    prompt: &str,
-    ticket_path: &Path,
-    ticket_id: &str,
-    project_dir: &Path,
-    shell: &str,
-) -> Result<String, String> {
+/// The prompt template with `{ticket_path}`, `{ticket_id}` and `{project_dir}` filled in, on one line.
+pub fn fill_prompt(prompt: &str, ticket_path: &Path, ticket_id: &str, project_dir: &Path) -> Result<String, String> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err("Set an AI command in Settings first".into());
     }
-    let filled = prompt
+    Ok(prompt
         .replace("{ticket_path}", &ticket_path.display().to_string())
         .replace("{ticket_id}", ticket_id)
         .replace("{project_dir}", &project_dir.display().to_string())
-        .replace(['\n', '\r'], " ");
+        .replace(['\n', '\r'], " "))
+}
+
+/// Shell command that starts `cli` with `prompt`, quoted as a single argument for `shell`.
+pub fn cli_command(cli: &AiCli, prompt: &str, shell: &str) -> String {
     let flag = cli.prompt_flag.map(|f| format!("{f} ")).unwrap_or_default();
-    Ok(format!("{} {flag}{}", cli.program, quote(shell, &filled)))
+    format!("{} {flag}{}", cli.program, quote(shell, prompt))
+}
+
+/// Is `program` running somewhere below the shell with process id `shell_pid`?
+/// Matches the executable name or, for Node/Python CLIs, any argument mentioning it.
+pub fn runs_program(shell_pid: u32, program: &str) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let program = program.to_lowercase();
+    let mentions = |s: &std::ffi::OsStr| s.to_string_lossy().to_lowercase().contains(&program);
+    let mut parents = vec![Pid::from_u32(shell_pid)];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(parent) = parents.pop() {
+        for (pid, proc) in sys.processes() {
+            if proc.parent() != Some(parent) || !seen.insert(*pid) {
+                continue;
+            }
+            if mentions(proc.name()) || proc.cmd().iter().skip(1).any(|a| mentions(a)) {
+                return true;
+            }
+            parents.push(*pid);
+        }
+    }
+    false
 }
 
 /// Shell program and arguments. `custom` wins when set.
@@ -158,6 +183,8 @@ pub fn theme() -> TerminalTheme {
 pub struct Session {
     pub backend: TerminalBackend,
     pub exited: bool,
+    /// Enter still to send after `type_prompt`.
+    pending_enter: Option<Instant>,
 }
 
 /// One shell per open project, keyed by .ghost path. Started lazily.
@@ -180,8 +207,15 @@ impl Terminals {
         }
     }
 
-    /// Marks sessions whose shell has exited; they stay until `restart`.
+    /// Marks sessions whose shell has exited (they stay until `restart`) and sends delayed Enters.
     pub fn poll(&mut self) {
+        let now = Instant::now();
+        for (_, s) in self.sessions.values_mut() {
+            if s.pending_enter.is_some_and(|at| at <= now) {
+                s.pending_enter = None;
+                s.backend.process_command(BackendCommand::Write(b"\r".to_vec()));
+            }
+        }
         while let Ok((id, event)) = self.rx.try_recv() {
             if matches!(event, PtyEvent::Exit)
                 && let Some((_, s)) = self.sessions.values_mut().find(|(sid, _)| *sid == id)
@@ -191,11 +225,18 @@ impl Terminals {
         }
     }
 
+    /// Is there a session for `key` whose shell is still alive?
+    pub fn is_live(&self, key: &Path) -> bool {
+        self.sessions.get(key).is_some_and(|(_, s)| !s.exited)
+    }
+
+    /// The session for `key`, starting one in `cwd` if needed. A new session runs `startup` first.
     pub fn get_or_start(
         &mut self,
         key: &Path,
         cwd: &Path,
         shell: Option<&str>,
+        startup: Option<&str>,
         ctx: &egui::Context,
     ) -> Result<&mut Session, String> {
         if !self.sessions.contains_key(key) {
@@ -209,8 +250,15 @@ impl Terminals {
             self.next_id += 1;
             let backend = TerminalBackend::new(id, ctx.clone(), self.tx.clone(), settings)
                 .map_err(|e| format!("Couldn't start {shell}: {e}"))?;
-            self.sessions
-                .insert(key.to_path_buf(), (id, Session { backend, exited: false }));
+            let mut session = Session {
+                backend,
+                exited: false,
+                pending_enter: None,
+            };
+            if let Some(cmd) = startup {
+                session.run(cmd);
+            }
+            self.sessions.insert(key.to_path_buf(), (id, session));
         }
         Ok(&mut self.sessions.get_mut(key).expect("just inserted").1)
     }
@@ -225,6 +273,20 @@ impl Session {
         self.backend
             .process_command(BackendCommand::Write(format!("{command}\r").into_bytes()));
     }
+
+    /// Types `text` into a running TUI and presses Enter a moment later; sent in one burst,
+    /// many TUIs treat the Enter as part of a paste instead of a submit.
+    pub fn type_prompt(&mut self, text: &str, ctx: &egui::Context) {
+        const DELAY: Duration = Duration::from_millis(150);
+        self.backend
+            .process_command(BackendCommand::Write(text.as_bytes().to_vec()));
+        self.pending_enter = Some(Instant::now() + DELAY);
+        ctx.request_repaint_after(DELAY);
+    }
+
+    pub fn shell_pid(&self) -> u32 {
+        self.backend.pty_id()
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +295,35 @@ mod tests {
 
     fn claude() -> &'static AiCli {
         ai_cli("claude").unwrap()
+    }
+
+    fn build_ai_command(
+        cli: &AiCli,
+        prompt: &str,
+        path: &Path,
+        id: &str,
+        dir: &Path,
+        shell: &str,
+    ) -> Result<String, String> {
+        Ok(cli_command(cli, &fill_prompt(prompt, path, id, dir)?, shell))
+    }
+
+    #[test]
+    fn finds_programs_running_below_a_process() {
+        let (program, mut child) = if cfg!(windows) {
+            let c = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Start-Sleep 10"])
+                .spawn();
+            ("powershell", c.unwrap())
+        } else {
+            ("sleep", std::process::Command::new("sleep").arg("10").spawn().unwrap())
+        };
+        let me = std::process::id();
+        let found = runs_program(me, program);
+        let missing = runs_program(me, "definitely-not-a-real-cli");
+        let _ = child.kill();
+        assert!(found);
+        assert!(!missing);
     }
 
     #[test]
