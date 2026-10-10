@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GhostLane
+Comment=Project board that lives in your folders
+Exec=ghostlane
+Icon=ghostlane
+Terminal=false
+Categories=Development;ProjectManagement;
