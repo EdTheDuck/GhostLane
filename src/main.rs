@@ -23,6 +23,16 @@ pub mod theme {
     pub const ACCENT_TEXT: Color32 = BG;
     pub const DANGER: Color32 = Color32::from_rgb(0xE0, 0x5A, 0x5A);
 
+    pub fn apply(ctx: &egui::Context) {
+        ctx.set_theme(egui::Theme::Dark);
+        ctx.set_visuals_of(egui::Theme::Dark, visuals());
+        ctx.all_styles_mut(|s| {
+            // Roomy, uniform buttons: text never touches the edge and all buttons share one height.
+            s.spacing.button_padding = egui::vec2(12.0, 6.0);
+            s.spacing.interact_size.y = 30.0;
+        });
+    }
+
     pub fn visuals() -> Visuals {
         let mut v = Visuals::dark();
         v.override_text_color = Some(TEXT);

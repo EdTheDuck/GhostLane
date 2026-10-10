@@ -92,13 +92,7 @@ impl App {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         ctx.set_fonts(fonts);
-        ctx.set_theme(egui::Theme::Dark);
-        ctx.set_visuals_of(egui::Theme::Dark, theme::visuals());
-        ctx.all_styles_mut(|s| {
-            // Roomy, uniform buttons: text never touches the edge and all buttons share one height.
-            s.spacing.button_padding = vec2(12.0, 6.0);
-            s.spacing.interact_size.y = 30.0;
-        });
+        theme::apply(ctx);
 
         let config = AppConfig::load();
         ctx.set_zoom_factor(config.settings.ui_scale);

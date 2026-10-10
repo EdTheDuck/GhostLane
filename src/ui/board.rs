@@ -186,7 +186,11 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
 }
 
 fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
-    let width = (ui.available_width() - 30.0).max(40.0);
+    const PLAY: f32 = 30.0;
+    let full = ui.available_width();
+    let left = ui.cursor().left();
+    ui.set_min_width(full);
+    let width = (full - PLAY - 6.0).max(40.0);
     let text_rect = ui
         .allocate_ui(vec2(width, 0.0), |ui| {
             ui.set_width(width);
@@ -202,12 +206,23 @@ fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
         })
         .response
         .rect;
-    let play = egui::Rect::from_center_size(
-        egui::pos2(text_rect.right() + 16.0, text_rect.center().y),
-        vec2(26.0, 26.0),
+    // Fixed slot at the right edge, vertically centred; padding kept small so the button fits it exactly.
+    let slot = egui::Rect::from_min_size(
+        egui::pos2(left + full - PLAY, text_rect.center().y - PLAY / 2.0),
+        vec2(PLAY, PLAY),
     );
-    let btn = egui::Button::new(RichText::new(icon::PLAY).size(16.0).color(theme::ACCENT)).frame_when_inactive(false);
-    if ui.put(play, btn).on_hover_text("Complete task with AI").clicked() {
+    let btn = egui::Button::new(RichText::new(icon::PLAY).size(16.0).color(theme::ACCENT))
+        .frame_when_inactive(false)
+        .min_size(vec2(PLAY, PLAY));
+    let clicked = ui
+        .scope(|ui| {
+            ui.spacing_mut().button_padding = vec2(4.0, 4.0);
+            ui.put(slot, btn)
+        })
+        .inner
+        .on_hover_text("Complete task with AI")
+        .clicked();
+    if clicked {
         actions.push(Action::RunAi(t.id));
     }
 }
@@ -259,21 +274,25 @@ mod tests {
     type State = (OpenProject, Vec<Action>);
 
     fn harness(dir: &std::path::Path) -> Harness<'static, State> {
+        harness_with(dir, &["Hello"])
+    }
+
+    fn harness_with(dir: &std::path::Path, titles: &[&str]) -> Harness<'static, State> {
         let mut p = Project::create(dir, "P", &["To Do".into(), "Done".into()]).unwrap();
-        p.add_ticket(
-            0,
-            Ticket {
-                title: "Hello".into(),
+        for title in titles {
+            let t = Ticket {
+                title: title.to_string(),
                 ..Default::default()
-            },
-        )
-        .unwrap();
+            };
+            p.add_ticket(0, t).unwrap();
+        }
         let op = OpenProject {
             path: p.ghost_path.clone(),
             project: Ok(p),
             search: HashMap::new(),
         };
         let mut h = Harness::new_ui_state(|ui, (op, actions): &mut State| show(ui, op, actions), (op, Vec::new()));
+        crate::theme::apply(&h.ctx);
         h.set_size(vec2(1000.0, 600.0));
         h.run();
         h
@@ -329,5 +348,24 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::MoveTicket { id: 1, to_col: 1 }))
         );
+    }
+
+    #[test]
+    fn cards_fill_the_column() {
+        let d = tempfile::tempdir().unwrap();
+        let titles = [
+            "Hi",
+            "A much longer title that wraps onto a second line for sure",
+            "Short one",
+        ];
+        let mut h = harness_with(d.path(), &titles);
+        h.run();
+        let rights: Vec<f32> = h.get_all_by_label(icon::PLAY).map(|n| n.rect().right()).collect();
+        assert_eq!(rights.len(), 3);
+        assert!(
+            rights.iter().all(|r| (r - rights[0]).abs() < 0.5),
+            "play buttons misaligned: {rights:?}"
+        );
+        assert!(rights[0] < COLUMN_WIDTH, "card overflows the column: {rights:?}");
     }
 }
