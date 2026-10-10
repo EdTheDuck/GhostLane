@@ -115,6 +115,8 @@ pub fn validate_columns(names: &[String]) -> Result<Vec<String>, String> {
 
 impl Project {
     pub fn load(ghost_path: &Path) -> io::Result<Project> {
+        // Absolute, so the root (also the terminal's working folder) never comes out empty.
+        let ghost_path = &std::path::absolute(ghost_path)?;
         let text = fs::read_to_string(ghost_path)?;
         let meta: GhostFile = serde_yaml_ng::from_str(&text)
             .map_err(|e| err(format!("{} is not a valid .ghost file: {e}", ghost_path.display())))?;
@@ -397,6 +399,8 @@ mod tests {
         assert!(Project::create(d.path(), "Other", &s(&["A"])).is_err());
         let back = Project::load(&p.ghost_path).unwrap();
         assert_eq!(back.meta, p.meta);
+        assert!(back.root.is_absolute());
+        assert_eq!(back.root, d.path());
     }
 
     #[test]
