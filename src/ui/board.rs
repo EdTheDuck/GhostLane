@@ -132,7 +132,7 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
         (SortBy::Priority, "Priority"),
         (SortBy::Title, "Title"),
     ] {
-        if ui.radio(sort.by == by, label).clicked() {
+        if super::pointer(ui.radio(sort.by == by, label)).clicked() {
             actions.push(Action::SetSort {
                 col,
                 sort: Sort { by, ..sort },
@@ -141,7 +141,7 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
     }
     ui.separator();
     for (dir, label) in [(SortDir::Asc, "Ascending"), (SortDir::Desc, "Descending")] {
-        if ui.radio(sort.dir == dir, label).clicked() {
+        if super::pointer(ui.radio(sort.dir == dir, label)).clicked() {
             actions.push(Action::SetSort {
                 col,
                 sort: Sort { dir, ..sort },
@@ -175,8 +175,10 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
         response.dnd_set_drag_payload(DragTicket(t.id));
     }
     if response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         drag_preview(ui, t);
     }
+    let response = super::pointer(response);
     if response.clicked() {
         actions.push(Action::ViewTicket(t.id));
     }
@@ -217,20 +219,15 @@ fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
         })
         .response
         .rect;
-    // Fixed slot at the right edge, vertically centred; padding kept small so the button fits it exactly.
+    // Fixed slot at the right edge, vertically centred.
     let slot = egui::Rect::from_min_size(
         egui::pos2(left + full - PLAY, text_rect.center().y - PLAY / 2.0),
         vec2(PLAY, PLAY),
     );
-    let btn = egui::Button::new(RichText::new(icon::PLAY).size(16.0).color(theme::ACCENT))
-        .frame_when_inactive(false)
-        .min_size(vec2(PLAY, PLAY));
     let clicked = ui
-        .scope(|ui| {
-            ui.spacing_mut().button_padding = vec2(4.0, 4.0);
-            ui.put(slot, btn)
+        .put(slot, |ui: &mut Ui| {
+            super::glyph_button(ui, icon::PLAY, theme::ACCENT, true)
         })
-        .inner
         .on_hover_text("Complete task with AI")
         .clicked();
     if clicked {
@@ -392,5 +389,20 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let h = harness(d.path());
         assert!(h.get_by_label("Done").rect().left() > 490.0);
+    }
+
+    #[test]
+    fn clickable_things_show_pointer_cursor() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        for label in [icon::PLAY, icon::PLUS, "Hello"] {
+            h.get_all_by_label(label).next().unwrap().hover();
+            h.run();
+            assert_eq!(
+                h.output().platform_output.cursor_icon,
+                egui::CursorIcon::PointingHand,
+                "{label}"
+            );
+        }
     }
 }

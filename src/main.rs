@@ -23,7 +23,19 @@ pub mod theme {
     pub const ACCENT_TEXT: Color32 = BG;
     pub const DANGER: Color32 = Color32::from_rgb(0xE0, 0x5A, 0x5A);
 
+    /// Font family holding the filled Phosphor icons (same codepoints as the regular set).
+    pub const ICON_FILL: &str = "phosphor-fill";
+
     pub fn apply(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        fonts
+            .font_data
+            .insert(ICON_FILL.into(), egui_phosphor::Variant::Fill.font_data().into());
+        fonts
+            .families
+            .insert(egui::FontFamily::Name(ICON_FILL.into()), vec![ICON_FILL.into()]);
+        ctx.set_fonts(fonts);
         ctx.set_theme(egui::Theme::Dark);
         ctx.set_visuals_of(egui::Theme::Dark, visuals());
         ctx.all_styles_mut(|s| {
@@ -48,6 +60,7 @@ pub mod theme {
         v.selection.stroke = Stroke::new(1.0, ACCENT);
         v.text_cursor.stroke = Stroke::new(2.0, ACCENT);
         v.window_corner_radius = CornerRadius::same(10);
+        v.interact_cursor = Some(egui::CursorIcon::PointingHand);
 
         let w = &mut v.widgets;
         w.noninteractive.bg_fill = PANEL;

@@ -290,13 +290,14 @@ impl ProjectForm {
                     .target
                     .and_then(|k| self.rows.iter().find(|row| row.key == k))
                     .map_or("Choose column…".to_string(), |row| row.name.clone());
-                ComboBox::from_id_salt(("removed_target", r.row.key))
+                let combo = ComboBox::from_id_salt(("removed_target", r.row.key))
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
                         for row in &self.rows {
                             ui.selectable_value(&mut r.target, Some(row.key), &row.name);
                         }
                     });
+                super::pointer(combo.response);
                 if ui.button("Restore").clicked() {
                     restore = Some(i);
                 }

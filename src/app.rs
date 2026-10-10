@@ -89,9 +89,6 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
         egui_extras::install_image_loaders(ctx);
-        let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-        ctx.set_fonts(fonts);
         theme::apply(ctx);
 
         let config = AppConfig::load();

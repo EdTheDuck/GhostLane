@@ -160,7 +160,7 @@ impl TicketForm {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("Priority");
-                ComboBox::from_id_salt("priority")
+                let combo = ComboBox::from_id_salt("priority")
                     .selected_text(RichText::new(t.priority.label()))
                     .show_ui(ui, |ui| {
                         for p in Priority::ALL {
@@ -169,6 +169,7 @@ impl TicketForm {
                             ui.selectable_value(&mut t.priority, p, text);
                         }
                     });
+                super::pointer(combo.response);
                 ui.add_space(16.0);
                 ui.label("Runs");
                 ui.add(DragValue::new(&mut t.run_count).range(0..=u32::MAX).speed(0.1));

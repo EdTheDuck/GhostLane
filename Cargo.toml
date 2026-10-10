@@ -7,7 +7,7 @@ edition = "2024"
 directories = "6.0.0"
 eframe = { version = "0.35", features = ["persistence"] }
 egui = "0.35"
-egui-phosphor = "0.13"
+egui-phosphor = { version = "0.13", features = ["fill"] }
 egui_commonmark = "0.24"
 egui_dnd = "0.16"
 egui_extras = { version = "0.35", features = ["svg"] }
