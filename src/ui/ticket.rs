@@ -1,7 +1,6 @@
 use egui::text::{CCursor, CCursorRange};
 use egui::{
-    Align, ComboBox, DragValue, Id, Key, KeyboardShortcut, Layout, Modal, Modifiers, RichText, ScrollArea, TextEdit,
-    Ui, vec2,
+    Align, ComboBox, DragValue, Id, Key, KeyboardShortcut, Layout, Modifiers, RichText, ScrollArea, TextEdit, Ui, vec2,
 };
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_phosphor::regular as icon;
@@ -31,7 +30,7 @@ pub enum ViewOutcome {
 pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Option<ViewOutcome> {
     let mut outcome = None;
     let size = modal_size(ctx);
-    let modal = Modal::new(Id::new("view_ticket")).show(ctx, |ui| {
+    let modal = super::modal(ctx, "view_ticket").show(ctx, |ui| {
         ui.set_width(size.x);
         ui.set_height(size.y);
         ui.horizontal(|ui| {
@@ -128,7 +127,7 @@ impl TicketForm {
         let mut outcome = None;
         let mut close = false;
         let size = modal_size(ctx);
-        let modal = Modal::new(Id::new("edit_ticket")).show(ctx, |ui| {
+        let modal = super::modal(ctx, "edit_ticket").show(ctx, |ui| {
             ui.set_width(size.x);
             ui.set_height(size.y);
             let heading = match self.mode {
@@ -236,7 +235,7 @@ impl TicketForm {
 pub fn confirm(ctx: &egui::Context, id: &str, message: &str, cancel: &str, ok: &str) -> Option<bool> {
     let mut result = None;
     let danger = ok == "Delete" || ok == "Discard";
-    let modal = Modal::new(Id::new(("confirm", id))).show(ctx, |ui| {
+    let modal = super::modal(ctx, ("confirm", id)).show(ctx, |ui| {
         ui.set_width(360.0);
         ui.label(RichText::new(message).size(16.0));
         ui.add_space(12.0);

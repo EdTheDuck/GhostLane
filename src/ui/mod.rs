@@ -18,6 +18,12 @@ pub fn pointer(response: Response) -> Response {
     }
 }
 
+/// Modal with generous padding between its content and its edge.
+pub fn modal(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug) -> egui::Modal {
+    let frame = egui::Frame::popup(&ctx.style_of(egui::Theme::Dark)).inner_margin(egui::Margin::same(20));
+    egui::Modal::new(egui::Id::new(id)).frame(frame)
+}
+
 /// Inner padding for every text input, in line with button padding.
 pub const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
 

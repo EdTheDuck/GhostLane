@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use egui::{Align, ComboBox, Id, Layout, Modal, RichText, TextEdit, Ui};
+use egui::{Align, ComboBox, Id, Layout, RichText, TextEdit, Ui};
 use egui_dnd::{DragDropItem, dnd};
 use egui_phosphor::regular as icon;
 
@@ -117,7 +117,7 @@ impl ProjectForm {
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ProjectOutcome> {
         let mut outcome = None;
-        let modal = Modal::new(Id::new("project_modal")).show(ctx, |ui| {
+        let modal = super::modal(ctx, "project_modal").show(ctx, |ui| {
             ui.set_width(540.0);
             let title = if self.editing { "Edit Project" } else { "New Project" };
             ui.label(RichText::new(title).size(20.0).strong());

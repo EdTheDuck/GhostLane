@@ -1,4 +1,4 @@
-use egui::{Align, DragValue, Grid, Id, Layout, Modal, RichText, Slider, TextEdit};
+use egui::{Align, DragValue, Grid, Layout, RichText, Slider, TextEdit};
 use egui_phosphor::regular as icon;
 
 use super::accent_button;
@@ -32,7 +32,7 @@ impl SettingsForm {
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<SettingsOutcome> {
         let mut outcome = None;
-        let modal = Modal::new(Id::new("settings_modal")).show(ctx, |ui| {
+        let modal = super::modal(ctx, "settings_modal").show(ctx, |ui| {
             ui.set_width(560.0);
             ui.label(RichText::new("Settings").size(20.0).strong());
             ui.add_space(12.0);
