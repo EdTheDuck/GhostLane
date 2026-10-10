@@ -126,6 +126,7 @@ impl ProjectForm {
             ui.label("Name");
             ui.add(
                 TextEdit::singleline(&mut self.name)
+                    .margin(super::INPUT_MARGIN)
                     .hint_text("My Project")
                     .desired_width(f32::INFINITY),
             );
@@ -190,6 +191,7 @@ impl ProjectForm {
                 .unwrap_or_default();
             ui.add(
                 TextEdit::singleline(&mut shown)
+                    .margin(super::INPUT_MARGIN)
                     .hint_text("Folder for the .ghost file and tickets")
                     .interactive(false)
                     .desired_width(ui.available_width() - 90.0),
@@ -223,7 +225,11 @@ impl ProjectForm {
                             .color(theme::TEXT_MUTED),
                     );
                 });
-                ui.add(TextEdit::singleline(&mut row.name).desired_width(220.0));
+                ui.add(
+                    TextEdit::singleline(&mut row.name)
+                        .margin(super::INPUT_MARGIN)
+                        .desired_width(220.0),
+                );
                 let folder = match folder_name(&row.name) {
                     Some(f) => RichText::new(format!("tickets/{f}"))
                         .color(theme::TEXT_MUTED)

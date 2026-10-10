@@ -409,12 +409,20 @@ impl App {
                     let font = egui_term::TerminalFont::new(egui_term::FontSettings {
                         font_type: egui::FontId::monospace(self.config.settings.terminal_font_size),
                     });
-                    let view = egui_term::TerminalView::new(ui, &mut session.backend)
-                        .set_focus(self.terminal_focused && self.modal.is_none())
-                        .set_font(font)
-                        .set_theme(terminal::theme())
-                        .set_size(ui.available_size());
-                    let response = ui.add(view);
+                    let focus = self.terminal_focused && self.modal.is_none();
+                    let response = Frame::new()
+                        .fill(theme::BG)
+                        .corner_radius(CornerRadius::same(6))
+                        .inner_margin(Margin::symmetric(12, 6))
+                        .show(ui, |ui| {
+                            let view = egui_term::TerminalView::new(ui, &mut session.backend)
+                                .set_focus(focus)
+                                .set_font(font)
+                                .set_theme(terminal::theme())
+                                .set_size(ui.available_size());
+                            ui.add(view)
+                        })
+                        .response;
                     if ui.input(|i| i.pointer.any_pressed()) {
                         self.terminal_focused = response.contains_pointer();
                     }

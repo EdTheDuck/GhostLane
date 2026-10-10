@@ -148,6 +148,7 @@ impl TicketForm {
                 );
                 let title = ui.add(
                     TextEdit::singleline(&mut t.title)
+                        .margin(super::INPUT_MARGIN)
                         .hint_text("Title (required)")
                         .font(egui::TextStyle::Heading)
                         .desired_width(f32::INFINITY),
@@ -309,6 +310,7 @@ fn markdown_editor(ui: &mut Ui, id: &str, text: &mut String, height: f32, cache:
                 ui.add_sized(
                     vec2(w, height),
                     TextEdit::multiline(text)
+                        .margin(super::INPUT_MARGIN)
                         .id(edit_id)
                         .code_editor()
                         .desired_width(w)

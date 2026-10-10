@@ -9,6 +9,9 @@ use egui_phosphor::regular as icon;
 use crate::theme;
 use crate::ticket::Priority;
 
+/// Inner padding for every text input, in line with button padding.
+pub const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
+
 /// Frameless icon button that shows a frame on hover.
 pub fn icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
     ui.scope(|ui| {

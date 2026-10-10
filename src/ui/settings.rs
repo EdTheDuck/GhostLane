@@ -40,6 +40,7 @@ impl SettingsForm {
             ui.label(RichText::new("AI command").strong());
             ui.add(
                 TextEdit::singleline(&mut self.ai_command)
+                    .margin(super::INPUT_MARGIN)
                     .code_editor()
                     .desired_width(f32::INFINITY),
             );
@@ -59,6 +60,7 @@ impl SettingsForm {
             ui.horizontal(|ui| {
                 ui.add(
                     TextEdit::singleline(&mut self.shell)
+                        .margin(super::INPUT_MARGIN)
                         .hint_text(format!("Auto: {}", self.detected_shell))
                         .desired_width(ui.available_width() - 100.0),
                 );

@@ -84,6 +84,7 @@ fn column_ui(
         if let Some(q) = search.get_mut(&column.folder) {
             let resp = ui.add(
                 egui::TextEdit::singleline(q)
+                    .margin(super::INPUT_MARGIN)
                     .hint_text(format!("{} Search {}", icon::MAGNIFYING_GLASS, column.name))
                     .desired_width(f32::INFINITY),
             );
