@@ -1,5 +1,6 @@
 pub mod board;
 pub mod project;
+pub mod rich_editor;
 pub mod settings;
 pub mod ticket;
 

@@ -3,6 +3,7 @@
 mod app;
 mod config;
 mod project;
+mod richtext;
 mod terminal;
 mod ticket;
 mod ui;
@@ -25,6 +26,8 @@ pub mod theme {
 
     /// Font family holding the filled Phosphor icons (same codepoints as the regular set).
     pub const ICON_FILL: &str = "phosphor-fill";
+    /// Bold text (Ubuntu Bold, falling back to the normal fonts for missing glyphs).
+    pub const BOLD: &str = "bold";
 
     pub fn apply(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
@@ -35,6 +38,14 @@ pub mod theme {
         fonts
             .families
             .insert(egui::FontFamily::Name(ICON_FILL.into()), vec![ICON_FILL.into()]);
+        // egui ships no bold weight; the rich text editor needs one.
+        fonts.font_data.insert(
+            BOLD.into(),
+            egui::FontData::from_static(include_bytes!("../assets/fonts/Ubuntu-Bold.ttf")).into(),
+        );
+        let mut bold = vec![BOLD.to_string()];
+        bold.extend(fonts.families[&egui::FontFamily::Proportional].iter().cloned());
+        fonts.families.insert(egui::FontFamily::Name(BOLD.into()), bold);
         ctx.set_fonts(fonts);
         ctx.set_theme(egui::Theme::Dark);
         ctx.set_visuals_of(egui::Theme::Dark, visuals());

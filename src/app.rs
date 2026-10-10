@@ -64,7 +64,7 @@ pub enum Action {
 pub enum Modal {
     Project(ProjectForm),
     ViewTicket(u32),
-    EditTicket(TicketForm),
+    EditTicket(Box<TicketForm>),
     ConfirmDelete(u32),
     Settings(SettingsForm),
 }
@@ -282,7 +282,7 @@ impl App {
             Action::ViewTicket(id) => self.modal = Some(Modal::ViewTicket(id)),
             Action::EditTicket(id) => {
                 if let Some((_, t)) = self.find_ticket(id) {
-                    self.modal = Some(Modal::EditTicket(TicketForm::edit(t)));
+                    self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(t))));
                 }
             }
             Action::NewTicket(col) => {
@@ -291,7 +291,7 @@ impl App {
                     id: p.meta.next_ticket_id,
                     ..Default::default()
                 };
-                self.modal = Some(Modal::EditTicket(TicketForm::create(col, t)));
+                self.modal = Some(Modal::EditTicket(Box::new(TicketForm::create(col, t))));
             }
             Action::DuplicateTicket(id) => {
                 let Some(next) = self.active_project().map(|p| p.meta.next_ticket_id) else {
@@ -305,7 +305,7 @@ impl App {
                     malformed: false,
                     ..t.clone()
                 };
-                self.modal = Some(Modal::EditTicket(TicketForm::create(col, copy)));
+                self.modal = Some(Modal::EditTicket(Box::new(TicketForm::create(col, copy))));
             }
             Action::AskDelete(id) => self.modal = Some(Modal::ConfirmDelete(id)),
             Action::RunAi(id) => self.run_ai(id, ctx),
@@ -447,11 +447,11 @@ impl App {
                 };
                 match ticket_ui::view(ctx, &t, &mut self.md_cache) {
                     Some(ViewOutcome::Close) => self.modal = None,
-                    Some(ViewOutcome::Edit) => self.modal = Some(Modal::EditTicket(TicketForm::edit(&t))),
+                    Some(ViewOutcome::Edit) => self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(&t)))),
                     None => {}
                 }
             }
-            Some(Modal::EditTicket(form)) => match form.show(ctx, &mut self.md_cache) {
+            Some(Modal::EditTicket(form)) => match form.show(ctx) {
                 Some(FormOutcome::Close) => self.modal = None,
                 Some(FormOutcome::Save) => self.save_ticket_form(),
                 None => {}

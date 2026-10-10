@@ -13,6 +13,7 @@ egui_dnd = "0.16"
 egui_extras = { version = "0.35", features = ["svg"] }
 egui_term = { git = "https://github.com/Harzu/egui_term", rev = "31bbc7ab8503c9518fcee5717cfa29011e59f451", version = "0.1.0" }
 notify-debouncer-full = "0.7.0"
+pulldown-cmark = { version = "0.13", default-features = false }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
