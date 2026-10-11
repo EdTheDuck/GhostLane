@@ -1,4 +1,5 @@
 pub mod board;
+pub mod generating;
 pub mod project;
 pub mod rich_editor;
 pub mod settings;

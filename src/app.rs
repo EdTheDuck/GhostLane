@@ -67,6 +67,22 @@ pub enum Modal {
     EditTicket(Box<TicketForm>),
     ConfirmDelete(u32),
     Settings(SettingsForm),
+    /// A short notice with an OK button.
+    Message {
+        title: String,
+        body: String,
+    },
+}
+
+/// A ticket the AI CLI is writing; GhostLane waits for its file to appear.
+pub struct Generation {
+    ghost: PathBuf,
+    path: PathBuf,
+    program: &'static str,
+    started: Instant,
+    next_alive_check: Instant,
+    /// When the file first appeared; it counts as written once it has been there a moment.
+    seen: Option<Instant>,
 }
 
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
@@ -79,6 +95,7 @@ pub struct App {
     md_cache: CommonMarkCache,
     terminals: Terminals,
     terminal_focused: bool,
+    generating: Option<Generation>,
     toasts: Vec<(String, Instant)>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
@@ -114,6 +131,7 @@ impl App {
             md_cache: CommonMarkCache::default(),
             terminals: Terminals::new(),
             terminal_focused: false,
+            generating: None,
             toasts: Vec::new(),
             watcher: None,
             watch_tx,
@@ -331,6 +349,41 @@ impl App {
         terminal::ai_cli(&id).ok_or_else(|| format!("Unknown AI CLI \"{id}\"; pick one in the project settings"))
     }
 
+    /// Hands `prompt` to the project's AI CLI in its terminal: typed into the CLI when it is already
+    /// running there, otherwise run as a command that starts the CLI with the prompt.
+    fn send_to_cli(
+        &mut self,
+        key: &Path,
+        root: &Path,
+        cli: &'static terminal::AiCli,
+        prompt: &str,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let shell = self.config.settings.shell.clone();
+        let command = terminal::cli_command(cli, prompt, &terminal::detect_shell(shell.as_deref()).0);
+        if self.config.terminal_collapsed {
+            self.config.terminal_collapsed = false;
+            self.save_config();
+        }
+        if !self.terminals.is_live(key) {
+            // No shell yet (or it exited): start one that launches the CLI with this prompt.
+            self.terminals.restart(key);
+            self.terminals
+                .get_or_start(key, root, shell.as_deref(), Some(&command), ctx)?;
+        } else {
+            let session = self
+                .terminals
+                .get_or_start(key, root, shell.as_deref(), None, ctx)
+                .expect("session is live");
+            if terminal::runs_program(session.shell_pid(), cli.program) {
+                session.type_prompt(prompt, ctx);
+            } else {
+                session.run(&command);
+            }
+        }
+        Ok(())
+    }
+
     fn run_ai(&mut self, id: u32, ctx: &egui::Context) {
         let Some(p) = self.active_project() else { return };
         let Some((_, t)) = self.find_ticket(id) else { return };
@@ -339,43 +392,84 @@ impl App {
             Ok(cli) => cli,
             Err(e) => return self.toast(e),
         };
-        let settings = &self.config.settings;
-        let prompt = match terminal::fill_prompt(&settings.ai_prompt, &t.path, &t.id_str(), &root) {
+        let prompt = match terminal::fill_prompt(&self.config.settings.ai_prompt, &t.path, &t.id_str(), &root) {
             Ok(prompt) => prompt,
             Err(e) => return self.toast(e),
         };
-        let shell = settings.shell.clone();
-        let command = terminal::cli_command(cli, &prompt, &terminal::detect_shell(shell.as_deref()).0);
-        if self.config.terminal_collapsed {
-            self.config.terminal_collapsed = false;
-            self.save_config();
-        }
-        if !self.terminals.is_live(&key) {
-            // No shell yet (or it exited): start one that launches the CLI with this prompt.
-            self.terminals.restart(&key);
-            if let Err(e) = self
-                .terminals
-                .get_or_start(&key, &root, shell.as_deref(), Some(&command), ctx)
-            {
-                return self.toast(e);
-            }
-        } else {
-            let session = self
-                .terminals
-                .get_or_start(&key, &root, shell.as_deref(), None, ctx)
-                .expect("session is live");
-            if terminal::runs_program(session.shell_pid(), cli.program) {
-                // The CLI is already open in the terminal: hand it the prompt directly.
-                session.type_prompt(&prompt, ctx);
-            } else {
-                session.run(&command);
-            }
+        if let Err(e) = self.send_to_cli(&key, &root, cli, &prompt, ctx) {
+            return self.toast(e);
         }
         t.run_count += 1;
         if let Err(e) = t.save() {
             self.toast(format!("Couldn't update run count for {}: {e}", t.id_str()));
         }
         self.reload_active();
+    }
+
+    /// Asks the AI CLI to write a new ticket into column `col` and waits for it.
+    fn start_generation(&mut self, col: usize, request: &str, ctx: &egui::Context) -> Result<(), String> {
+        let p = self.active_project().ok_or("No project is open")?;
+        let cli = self.project_cli(p)?;
+        let col = col.min(p.meta.columns.len().saturating_sub(1));
+        let id = crate::ticket::format_id(p.meta.next_ticket_id);
+        let path = p.column_dir(col).join(format!("{id}.md"));
+        let (key, root) = (p.ghost_path.clone(), p.root.clone());
+        let prompt = terminal::ticket_request_prompt(request, &path, &id);
+        self.send_to_cli(&key, &root, cli, &prompt, ctx)?;
+        let now = Instant::now();
+        self.generating = Some(Generation {
+            ghost: key,
+            path,
+            program: cli.program,
+            started: now,
+            // Give a freshly started CLI time to appear before checking it is alive.
+            next_alive_check: now + Duration::from_secs(8),
+            seen: None,
+        });
+        Ok(())
+    }
+
+    /// Finishes the generation once its file is written, or reports why it failed.
+    fn poll_generation(&mut self) {
+        const TIMEOUT: Duration = Duration::from_secs(15 * 60);
+        let Some(g) = &mut self.generating else { return };
+        let now = Instant::now();
+        let failure = if g.path.exists() {
+            let seen = *g.seen.get_or_insert(now);
+            if now.duration_since(seen) < Duration::from_millis(800) {
+                return;
+            }
+            match Ticket::load(&g.path) {
+                Ok(Some(t)) if !t.malformed => None,
+                Ok(_) => Some(format!(
+                    "The AI wrote {} but GhostLane couldn't read its title. Open the ticket to fix it.",
+                    g.path.display()
+                )),
+                Err(e) => Some(format!("Couldn't read the generated ticket: {e}")),
+            }
+        } else if g.started.elapsed() > TIMEOUT {
+            Some("The AI didn't write the ticket within 15 minutes.".to_string())
+        } else if now >= g.next_alive_check {
+            g.next_alive_check = now + Duration::from_secs(2);
+            let alive = self
+                .terminals
+                .shell_pid(&g.ghost)
+                .is_some_and(|pid| terminal::runs_program(pid, g.program));
+            if alive {
+                return;
+            }
+            Some("The AI CLI stopped before it wrote the ticket. Check the terminal for what happened.".to_string())
+        } else {
+            return;
+        };
+        self.generating = None;
+        self.reload_active();
+        if let Some(body) = failure {
+            self.modal = Some(Modal::Message {
+                title: "Ticket generation failed".into(),
+                body,
+            });
+        }
     }
 
     /// Key and working directory for the terminal: the active project, or the home folder.
@@ -496,8 +590,27 @@ impl App {
             Some(Modal::EditTicket(form)) => match form.show(ctx) {
                 Some(FormOutcome::Close) => self.modal = None,
                 Some(FormOutcome::Save) => self.save_ticket_form(),
+                Some(FormOutcome::Generate(request)) => {
+                    let col = match form.mode {
+                        FormMode::Create { col } => col,
+                        FormMode::Edit => 0,
+                    };
+                    match self.start_generation(col, &request, ctx) {
+                        Ok(()) => self.modal = None,
+                        Err(e) => {
+                            if let Some(Modal::EditTicket(form)) = &mut self.modal {
+                                form.error = Some(e);
+                            }
+                        }
+                    }
+                }
                 None => {}
             },
+            Some(Modal::Message { title, body }) => {
+                if ticket_ui::message(ctx, title, body) {
+                    self.modal = None;
+                }
+            }
             Some(Modal::Settings(form)) => match form.show(ctx) {
                 Some(SettingsOutcome::Save(settings)) => {
                     self.modal = None;
@@ -755,18 +868,24 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_watcher();
+        self.poll_generation();
         let mut actions = Vec::new();
 
         self.top_bar(ui, &mut actions);
         self.terminal_panel(ui);
 
         let central = Frame::new().fill(theme::BG).inner_margin(Margin::same(12));
-        egui::CentralPanel::default()
+        let board = egui::CentralPanel::default()
             .frame(central)
             .show(ui, |ui| match self.active {
                 Some(i) if self.projects[i].project.is_ok() => ui::board::show(ui, &mut self.projects[i], &mut actions),
                 _ => Self::empty_state(ui, &mut actions),
-            });
+            })
+            .response
+            .rect;
+        if self.generating.is_some() && ui::generating::overlay(&ctx, board) {
+            self.generating = None;
+        }
 
         for action in actions {
             self.apply(action, &ctx);

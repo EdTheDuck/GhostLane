@@ -105,6 +105,19 @@ pub fn fill_prompt(prompt: &str, ticket_path: &Path, ticket_id: &str, project_di
         .replace(['\n', '\r'], " "))
 }
 
+/// Prompt asking the AI CLI to write a new ticket file at `path` for `request`, on one line.
+pub fn ticket_request_prompt(request: &str, path: &Path, id: &str) -> String {
+    let request = request.replace(['\n', '\r'], " ");
+    format!(
+        "Create a new ticket for this project. The request is: {request} -- Look through the project files for context first, \
+         then write the ticket to {path} and change nothing else. The file must be Markdown that starts with a YAML front \
+         matter block between two lines of three dashes, containing: id: '{id}', title: a short title, priority: one of low, \
+         medium, high or highest, and run_count: 0. After the front matter add a '## Description' section explaining what \
+         needs doing and why, then a '## Test Scope' section listing how to check it is done.",
+        path = path.display()
+    )
+}
+
 /// Shell command that starts `cli` with `prompt`, quoted as a single argument for `shell`.
 pub fn cli_command(cli: &AiCli, prompt: &str, shell: &str) -> String {
     let flag = cli.prompt_flag.map(|f| format!("{f} ")).unwrap_or_default();
@@ -222,6 +235,14 @@ impl Terminals {
                 s.exited = true;
             }
         }
+    }
+
+    /// Process id of the live shell for `key`.
+    pub fn shell_pid(&self, key: &Path) -> Option<u32> {
+        self.sessions
+            .get(key)
+            .filter(|(_, s)| !s.exited)
+            .map(|(_, s)| s.shell_pid())
     }
 
     /// Is there a session for `key` whose shell is still alive?
@@ -356,6 +377,16 @@ mod tests {
         assert_eq!(posix, r"claude '/tmp/x'\''; rm -rf ~; echo '\''/00001.md'");
         let ps = build_ai_command(claude(), "{ticket_path}", bad, "1", Path::new("/tmp"), "powershell.exe").unwrap();
         assert_eq!(ps, "claude '/tmp/x''; rm -rf ~; echo ''/00001.md'");
+    }
+
+    #[test]
+    fn ticket_request_prompt_is_one_line_with_path_and_id() {
+        let p = ticket_request_prompt("Add login\nwith email", Path::new("/p/tickets/to_do/00009.md"), "00009");
+        assert!(!p.contains('\n'));
+        assert!(p.contains("Add login with email"));
+        assert!(p.contains("/p/tickets/to_do/00009.md"));
+        assert!(p.contains("id: '00009'"));
+        assert!(p.contains("## Test Scope"));
     }
 
     #[test]

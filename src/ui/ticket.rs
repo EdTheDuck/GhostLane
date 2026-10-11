@@ -82,8 +82,18 @@ pub enum FormMode {
     Create { col: usize },
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Tab {
+    /// Describe the ticket and let the project's AI CLI write it.
+    Ai,
+    Manual,
+}
+
 pub struct TicketForm {
     pub mode: FormMode,
+    tab: Tab,
+    /// What the user asks the AI for on the AI Assisted tab.
+    request: String,
     pub ticket: Ticket,
     original: Ticket,
     description: RichEditor,
@@ -96,6 +106,8 @@ pub struct TicketForm {
 pub enum FormOutcome {
     Close,
     Save,
+    /// Ask the AI CLI to write the ticket from this request.
+    Generate(String),
 }
 
 impl TicketForm {
@@ -109,8 +121,16 @@ impl TicketForm {
     }
 
     fn new(mode: FormMode, ticket: Ticket) -> Self {
+        // New tickets start on AI Assisted; edits and pre-filled duplicates go straight to the form.
+        let tab = if matches!(mode, FormMode::Create { .. }) && ticket.title.is_empty() {
+            Tab::Ai
+        } else {
+            Tab::Manual
+        };
         TicketForm {
             mode,
+            tab,
+            request: String::new(),
             description: RichEditor::new(("description", ticket.id), &ticket.description),
             test_scope: RichEditor::new(("test_scope", ticket.id), &ticket.test_scope),
             scope_open: false,
@@ -130,6 +150,7 @@ impl TicketForm {
             || a.run_count != b.run_count
             || self.description.changed()
             || self.test_scope.changed()
+            || (self.tab == Tab::Ai && !self.request.trim().is_empty())
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<FormOutcome> {
@@ -155,6 +176,14 @@ impl TicketForm {
                     }
                 });
             });
+            if matches!(self.mode, FormMode::Create { .. }) {
+                tabs(ui, &mut self.tab);
+                ui.add_space(4.0);
+            }
+            if self.tab == Tab::Ai {
+                self.ai_body(ui, &mut outcome);
+                return;
+            }
             ui.add_space(4.0);
 
             let t = &mut self.ticket;
@@ -274,6 +303,64 @@ impl TicketForm {
     }
 }
 
+impl TicketForm {
+    fn ai_body(&mut self, ui: &mut Ui, outcome: &mut Option<FormOutcome>) {
+        ui.label("What should this ticket do?");
+        ui.label(
+            RichText::new(
+                "The project's AI CLI writes the title, priority, description and test scope, using the project for context.",
+            )
+            .small()
+            .color(theme::TEXT_MUTED),
+        );
+        let footer = 56.0;
+        let height = (ui.available_height() - footer).max(160.0);
+        let request = ui.add_sized(
+            vec2(ui.available_width(), height),
+            TextEdit::multiline(&mut self.request)
+                .margin(super::INPUT_MARGIN)
+                .hint_text("e.g. Add a \"Forgot password\" link to the login page that emails a reset code"),
+        );
+        if ui.memory(|m| m.focused().is_none()) {
+            request.request_focus();
+        }
+        ui.separator();
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let ready = !self.request.trim().is_empty();
+            if ui
+                .add_enabled_ui(ready, |ui| accent_button(ui, "Generate Ticket"))
+                .inner
+                .clicked()
+            {
+                *outcome = Some(FormOutcome::Generate(self.request.trim().to_string()));
+            }
+        });
+    }
+}
+
+/// Underlined tab strip.
+fn tabs(ui: &mut Ui, current: &mut Tab) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 24.0;
+        for (tab, label) in [(Tab::Ai, "AI Assisted"), (Tab::Manual, "Manual")] {
+            let selected = *current == tab;
+            let color = if selected { theme::ACCENT } else { theme::TEXT_MUTED };
+            let text = RichText::new(label).size(15.0).color(color);
+            let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+            if selected {
+                let y = response.rect.bottom() + 5.0;
+                ui.painter()
+                    .hline(response.rect.x_range(), y, egui::Stroke::new(2.0, theme::ACCENT));
+            }
+            if super::pointer(response).clicked() {
+                *current = tab;
+            }
+        }
+    });
+    ui.add_space(2.0);
+    ui.separator();
+}
+
 /// Priority icon in its colour followed by the label, for the dropdown and its options.
 fn priority_text(p: Priority) -> LayoutJob {
     let mut job = LayoutJob::default();
@@ -285,6 +372,21 @@ fn priority_text(p: Priority) -> LayoutJob {
     );
     job.append(p.label(), 8.0, TextFormat::simple(font, theme::TEXT));
     job
+}
+
+/// Notice with an OK button. Returns true once dismissed.
+pub fn message(ctx: &egui::Context, title: &str, body: &str) -> bool {
+    let mut done = false;
+    let modal = super::show_modal(ctx, ("message", title), |ui| {
+        ui.set_width(420.0);
+        ui.label(RichText::new(title).size(18.0).strong());
+        ui.label(body);
+        ui.add_space(6.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            done = accent_button(ui, "OK").clicked();
+        });
+    });
+    done || modal.should_close()
 }
 
 /// Small yes/no modal. Returns Some(true) on confirm, Some(false) on cancel.
@@ -342,5 +444,53 @@ mod tests {
         h.get_by_label(icon::X).click();
         h.run();
         assert!(h.state().1);
+    }
+
+    #[test]
+    fn new_ticket_defaults_to_ai_and_generates_from_the_request() {
+        let form = TicketForm::create(
+            0,
+            Ticket {
+                id: 9,
+                ..Default::default()
+            },
+        );
+        assert_eq!(form.tab, Tab::Ai);
+        let mut h = Harness::new_ui_state(
+            |ui, (form, out): &mut (TicketForm, Option<String>)| {
+                if let Some(FormOutcome::Generate(request)) = form.show(ui.ctx()) {
+                    *out = Some(request);
+                }
+            },
+            (form, None),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 800.0));
+        h.run_steps(3);
+        assert!(h.query_by_label("Save").is_none());
+        h.state_mut().0.request = "  Add a logout button  ".into();
+        h.run();
+        h.get_by_label("Generate Ticket").click();
+        h.run();
+        assert_eq!(h.state().1.as_deref(), Some("Add a logout button"));
+    }
+
+    #[test]
+    fn duplicates_open_on_the_manual_tab() {
+        let copy = Ticket {
+            id: 10,
+            title: "Duplicate: Login".into(),
+            ..Default::default()
+        };
+        assert_eq!(TicketForm::create(0, copy).tab, Tab::Manual);
+        assert_eq!(
+            TicketForm::edit(&Ticket {
+                id: 1,
+                title: "T".into(),
+                ..Default::default()
+            })
+            .tab,
+            Tab::Manual
+        );
     }
 }
