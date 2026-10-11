@@ -118,6 +118,19 @@ pub fn ticket_request_prompt(request: &str, path: &Path, id: &str) -> String {
     )
 }
 
+/// Prompt asking the AI CLI to change the existing ticket file at `path`, on one line.
+pub fn ticket_update_prompt(request: &str, path: &Path, id: &str) -> String {
+    let request = request.replace(['\n', '\r'], " ");
+    format!(
+        "Update the existing ticket at {path} (ticket {id}). The requested change is: {request} -- Look through the \
+         project files for context if needed, then edit only that file and change nothing else. Keep its format: a YAML \
+         front matter block between two lines of three dashes with id, title, priority (one of low, medium, high or \
+         highest) and run_count, followed by a '## Description' section and a '## Test Scope' section. Leave the id and \
+         run_count as they are.",
+        path = path.display()
+    )
+}
+
 /// Shell command that starts `cli` with `prompt`, quoted as a single argument for `shell`.
 pub fn cli_command(cli: &AiCli, prompt: &str, shell: &str) -> String {
     let flag = cli.prompt_flag.map(|f| format!("{f} ")).unwrap_or_default();
@@ -387,6 +400,15 @@ mod tests {
         assert!(p.contains("/p/tickets/to_do/00009.md"));
         assert!(p.contains("id: '00009'"));
         assert!(p.contains("## Test Scope"));
+    }
+
+    #[test]
+    fn ticket_update_prompt_names_the_file_and_keeps_ids() {
+        let p = ticket_update_prompt("Raise\npriority", Path::new("/p/tickets/done/00003.md"), "00003");
+        assert!(!p.contains('\n'));
+        assert!(p.contains("Raise priority"));
+        assert!(p.contains("/p/tickets/done/00003.md"));
+        assert!(p.contains("Leave the id and run_count"));
     }
 
     #[test]

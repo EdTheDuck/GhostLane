@@ -122,11 +122,9 @@ impl TicketForm {
 
     fn new(mode: FormMode, ticket: Ticket) -> Self {
         // New tickets start on AI Assisted; edits and pre-filled duplicates go straight to the form.
-        let tab = if matches!(mode, FormMode::Create { .. }) && ticket.title.is_empty() {
-            Tab::Ai
-        } else {
-            Tab::Manual
-        };
+        // Open on AI Assisted, except duplicates, which arrive pre-filled for manual tweaks.
+        let duplicate = matches!(mode, FormMode::Create { .. }) && !ticket.title.is_empty();
+        let tab = if duplicate { Tab::Manual } else { Tab::Ai };
         TicketForm {
             mode,
             tab,
@@ -176,10 +174,8 @@ impl TicketForm {
                     }
                 });
             });
-            if matches!(self.mode, FormMode::Create { .. }) {
-                tabs(ui, &mut self.tab);
-                ui.add_space(4.0);
-            }
+            tabs(ui, &mut self.tab);
+            ui.add_space(4.0);
             if self.tab == Tab::Ai {
                 self.ai_body(ui, &mut outcome);
                 return;
@@ -305,21 +301,31 @@ impl TicketForm {
 
 impl TicketForm {
     fn ai_body(&mut self, ui: &mut Ui, outcome: &mut Option<FormOutcome>) {
-        ui.label("What should this ticket do?");
-        ui.label(
-            RichText::new(
-                "The project's AI CLI writes the title, priority, description and test scope, using the project for context.",
+        let editing = self.mode == FormMode::Edit;
+        let (question, explain, hint, button) = if editing {
+            (
+                "What should change?",
+                "The project's AI CLI updates this ticket's title, priority, description and test scope, using the project for context.",
+                "e.g. Raise the priority and add a test for expired reset codes",
+                "Update Ticket",
             )
-            .small()
-            .color(theme::TEXT_MUTED),
-        );
+        } else {
+            (
+                "What should this ticket do?",
+                "The project's AI CLI writes the title, priority, description and test scope, using the project for context.",
+                "e.g. Add a \"Forgot password\" link to the login page that emails a reset code",
+                "Generate Ticket",
+            )
+        };
+        ui.label(question);
+        ui.label(RichText::new(explain).small().color(theme::TEXT_MUTED));
         let footer = 56.0;
         let height = (ui.available_height() - footer).max(160.0);
         let request = ui.add_sized(
             vec2(ui.available_width(), height),
             TextEdit::multiline(&mut self.request)
                 .margin(super::INPUT_MARGIN)
-                .hint_text("e.g. Add a \"Forgot password\" link to the login page that emails a reset code"),
+                .hint_text(hint),
         );
         if ui.memory(|m| m.focused().is_none()) {
             request.request_focus();
@@ -327,11 +333,7 @@ impl TicketForm {
         ui.separator();
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let ready = !self.request.trim().is_empty();
-            if ui
-                .add_enabled_ui(ready, |ui| accent_button(ui, "Generate Ticket"))
-                .inner
-                .clicked()
-            {
+            if ui.add_enabled_ui(ready, |ui| accent_button(ui, button)).inner.clicked() {
                 *outcome = Some(FormOutcome::Generate(self.request.trim().to_string()));
             }
         });
@@ -483,14 +485,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(TicketForm::create(0, copy).tab, Tab::Manual);
-        assert_eq!(
-            TicketForm::edit(&Ticket {
-                id: 1,
-                title: "T".into(),
-                ..Default::default()
-            })
-            .tab,
-            Tab::Manual
+        let edit = TicketForm::edit(&Ticket {
+            id: 1,
+            title: "T".into(),
+            ..Default::default()
+        });
+        assert_eq!(edit.tab, Tab::Ai);
+    }
+
+    #[test]
+    fn edit_ai_tab_offers_update_ticket() {
+        let ticket = Ticket {
+            id: 3,
+            title: "Login".into(),
+            ..Default::default()
+        };
+        let mut h = Harness::new_ui_state(
+            |ui, (form, out): &mut (TicketForm, Option<String>)| {
+                if let Some(FormOutcome::Generate(request)) = form.show(ui.ctx()) {
+                    *out = Some(request);
+                }
+            },
+            (TicketForm::edit(&ticket), None),
         );
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 800.0));
+        h.run_steps(3);
+        h.state_mut().0.request = "Make it high priority".into();
+        h.run();
+        h.get_by_label("Update Ticket").click();
+        h.run();
+        assert_eq!(h.state().1.as_deref(), Some("Make it high priority"));
     }
 }

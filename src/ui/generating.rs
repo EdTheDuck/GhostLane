@@ -1,4 +1,4 @@
-//! "Generating" card shown over the board while the AI CLI writes a ticket. It covers only the
+//! "Generating" / "Updating" card shown over the board while the AI CLI writes a ticket. It covers only the
 //! board so the terminal stays usable for any permission prompts the CLI asks.
 
 use egui::{Align2, Area, Button, Color32, FontId, Id, Order, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -6,7 +6,7 @@ use egui::{Align2, Area, Button, Color32, FontId, Id, Order, Rect, Sense, Stroke
 use crate::theme;
 
 /// Draws the overlay over `board`. Returns true when the user stops waiting.
-pub fn overlay(ctx: &egui::Context, board: Rect) -> bool {
+pub fn overlay(ctx: &egui::Context, board: Rect, title: &str) -> bool {
     let mut stop = false;
     Area::new(Id::new("generating_overlay"))
         .order(Order::Foreground)
@@ -47,7 +47,7 @@ pub fn overlay(ctx: &egui::Context, board: Rect) -> bool {
             painter.text(
                 pos2(card.center().x, y + 48.0),
                 Align2::CENTER_CENTER,
-                "Generating ticket…",
+                title,
                 FontId::proportional(19.0),
                 theme::TEXT,
             );

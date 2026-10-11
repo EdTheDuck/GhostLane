@@ -81,8 +81,31 @@ pub struct Generation {
     program: &'static str,
     started: Instant,
     next_alive_check: Instant,
-    /// When the file first appeared; it counts as written once it has been there a moment.
+    /// When the file first appeared (or changed); it counts as written once it has been there a moment.
     seen: Option<Instant>,
+    /// For updates: the file's modified time before the AI started. `None` = waiting for a new file.
+    baseline: Option<std::time::SystemTime>,
+    /// Ticket to show once an update lands.
+    reopen: Option<u32>,
+}
+
+impl Generation {
+    fn title(&self) -> &'static str {
+        if self.baseline.is_some() {
+            "Updating ticket…"
+        } else {
+            "Generating ticket…"
+        }
+    }
+
+    /// Has the AI written its file yet?
+    fn written(&self) -> bool {
+        let modified = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        match self.baseline {
+            None => self.path.exists(),
+            Some(before) => modified.is_some_and(|m| m != before),
+        }
+    }
 }
 
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
@@ -425,6 +448,34 @@ impl App {
             // Give a freshly started CLI time to appear before checking it is alive.
             next_alive_check: now + Duration::from_secs(8),
             seen: None,
+            baseline: None,
+            reopen: None,
+        });
+        Ok(())
+    }
+
+    /// Asks the AI CLI to change ticket `id` in place and waits for its file to change.
+    fn start_update(&mut self, id: u32, request: &str, ctx: &egui::Context) -> Result<(), String> {
+        let p = self.active_project().ok_or("No project is open")?;
+        let cli = self.project_cli(p)?;
+        let (_, ticket) = self.find_ticket(id).ok_or("This ticket no longer exists on disk")?;
+        let path = ticket.path.clone();
+        let baseline = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map_err(|e| e.to_string())?;
+        let (key, root) = (p.ghost_path.clone(), p.root.clone());
+        let prompt = terminal::ticket_update_prompt(request, &path, &crate::ticket::format_id(id));
+        self.send_to_cli(&key, &root, cli, &prompt, ctx)?;
+        let now = Instant::now();
+        self.generating = Some(Generation {
+            ghost: key,
+            path,
+            program: cli.program,
+            started: now,
+            next_alive_check: now + Duration::from_secs(8),
+            seen: None,
+            baseline: Some(baseline),
+            reopen: Some(id),
         });
         Ok(())
     }
@@ -434,7 +485,7 @@ impl App {
         const TIMEOUT: Duration = Duration::from_secs(15 * 60);
         let Some(g) = &mut self.generating else { return };
         let now = Instant::now();
-        let failure = if g.path.exists() {
+        let failure = if g.written() {
             let seen = *g.seen.get_or_insert(now);
             if now.duration_since(seen) < Duration::from_millis(800) {
                 return;
@@ -448,7 +499,7 @@ impl App {
                 Err(e) => Some(format!("Couldn't read the generated ticket: {e}")),
             }
         } else if g.started.elapsed() > TIMEOUT {
-            Some("The AI didn't write the ticket within 15 minutes.".to_string())
+            Some("The AI didn't finish the ticket within 15 minutes.".to_string())
         } else if now >= g.next_alive_check {
             g.next_alive_check = now + Duration::from_secs(2);
             let alive = self
@@ -458,17 +509,29 @@ impl App {
             if alive {
                 return;
             }
-            Some("The AI CLI stopped before it wrote the ticket. Check the terminal for what happened.".to_string())
+            Some("The AI CLI stopped before it finished the ticket. Check the terminal for what happened.".to_string())
         } else {
             return;
         };
-        self.generating = None;
+        let done = self.generating.take().expect("checked above");
         self.reload_active();
-        if let Some(body) = failure {
-            self.modal = Some(Modal::Message {
-                title: "Ticket generation failed".into(),
-                body,
-            });
+        match failure {
+            Some(body) => {
+                let title = if done.reopen.is_some() {
+                    "Ticket update failed"
+                } else {
+                    "Ticket generation failed"
+                };
+                self.modal = Some(Modal::Message {
+                    title: title.into(),
+                    body,
+                });
+            }
+            None => {
+                if let Some(id) = done.reopen {
+                    self.modal = Some(Modal::ViewTicket(id));
+                }
+            }
         }
     }
 
@@ -591,11 +654,14 @@ impl App {
                 Some(FormOutcome::Close) => self.modal = None,
                 Some(FormOutcome::Save) => self.save_ticket_form(),
                 Some(FormOutcome::Generate(request)) => {
-                    let col = match form.mode {
-                        FormMode::Create { col } => col,
-                        FormMode::Edit => 0,
+                    let started = match form.mode {
+                        FormMode::Create { col } => self.start_generation(col, &request, ctx),
+                        FormMode::Edit => {
+                            let id = form.ticket.id;
+                            self.start_update(id, &request, ctx)
+                        }
                     };
-                    match self.start_generation(col, &request, ctx) {
+                    match started {
                         Ok(()) => self.modal = None,
                         Err(e) => {
                             if let Some(Modal::EditTicket(form)) = &mut self.modal {
@@ -883,7 +949,9 @@ impl eframe::App for App {
             })
             .response
             .rect;
-        if self.generating.is_some() && ui::generating::overlay(&ctx, board) {
+        if let Some(title) = self.generating.as_ref().map(Generation::title)
+            && ui::generating::overlay(&ctx, board, title)
+        {
             self.generating = None;
         }
 
@@ -892,5 +960,43 @@ impl eframe::App for App {
         }
         self.show_modal(&ctx);
         self.show_toasts(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generation(path: PathBuf, baseline: Option<std::time::SystemTime>) -> Generation {
+        let now = Instant::now();
+        Generation {
+            ghost: PathBuf::new(),
+            path,
+            program: "claude",
+            started: now,
+            next_alive_check: now,
+            seen: None,
+            baseline,
+            reopen: None,
+        }
+    }
+
+    #[test]
+    fn new_tickets_are_written_once_the_file_exists() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("00001.md");
+        assert!(!generation(path.clone(), None).written());
+        std::fs::write(&path, "x").unwrap();
+        assert!(generation(path, None).written());
+    }
+
+    #[test]
+    fn updates_are_written_once_the_file_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("00001.md");
+        std::fs::write(&path, "x").unwrap();
+        let now = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!generation(path.clone(), Some(now)).written());
+        assert!(generation(path, Some(std::time::UNIX_EPOCH)).written());
     }
 }
