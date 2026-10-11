@@ -639,8 +639,16 @@ impl App {
     fn project_dropdown(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let label = self.active.map_or("Select project".into(), |i| self.projects[i].name());
         let btn = ui.button(format!("{label}  {}", icon::CARET_DOWN));
-        Popup::menu(&btn).show(|ui| {
+        // No popup padding: each row's own padding makes its hitbox and highlight run edge to edge.
+        let style = ui.style().clone();
+        let radius = style.visuals.menu_corner_radius;
+        let frame = egui::Frame::popup(&style).inner_margin(Margin::ZERO);
+        Popup::menu(&btn).frame(frame).show(|ui| {
             ui.set_min_width(240.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // egui's menu style shrinks button padding; rows need the full amount.
+            ui.spacing_mut().button_padding = vec2(14.0, 8.0);
+            let last = self.projects.len().saturating_sub(1);
             for (i, p) in self.projects.iter().enumerate() {
                 let selected = self.active == Some(i);
                 let text = match &p.project {
@@ -651,7 +659,17 @@ impl App {
                     Ok(_) => p.path.display().to_string(),
                     Err(e) => e.clone(),
                 };
-                let row = ui.add_enabled(p.project.is_ok(), egui::Button::selectable(selected, text));
+                // Round only the corners that touch the popup's rounded edge.
+                let corners = egui::CornerRadius {
+                    nw: if i == 0 { radius.nw } else { 0 },
+                    ne: if i == 0 { radius.ne } else { 0 },
+                    sw: if i == last { radius.sw } else { 0 },
+                    se: if i == last { radius.se } else { 0 },
+                };
+                let button = egui::Button::selectable(selected, text)
+                    .corner_radius(corners)
+                    .min_size(vec2(0.0, 36.0));
+                let row = ui.add_enabled(p.project.is_ok(), button);
                 if row.on_hover_text(tooltip).clicked() && !selected {
                     actions.push(Action::SwitchProject(i));
                 }
