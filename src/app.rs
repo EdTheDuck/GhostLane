@@ -124,6 +124,9 @@ pub struct App {
     next_cli_check: Instant,
     /// Last time the user typed into the terminal (their own echo isn't the AI working).
     last_terminal_typing: Option<Instant>,
+    /// When a request was last sent to the AI CLI (play button, ticket generation, or Enter in
+    /// the terminal). The busy animation only runs for output that follows a request.
+    ai_request: Option<Instant>,
     toasts: Vec<(String, Instant)>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
@@ -163,6 +166,7 @@ impl App {
             cli_running: false,
             next_cli_check: Instant::now(),
             last_terminal_typing: None,
+            ai_request: None,
             toasts: Vec::new(),
             watcher: None,
             watch_tx,
@@ -412,6 +416,7 @@ impl App {
                 session.run(&command);
             }
         }
+        self.ai_request = Some(Instant::now());
         Ok(())
     }
 
@@ -638,6 +643,21 @@ impl App {
                     if self.terminal_focused && typed {
                         self.last_terminal_typing = Some(Instant::now());
                     }
+                    let submitted = ui.input(|i| {
+                        i.events.iter().any(|e| {
+                            matches!(
+                                e,
+                                egui::Event::Key {
+                                    key: egui::Key::Enter,
+                                    pressed: true,
+                                    ..
+                                }
+                            )
+                        })
+                    });
+                    if self.terminal_focused && submitted {
+                        self.ai_request = Some(Instant::now());
+                    }
                 }
                 Err(e) => {
                     ui.label(RichText::new(e).color(theme::DANGER));
@@ -810,8 +830,12 @@ impl App {
             return false;
         };
         let now = Instant::now();
-        let recent = |t: Option<Instant>, ms: u64| t.is_some_and(|t| now.duration_since(t) < Duration::from_millis(ms));
-        if !recent(self.terminals.last_output(&key), 1200) || recent(self.last_terminal_typing, 800) {
+        let output = self.terminals.last_output(&key);
+        let (still_active, working) = ai_activity(self.ai_request, output, self.last_terminal_typing, now);
+        if !still_active {
+            self.ai_request = None;
+        }
+        if !working {
             return false;
         }
         if now >= self.next_cli_check {
@@ -985,6 +1009,22 @@ impl App {
     }
 }
 
+/// Is terminal output the AI working on a request? Returns (request still active, AI working).
+/// A request stays active while the CLI keeps printing and ends after a few quiet seconds. Output
+/// with no request behind it (redraws from resizing, the CLI starting up) never counts, and nor
+/// does the echo of the user typing.
+fn ai_activity(
+    request: Option<Instant>,
+    output: Option<Instant>,
+    typing: Option<Instant>,
+    now: Instant,
+) -> (bool, bool) {
+    let within = |t: Option<Instant>, ms: u64| t.is_some_and(|t| now.duration_since(t) < Duration::from_millis(ms));
+    let active = request.is_some() && (within(request, 4000) || within(output, 4000));
+    let working = active && within(output, 1200) && !within(typing, 800);
+    (active, working)
+}
+
 /// Windows `canonicalize` yields `\\?\C:\...`; keep paths human-readable.
 fn strip_unc(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
@@ -1090,5 +1130,21 @@ mod tests {
         let now = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert!(!generation(path.clone(), Some(now)).written());
         assert!(generation(path, Some(std::time::UNIX_EPOCH)).written());
+    }
+
+    #[test]
+    fn title_only_animates_for_output_after_a_request() {
+        let now = Instant::now();
+        let ago = |ms: u64| Some(now - Duration::from_millis(ms));
+        // Resizing makes the CLI redraw, but with no request that isn't the AI working.
+        assert_eq!(ai_activity(None, ago(100), None, now), (false, false));
+        // Output soon after a request is the AI working.
+        assert_eq!(ai_activity(ago(2000), ago(100), None, now), (true, true));
+        // Long jobs stay busy while output keeps coming.
+        assert_eq!(ai_activity(ago(60_000), ago(200), None, now), (true, true));
+        // A quiet CLI ends the request.
+        assert_eq!(ai_activity(ago(10_000), ago(5000), None, now), (false, false));
+        // The echo of the user typing isn't the AI either.
+        assert_eq!(ai_activity(ago(2000), ago(100), ago(200), now), (true, false));
     }
 }
