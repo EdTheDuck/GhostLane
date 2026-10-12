@@ -210,6 +210,8 @@ pub struct Session {
     pub exited: bool,
     /// Enter still to send after `type_prompt`.
     pending_enter: Option<Instant>,
+    /// When the shell (or the program running in it) last printed something.
+    last_output: Option<Instant>,
 }
 
 /// One shell per open project, keyed by .ghost path. Started lazily.
@@ -242,12 +244,23 @@ impl Terminals {
             }
         }
         while let Ok((id, event)) = self.rx.try_recv() {
-            if matches!(event, PtyEvent::Exit)
-                && let Some((_, s)) = self.sessions.values_mut().find(|(sid, _)| *sid == id)
-            {
-                s.exited = true;
+            let Some((_, s)) = self.sessions.values_mut().find(|(sid, _)| *sid == id) else {
+                continue;
+            };
+            match event {
+                PtyEvent::Exit => s.exited = true,
+                PtyEvent::Wakeup => s.last_output = Some(now),
+                _ => {}
             }
         }
+    }
+
+    /// When the live session for `key` last printed output.
+    pub fn last_output(&self, key: &Path) -> Option<Instant> {
+        self.sessions
+            .get(key)
+            .filter(|(_, s)| !s.exited)
+            .and_then(|(_, s)| s.last_output)
     }
 
     /// Process id of the live shell for `key`.
@@ -287,6 +300,7 @@ impl Terminals {
                 backend,
                 exited: false,
                 pending_enter: None,
+                last_output: None,
             };
             if let Some(cmd) = startup {
                 session.run(cmd);

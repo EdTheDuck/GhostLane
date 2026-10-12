@@ -119,6 +119,11 @@ pub struct App {
     terminals: Terminals,
     terminal_focused: bool,
     generating: Option<Generation>,
+    /// Is the active project's AI CLI running in its terminal? Refreshed every couple of seconds.
+    cli_running: bool,
+    next_cli_check: Instant,
+    /// Last time the user typed into the terminal (their own echo isn't the AI working).
+    last_terminal_typing: Option<Instant>,
     toasts: Vec<(String, Instant)>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
@@ -155,6 +160,9 @@ impl App {
             terminals: Terminals::new(),
             terminal_focused: false,
             generating: None,
+            cli_running: false,
+            next_cli_check: Instant::now(),
+            last_terminal_typing: None,
             toasts: Vec::new(),
             watcher: None,
             watch_tx,
@@ -622,6 +630,14 @@ impl App {
                     if ui.input(|i| i.pointer.any_pressed()) {
                         self.terminal_focused = response.contains_pointer();
                     }
+                    let typed = ui.input(|i| {
+                        i.events
+                            .iter()
+                            .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }))
+                    });
+                    if self.terminal_focused && typed {
+                        self.last_terminal_typing = Some(Instant::now());
+                    }
                 }
                 Err(e) => {
                     ui.label(RichText::new(e).color(theme::DANGER));
@@ -784,35 +800,83 @@ impl App {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(12, 8));
-        egui::Panel::top("top_bar").frame(frame).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Image::new(egui::include_image!("../assets/ghost.svg")).fit_to_exact_size(vec2(28.0, 28.0)),
-                );
-                ui.label(RichText::new("GhostLane").size(20.0).strong());
-                ui.add_space(16.0);
-                if !self.projects.is_empty() {
-                    self.project_dropdown(ui, actions);
-                }
-                if self.active_project().is_some() && icon_button(ui, icon::PENCIL_SIMPLE, "Edit project").clicked() {
-                    actions.push(Action::EditProject);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icon::GEAR, "Settings").clicked() {
-                        actions.push(Action::OpenSettings);
-                    }
-                    ui.add_space(8.0);
-                    if accent_button(ui, &format!("{}  New Project", icon::PLUS)).clicked() {
-                        actions.push(Action::NewProject);
-                    }
-                    if ui.button(format!("{}  Open Project", icon::FOLDER_OPEN)).clicked() {
-                        actions.push(Action::OpenProjectDialog);
-                    }
-                });
-            });
+    /// Is the AI working? True while a ticket is generating, or while the project's AI CLI is
+    /// printing output in the terminal that isn't just the echo of the user typing.
+    fn ai_busy(&mut self) -> bool {
+        if self.generating.is_some() {
+            return true;
+        }
+        let Some(key) = self.active_project().map(|p| p.ghost_path.clone()) else {
+            return false;
+        };
+        let now = Instant::now();
+        let recent = |t: Option<Instant>, ms: u64| t.is_some_and(|t| now.duration_since(t) < Duration::from_millis(ms));
+        if !recent(self.terminals.last_output(&key), 1200) || recent(self.last_terminal_typing, 800) {
+            return false;
+        }
+        if now >= self.next_cli_check {
+            self.next_cli_check = now + Duration::from_secs(2);
+            let program = self
+                .active_project()
+                .and_then(|p| self.project_cli(p).ok())
+                .map(|c| c.program);
+            self.cli_running = match (self.terminals.shell_pid(&key), program) {
+                (Some(pid), Some(program)) => terminal::runs_program(pid, program),
+                _ => false,
+            };
+        }
+        self.cli_running
+    }
+
+    /// The top bar is also the window's title bar: drag to move, double-click to maximise.
+    fn top_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>, busy: bool) {
+        let mac = ui::chrome::native_buttons();
+        let left = if mac { ui::chrome::MAC_BUTTONS_WIDTH as i8 } else { 12 };
+        let right = if mac { 12 } else { 0 };
+        let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin {
+            left,
+            right,
+            top: 0,
+            bottom: 0,
         });
+        egui::Panel::top("top_bar")
+            .frame(frame)
+            .exact_size(ui::chrome::BAR_HEIGHT)
+            .show(ui, |ui| {
+                let bar = ui.max_rect();
+                ui::chrome::drag_area(ui, bar);
+                let (mut left_end, mut right_start) = (bar.left(), bar.right());
+                ui.horizontal_centered(|ui| {
+                    if !self.projects.is_empty() {
+                        self.project_dropdown(ui, actions);
+                    }
+                    if self.active_project().is_some() && icon_button(ui, icon::PENCIL_SIMPLE, "Edit project").clicked()
+                    {
+                        actions.push(Action::EditProject);
+                    }
+                    left_end = ui.min_rect().right();
+                    let right_group = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if !mac {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui::chrome::window_buttons(ui);
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.add_space(8.0);
+                        }
+                        if icon_button(ui, icon::GEAR, "Settings").clicked() {
+                            actions.push(Action::OpenSettings);
+                        }
+                        ui.add_space(8.0);
+                        if accent_button(ui, &format!("{}  New Project", icon::PLUS)).clicked() {
+                            actions.push(Action::NewProject);
+                        }
+                        if ui.button(format!("{}  Open Project", icon::FOLDER_OPEN)).clicked() {
+                            actions.push(Action::OpenProjectDialog);
+                        }
+                    });
+                    right_start = right_group.response.rect.left();
+                });
+                ui::chrome::title(ui, bar, left_end, right_start, busy);
+            });
     }
 
     fn project_dropdown(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -937,7 +1001,34 @@ impl eframe::App for App {
         self.poll_generation();
         let mut actions = Vec::new();
 
-        self.top_bar(ui, &mut actions);
+        let inset = ui::chrome::maximized_overflow(&ctx);
+        if inset > 0.0 {
+            let pad = Frame::new().fill(theme::PANEL);
+            egui::Panel::top("max_inset_top")
+                .exact_size(inset)
+                .frame(pad)
+                .show_separator_line(false)
+                .show(ui, |_| {});
+            egui::Panel::bottom("max_inset_bottom")
+                .exact_size(inset)
+                .frame(pad)
+                .show_separator_line(false)
+                .show(ui, |_| {});
+            egui::Panel::left("max_inset_left")
+                .exact_size(inset)
+                .resizable(false)
+                .frame(pad)
+                .show_separator_line(false)
+                .show(ui, |_| {});
+            egui::Panel::right("max_inset_right")
+                .exact_size(inset)
+                .resizable(false)
+                .frame(pad)
+                .show_separator_line(false)
+                .show(ui, |_| {});
+        }
+        let busy = self.ai_busy();
+        self.top_bar(ui, &mut actions, busy);
         self.terminal_panel(ui);
 
         let central = Frame::new().fill(theme::BG).inner_margin(Margin::same(12));
@@ -960,6 +1051,7 @@ impl eframe::App for App {
         }
         self.show_modal(&ctx);
         self.show_toasts(&ctx);
+        ui::chrome::resize_edges(ui);
     }
 }
 

@@ -114,7 +114,16 @@ fn main() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("GhostLane")
         .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([640.0, 420.0]);
+        .with_min_inner_size([900.0, 480.0]);
+    // GhostLane draws its own title bar. macOS keeps its native buttons over a transparent title bar.
+    viewport = if cfg!(target_os = "macos") {
+        viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+    } else {
+        viewport.with_decorations(false)
+    };
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
