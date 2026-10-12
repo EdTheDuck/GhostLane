@@ -166,7 +166,7 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
             Frame::new()
                 .fill(fill)
                 .corner_radius(CornerRadius::same(6))
-                .inner_margin(Margin::symmetric(10, 8))
+                .inner_margin(Margin::same(12))
                 .show(ui, |ui| card_contents(ui, t, actions));
         })
         .response;
@@ -207,6 +207,9 @@ fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
     let text_rect = ui
         .allocate_ui(vec2(width, 0.0), |ui| {
             ui.set_width(width);
+            // Rows hug their text here; the app-wide 30px row height would pad the ID line.
+            ui.spacing_mut().interact_size.y = 0.0;
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.horizontal(|ui| {
                 ui.label(priority_icon(t.priority)).on_hover_text(t.priority.label());
                 ui.label(RichText::new(t.id_str()).monospace().color(theme::TEXT_MUTED));
@@ -404,5 +407,13 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn ticket_number_sits_close_to_the_title() {
+        let d = tempfile::tempdir().unwrap();
+        let h = harness(d.path());
+        let gap = h.get_by_label("Hello").rect().top() - h.get_by_label("00001").rect().bottom();
+        assert!((0.0..=6.0).contains(&gap), "gap between number and title: {gap}");
     }
 }
