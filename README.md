@@ -19,6 +19,8 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 - **Big changes become a queue of small prompts.** Break a feature into tickets, give each one a test scope, then hand them to your AI one at a time. You review ticket 3 while ticket 4 runs, and nothing gets lost in a scrollback.
 - **Your AI writes the tickets.** Describe what you want in a sentence. GhostLane asks the project's AI CLI to read the codebase and write a full ticket with a priority, a description and a test scope.
 - **One click to run.** The ▶ button on every card sends that ticket to your AI CLI. If the CLI is already open in the terminal, GhostLane types the prompt straight into it.
+- **Tickets move themselves.** Press ▶ on a To Do ticket and it slides into In Dev while the AI works, then on to Ready For Test when it's done. Testing works the same way, so a ticket can go from idea to Done with two clicks.
+- **A Developer and a Tester on call.** GhostLane sets up developer and tester sub agents for your AI CLI that know your columns, which tickets are theirs and where to move them next.
 - **The AI can see the plan.** Tickets live in `tickets/` inside your project, so your AI can read past and upcoming work, and can create or edit tickets itself. The board picks up every change the moment the file changes.
 - **Bring your own AI.** Claude Code, OpenAI Codex, Gemini CLI, GitHub Copilot CLI, Cursor, opencode and Aider are built in. Each project picks its own.
 - **Plain files, no lock-in.** A ticket is a `.md` file with a short YAML header. Grep it, commit it, edit it in any editor. If you stop using GhostLane tomorrow, your plan is still readable.
@@ -45,7 +47,14 @@ Prefer to write it yourself? The **Manual** tab is always one click away.
 
 ### Send a ticket to AI with one click
 
-Every card has a ▶ button. Press it and GhostLane builds a prompt from your template (by default *"Complete the ticket at {ticket_path}"*) and hands it to the project's AI CLI in the terminal. The ticket's run count goes up, so you can see at a glance what has already been attempted.
+Every card has a ▶ button. Press it and GhostLane fills in that column's command and hands it to the project's AI CLI in the terminal. The ticket's run count goes up, so you can see at a glance what has already been attempted.
+
+Each column can have its own command. New projects come with two ready to go:
+
+- **To Do** asks the AI to develop the ticket and move it to Ready For Test when it's finished.
+- **Ready For Test** asks the AI to test the ticket against its test scope. If it passes, the ticket moves to Done. If it fails, the AI writes down why in the ticket's notes and sends it back to To Do.
+
+Every other column uses the command from Settings (by default *"Complete the ticket at {ticket_path}"*) until you give it its own.
 
 When you open a project, GhostLane starts its AI CLI in the terminal for you, so it's ready before you need it.
 
@@ -77,11 +86,34 @@ Click a card to read it with the Markdown fully rendered. Right-click it to **Ed
 
 ### Boards shaped to your workflow
 
-New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that: drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. This is also where you pick the project's AI CLI. Whenever you create or save a project, GhostLane writes a short guide to its tickets and columns into that CLI's instructions file (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and so on), so your AI knows how to read, write and move tickets. Anything else in that file is left alone. Where the CLI supports sub agents (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor and opencode), GhostLane also sets up a **Developer** and a **Tester** agent that know which columns they pick tickets up from and where to move them, and keeps them in step when you change your columns.
+New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that: drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. This is also where you pick the project's AI CLI, and where the terminal icon on each column opens that column's ▶ command.
 
 ![Editing a project's columns and AI CLI](docs/screenshots/project.png)
 
 Each column is a folder with a safe, predictable name, so `Ready For Test` becomes `tickets/ready_for_test/`. Drag a card to another column and the file moves on disk. Move a file in Explorer, Finder or the terminal and the card moves on the board.
+
+### Tickets that move themselves
+
+Between each pair of columns is a dropdown that decides when tickets move on without you dragging them:
+
+- **None**: tickets only move when you or your AI move them.
+- **AI Working**: the moment you press ▶ on a ticket, it moves into the next column, so the board shows what the AI is busy with. Columns filled this way have no ▶ button of their own, since the AI is already on it.
+- **AI Complete**: when the AI finishes the ticket, it moves into the next column.
+
+New projects come set up as **To Do →** *AI Working* **→ In Dev →** *AI Complete* **→ Ready For Test →** *AI Working* **→ In Test →** *AI Complete* **→ Done**.
+
+GhostLane decides the AI has finished once the terminal goes quiet, so if your AI CLI stops to ask for permission, approve it promptly or the ticket may move on early.
+
+### Your AI knows the board
+
+Whenever you create or save a project, GhostLane writes a short guide to your columns, their folders and the ticket format into the instructions file your AI CLI reads: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, Cursor and opencode, `GEMINI.md` for Gemini CLI, `.github/copilot-instructions.md` for Copilot and `CONVENTIONS.md` for Aider. The guide sits in its own marked block, so anything else you keep in that file stays as it is.
+
+Where the CLI supports sub agents (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor and opencode), GhostLane also sets up two of them:
+
+- a **Developer** that picks up tickets waiting for development, moves them into the development column before starting and on for testing when the work is done
+- a **Tester** that checks finished work against each ticket's test scope, passes it on, or notes what failed and sends it back for rework
+
+Both know every column, its folder and how tickets move between them, and GhostLane rewrites them whenever you change your columns or transitions. If you already have your own agent file with the same name, GhostLane leaves it alone.
 
 ### Search and sort every column
 
@@ -100,13 +132,13 @@ Open as many projects as you like and switch between them from the dropdown in t
 Click the ⚙ cog to choose:
 
 - which **AI CLIs** are available to your projects (installed ones are switched on for you the first time)
-- the **AI command** the ▶ button sends, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
+- the **AI command** the ▶ button sends for columns that don't have their own, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
 - which **shell** to use (detected automatically by default)
 - the **terminal font size**
 
 ![The settings dialog](docs/screenshots/settings.png)
 
-For safety, GhostLane never puts a ticket's title or text into the command, and refuses to run if a path or ID contains shell characters such as quotes, `$`, `;` or `|`. That matters when you open a repo full of tickets someone else wrote.
+For safety, GhostLane never puts a ticket's title or text into the command, and refuses to run if a path or ID contains shell characters such as quotes, `$`, `;` or `|`. That matters when you open a repo full of tickets someone else wrote. Column commands are saved in the project file, so when you open someone else's project, glance at them in the project settings before you press ▶.
 
 ### Easy on the eyes
 
@@ -119,6 +151,8 @@ Dark greys with a soft pale green accent, made for long sessions. The title bar 
 ```
 my-project/
 ├── my_project.ghost        ← project settings (YAML)
+├── CLAUDE.md               ← ticket guide for your AI CLI
+├── .claude/agents/         ← Developer and Tester sub agents
 └── tickets/
     ├── to_do/
     │   ├── 00001.md
@@ -149,6 +183,10 @@ Build the login form with email and password fields.
 
 - valid credentials log the user in
 - invalid credentials show an error
+
+## Notes
+
+First test run: the error message overlapped the password field.
 ```
 
 You, your teammates or your AI can write tickets like this by hand, and GhostLane picks them up straight away. Try asking your AI in the terminal to split a feature into tickets and watch them land in To Do.
@@ -161,7 +199,7 @@ You, your teammates or your AI can write tickets like this by hand, and GhostLan
 2. Click **New Project**, give it a name and choose a folder. An existing code repository works well, since that's what your AI will read.
 3. Pick the project's AI CLI, adjust the columns if you like, then click **Create**.
 4. Press **➕** on a column and describe your first ticket on the **AI Assisted** tab, or write it yourself on **Manual**.
-5. Press **▶** to hand a ticket to your AI, and drag cards across the board as the work moves along.
+5. Press **▶** on a To Do ticket to hand it to your AI. It moves into In Dev while the AI works and on to Ready For Test when it's done; press ▶ there to have it tested. You can always drag cards yourself too.
 
 To open an existing project, click **Open Project** and select its `.ghost` file.
 
