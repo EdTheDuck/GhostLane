@@ -1,6 +1,7 @@
 pub mod board;
 pub mod chrome;
 pub mod generating;
+pub mod import;
 pub mod project;
 pub mod rich_editor;
 pub mod settings;

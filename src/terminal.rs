@@ -131,6 +131,28 @@ pub fn ticket_update_prompt(request: &str, path: &Path, id: &str) -> String {
     )
 }
 
+/// Prompt asking the AI CLI to break the document at `doc` into new ticket files in `dir`, numbered from
+/// `first_id`, on one line.
+pub fn tickets_from_document_prompt(doc: &Path, dir: &Path, tickets: &Path, first_id: u32) -> String {
+    let line = |p: &Path| p.display().to_string().replace(['\n', '\r'], " ");
+    format!(
+        "Read the document at {doc} (a technical spec, design document or project plan) and break the work it \
+         describes into tickets for this project. Look through the project files and the existing tickets under \
+         {tickets} first, and skip work that already has a ticket. Write each new ticket as its own file in {dir}, \
+         named with a five-digit zero-padded id: start at {first}.md and count up by one, skipping any id that already \
+         has a file anywhere under {tickets}. Change nothing else. Each file must be Markdown that starts with a YAML \
+         front matter block between two lines of three dashes, containing: id: the file's id in single quotes, \
+         title: a short title, priority: one of low, medium, high or highest, and run_count: 0. After the front \
+         matter add a '## Description' section explaining what needs doing and why, then a '## Test Scope' section \
+         listing how to check it is done. Keep each ticket a piece of work small enough to finish in one sitting, \
+         and number them in the order they should be done.",
+        doc = line(doc),
+        dir = line(dir),
+        tickets = line(tickets),
+        first = crate::ticket::format_id(first_id),
+    )
+}
+
 /// Shell command that starts `cli` with `prompt`, quoted as a single argument for `shell`.
 pub fn cli_command(cli: &AiCli, prompt: &str, shell: &str) -> String {
     let flag = cli.prompt_flag.map(|f| format!("{f} ")).unwrap_or_default();
@@ -423,6 +445,21 @@ mod tests {
         assert!(p.contains("Raise priority"));
         assert!(p.contains("/p/tickets/done/00003.md"));
         assert!(p.contains("Leave the id and run_count"));
+    }
+
+    #[test]
+    fn document_prompt_is_one_line_with_paths_and_first_id() {
+        let p = tickets_from_document_prompt(
+            Path::new("/docs/spec\nv2.md"),
+            Path::new("/p/tickets/to_do"),
+            Path::new("/p/tickets"),
+            12,
+        );
+        assert!(!p.contains('\n'));
+        assert!(p.contains("/docs/spec v2.md"));
+        assert!(p.contains("in /p/tickets/to_do,"));
+        assert!(p.contains("start at 00012.md"));
+        assert!(p.contains("## Test Scope"));
     }
 
     #[test]

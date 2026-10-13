@@ -14,6 +14,7 @@ use crate::project::{Project, Sort};
 use crate::terminal::{self, Terminals};
 use crate::theme;
 use crate::ticket::Ticket;
+use crate::ui::import::{ImportForm, ImportOutcome};
 use crate::ui::project::{ProjectForm, ProjectOutcome};
 use crate::ui::settings::{SettingsForm, SettingsOutcome};
 use crate::ui::ticket::{self as ticket_ui, FormMode, FormOutcome, TicketForm, ViewOutcome};
@@ -50,6 +51,7 @@ pub enum Action {
     OpenProjectDialog,
     NewProject,
     EditProject,
+    ImportDocument,
     OpenSettings,
     MoveTicket { id: u32, to_col: usize },
     SetSort { col: usize, sort: Sort },
@@ -67,6 +69,7 @@ pub enum Modal {
     EditTicket(Box<TicketForm>),
     ConfirmDelete(u32),
     Settings(SettingsForm),
+    Import(ImportForm),
     /// A short notice with an OK button.
     Message {
         title: String,
@@ -340,6 +343,7 @@ impl App {
                     self.modal = Some(Modal::Project(ProjectForm::edit(p, clis)));
                 }
             }
+            Action::ImportDocument => self.modal = Some(Modal::Import(ImportForm::default())),
             Action::ViewTicket(id) => self.modal = Some(Modal::ViewTicket(id)),
             Action::EditTicket(id) => {
                 if let Some((_, t)) = self.find_ticket(id) {
@@ -491,6 +495,35 @@ impl App {
             reopen: Some(id),
         });
         Ok(())
+    }
+
+    /// Asks the AI CLI to break the document at `doc` into new tickets in the first column. They show up on
+    /// the board as the AI writes them.
+    fn start_import(&mut self, doc: &Path, ctx: &egui::Context) -> Result<(), String> {
+        if !doc.is_file() {
+            return Err(format!("{} isn't a file", doc.display()));
+        }
+        let p = self.active_project().ok_or("No project is open")?;
+        if p.meta.columns.is_empty() {
+            return Err("Add a column to the project first".into());
+        }
+        let cli = self.project_cli(p)?;
+        let prompt =
+            terminal::tickets_from_document_prompt(doc, &p.column_dir(0), &p.tickets_dir(), p.meta.next_ticket_id);
+        let (key, root) = (p.ghost_path.clone(), p.root.clone());
+        self.send_to_cli(&key, &root, cli, &prompt, ctx)
+    }
+
+    /// A file dropped on the window opens the document import with it (the import modal reads the drop itself).
+    fn open_dropped_document(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.raw.dropped_files.iter().any(|f| f.path.is_some())) {
+            return;
+        }
+        if self.active_project().is_none() {
+            self.toast("Open a project before dropping in a document");
+        } else if self.modal.is_none() && self.generating.is_none() {
+            self.modal = Some(Modal::Import(ImportForm::default()));
+        }
     }
 
     /// Finishes the generation once its file is written, or reports why it failed.
@@ -708,6 +741,18 @@ impl App {
                 }
                 None => {}
             },
+            Some(Modal::Import(form)) => match form.show(ctx) {
+                Some(ImportOutcome::Close) => self.modal = None,
+                Some(ImportOutcome::Generate(doc)) => match self.start_import(&doc, ctx) {
+                    Ok(()) => self.modal = None,
+                    Err(e) => {
+                        if let Some(Modal::Import(form)) = &mut self.modal {
+                            form.error = Some(e);
+                        }
+                    }
+                },
+                None => {}
+            },
             Some(Modal::Message { title, body }) => {
                 if ticket_ui::message(ctx, title, body) {
                     self.modal = None;
@@ -877,6 +922,11 @@ impl App {
                     if self.active_project().is_some() && icon_button(ui, icon::PENCIL_SIMPLE, "Edit project").clicked()
                     {
                         actions.push(Action::EditProject);
+                    }
+                    if self.active_project().is_some()
+                        && icon_button(ui, icon::UPLOAD_SIMPLE, "Generate tickets from a document").clicked()
+                    {
+                        actions.push(Action::ImportDocument);
                     }
                     left_end = ui.min_rect().right();
                     let right_group = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1086,9 +1136,15 @@ impl eframe::App for App {
             self.generating = None;
         }
 
+        let hovering_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if hovering_file && self.modal.is_none() && self.generating.is_none() && self.active_project().is_some() {
+            ui::import::drop_hint(&ctx, board);
+        }
+
         for action in actions {
             self.apply(action, &ctx);
         }
+        self.open_dropped_document(&ctx);
         self.show_modal(&ctx);
         self.show_toasts(&ctx);
         ui::chrome::resize_edges(ui);
