@@ -68,6 +68,12 @@ pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Opt
                 ui.add_space(4.0);
                 markdown(ui, cache, &t.test_scope);
             }
+            if !t.notes.trim().is_empty() {
+                ui.add_space(16.0);
+                ui.label(RichText::new("Notes").size(17.0).strong().color(theme::ACCENT));
+                ui.add_space(4.0);
+                markdown(ui, cache, &t.notes);
+            }
         });
     });
     if modal.should_close() && outcome.is_none() {
@@ -99,6 +105,8 @@ pub struct TicketForm {
     description: RichEditor,
     test_scope: RichEditor,
     scope_open: bool,
+    notes: RichEditor,
+    notes_open: bool,
     confirm_discard: bool,
     pub error: Option<String>,
 }
@@ -132,6 +140,8 @@ impl TicketForm {
             description: RichEditor::new(("description", ticket.id), &ticket.description),
             test_scope: RichEditor::new(("test_scope", ticket.id), &ticket.test_scope),
             scope_open: false,
+            notes: RichEditor::new(("notes", ticket.id), &ticket.notes),
+            notes_open: false,
             original: ticket.clone(),
             ticket,
             confirm_discard: false,
@@ -148,6 +158,7 @@ impl TicketForm {
             || a.run_count != b.run_count
             || self.description.changed()
             || self.test_scope.changed()
+            || self.notes.changed()
             || (self.tab == Tab::Ai && !self.request.trim().is_empty())
     }
 
@@ -212,11 +223,13 @@ impl TicketForm {
 
             let footer = 56.0;
             let body_h = (ui.available_height() - footer).max(240.0);
-            // Toolbar, labels and the Test Scope header take roughly this much of the body.
-            let chrome = 130.0;
-            let (desc_h, scope_h) = if self.scope_open {
-                let room = (body_h - chrome - 50.0).max(240.0);
-                (room * 0.6, room * 0.4)
+            // Toolbar, labels and the optional section headers take roughly this much of the body.
+            let chrome = 170.0;
+            let open = usize::from(self.scope_open) + usize::from(self.notes_open);
+            let (desc_h, section_h) = if open > 0 {
+                let room = (body_h - chrome - 50.0 * open as f32).max(240.0);
+                let desc = if open == 1 { 0.6 } else { 0.5 };
+                (room * desc, room * (1.0 - desc) / open as f32)
             } else {
                 ((body_h - chrome).max(160.0), 0.0)
             };
@@ -227,30 +240,8 @@ impl TicketForm {
                     ui.label("Description");
                     self.description.show(ui, desc_h);
                     ui.add_space(6.0);
-                    let caret = if self.scope_open {
-                        icon::CARET_DOWN
-                    } else {
-                        icon::CARET_RIGHT
-                    };
-                    let toggled = ui
-                        .horizontal(|ui| {
-                            let tip = if self.scope_open {
-                                "Hide test scope"
-                            } else {
-                                "Show test scope"
-                            };
-                            let caret = icon_button(ui, caret, tip).clicked();
-                            let label = ui.add(egui::Label::new("Test Scope").sense(egui::Sense::click()));
-                            ui.label(RichText::new("optional").small().color(theme::TEXT_MUTED));
-                            caret || super::pointer(label).clicked()
-                        })
-                        .inner;
-                    if toggled {
-                        self.scope_open = !self.scope_open;
-                    }
-                    if self.scope_open {
-                        self.test_scope.show(ui, scope_h.max(120.0));
-                    }
+                    optional_section(ui, "Test Scope", &mut self.scope_open, &mut self.test_scope, section_h);
+                    optional_section(ui, "Notes", &mut self.notes_open, &mut self.notes, section_h);
                 });
 
             ui.separator();
@@ -279,6 +270,9 @@ impl TicketForm {
             }
             if self.test_scope.changed() {
                 self.ticket.test_scope = self.test_scope.markdown();
+            }
+            if self.notes.changed() {
+                self.ticket.notes = self.notes.markdown();
             }
         }
         if (close || modal.should_close()) && outcome.is_none() {
@@ -337,6 +331,26 @@ impl TicketForm {
                 *outcome = Some(FormOutcome::Generate(self.request.trim().to_string()));
             }
         });
+    }
+}
+
+/// Collapsible optional field: a caret and label that show or hide `editor`.
+fn optional_section(ui: &mut Ui, label: &str, open: &mut bool, editor: &mut RichEditor, height: f32) {
+    let caret = if *open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
+    let tip = format!("{} {}", if *open { "Hide" } else { "Show" }, label.to_lowercase());
+    let toggled = ui
+        .horizontal(|ui| {
+            let caret = icon_button(ui, caret, &tip).clicked();
+            let label = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+            ui.label(RichText::new("optional").small().color(theme::TEXT_MUTED));
+            caret || super::pointer(label).clicked()
+        })
+        .inner;
+    if toggled {
+        *open = !*open;
+    }
+    if *open {
+        editor.show(ui, height.max(120.0));
     }
 }
 
@@ -475,6 +489,41 @@ mod tests {
         h.get_by_label("Generate Ticket").click();
         h.run();
         assert_eq!(h.state().1.as_deref(), Some("Add a logout button"));
+    }
+
+    #[test]
+    fn notes_open_and_save() {
+        let ticket = Ticket {
+            id: 4,
+            title: "T".into(),
+            ..Default::default()
+        };
+        let mut form = TicketForm::edit(&ticket);
+        form.tab = Tab::Manual;
+        let mut h = Harness::new_ui_state(
+            |ui, (form, saved): &mut (TicketForm, bool)| {
+                *saved |= matches!(form.show(ui.ctx()), Some(FormOutcome::Save));
+            },
+            (form, false),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 1400.0));
+        h.run_steps(3);
+        h.get_by_label("Notes").click();
+        h.run();
+        assert!(h.state().0.notes_open);
+        // The notes editor is the last text box in the form.
+        h.get_all_by_role(egui::accesskit::Role::MultilineTextInput)
+            .last()
+            .unwrap()
+            .click();
+        h.run();
+        h.event(egui::Event::Text("Ask design".into()));
+        h.run();
+        h.get_by_label("Save").click();
+        h.run();
+        assert!(h.state().1);
+        assert_eq!(h.state().0.ticket.notes, "Ask design");
     }
 
     #[test]

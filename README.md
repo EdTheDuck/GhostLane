@@ -70,6 +70,7 @@ Every ticket has:
 - a **priority**: Low, Medium, High or Highest, each with its own colour-coded icon
 - a **description**
 - an optional **test scope**, so you and your AI agree on what "done" means
+- optional **notes** for anything else worth keeping with the ticket
 - a **run count** showing how many times the ticket has been sent to AI
 
 Click a card to read it with the Markdown fully rendered. Right-click it to **Edit**, **Duplicate** or **Delete**. Deleted tickets go to your Recycle Bin or Trash, so you can get them back.
@@ -86,7 +87,7 @@ Each column is a folder with a safe, predictable name, so `Ready For Test` becom
 
 Each column header shows a live ticket count and three quick tools:
 
-- 🔍 **Search** filters the column as you type, matching on ID, title, description and test scope.
+- 🔍 **Search** filters the column as you type, matching on ID, title, description, test scope and notes.
 - ⇅ **Sort** orders tickets by ID, priority or title, ascending or descending. GhostLane remembers your choice for each column.
 - ➕ **Add** creates a new ticket directly in that column.
 

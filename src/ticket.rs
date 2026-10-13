@@ -42,6 +42,7 @@ pub struct Ticket {
     pub run_count: u32,
     pub description: String,
     pub test_scope: String,
+    pub notes: String,
     /// Frontmatter was missing or unreadable; shown with a warning marker.
     pub malformed: bool,
 }
@@ -80,6 +81,7 @@ impl Ticket {
             || self.title.to_lowercase().contains(&q)
             || self.description.to_lowercase().contains(&q)
             || self.test_scope.to_lowercase().contains(&q)
+            || self.notes.to_lowercase().contains(&q)
     }
 
     pub fn parse(id: u32, path: PathBuf, text: &str) -> Ticket {
@@ -121,9 +123,7 @@ impl Ticket {
             t.title = format_id(id);
         }
 
-        let (desc, scope) = split_body(body);
-        t.description = desc;
-        t.test_scope = scope;
+        [t.description, t.test_scope, t.notes] = split_body(body);
         t
     }
 
@@ -141,12 +141,14 @@ impl Ticket {
             out.push_str(desc);
             out.push_str("\n\n");
         }
-        let scope = self.test_scope.trim();
-        if !scope.is_empty() {
-            out.push_str("## Test Scope\n\n");
-            out.push_str(scope);
-            out.push('\n');
+        for (heading, text) in [("## Test Scope", &self.test_scope), ("## Notes", &self.notes)] {
+            let text = text.trim();
+            if !text.is_empty() {
+                out.push_str(&format!("{heading}\n\n{text}\n\n"));
+            }
         }
+        out.truncate(out.trim_end().len());
+        out.push('\n');
         out
     }
 
@@ -196,16 +198,26 @@ fn find_heading(text: &str, heading: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn split_body(body: &str) -> (String, String) {
-    let (desc_part, scope) = match find_heading(body, "## Test Scope") {
-        Some((s, e)) => (&body[..s], &body[e..]),
-        None => (body, ""),
-    };
-    let desc = match find_heading(desc_part, "## Description") {
-        Some((_, e)) => &desc_part[e..],
-        None => desc_part,
-    };
-    (desc.trim().to_string(), scope.trim().to_string())
+/// [description, test scope, notes], in whatever order the headings appear. Text before the first
+/// heading counts as description.
+fn split_body(body: &str) -> [String; 3] {
+    let mut found: Vec<(usize, usize, usize)> = ["## Description", "## Test Scope", "## Notes"]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| find_heading(body, h).map(|(s, e)| (s, e, i)))
+        .collect();
+    found.sort();
+    let mut out: [String; 3] = Default::default();
+    let first = found.first().map_or(body.len(), |f| f.0);
+    out[0] = body[..first].trim().to_string();
+    for (k, &(_, end, i)) in found.iter().enumerate() {
+        let next = found.get(k + 1).map_or(body.len(), |f| f.0);
+        let text = body[end..next].trim();
+        if !text.is_empty() {
+            out[i] = text.to_string();
+        }
+    }
+    out
 }
 
 pub fn sort(tickets: &mut [Ticket], by: SortBy, dir: SortDir) {
@@ -249,6 +261,7 @@ mod tests {
             run_count: 3,
             description: "Build it.\n\n- a\n- b".into(),
             test_scope: "- works".into(),
+            notes: "Spoke to *design*.".into(),
             malformed: false,
         };
         let back = Ticket::parse(7, p(), &t.serialize());
@@ -264,8 +277,33 @@ mod tests {
             ..Default::default()
         };
         let s = t.serialize();
-        assert!(!s.contains("Test Scope"));
+        assert!(!s.contains("Test Scope") && !s.contains("Notes"));
+        assert!(s.ends_with("## Description\n"));
         assert_eq!(Ticket::parse(1, p(), &s), t);
+    }
+
+    #[test]
+    fn notes_without_scope_and_in_any_order() {
+        let t = Ticket {
+            id: 1,
+            path: p(),
+            title: "T".into(),
+            description: "d".into(),
+            notes: "n".into(),
+            ..Default::default()
+        };
+        let s = t.serialize();
+        assert!(s.ends_with("## Description\n\nd\n\n## Notes\n\nn\n") && !s.contains("Test Scope"));
+        assert_eq!(Ticket::parse(1, p(), &s), t);
+        let t = Ticket::parse(
+            1,
+            p(),
+            "---\ntitle: X\n---\n## Notes\nn\n## Description\nd\n## Test Scope\ns\n",
+        );
+        assert_eq!(
+            (t.description.as_str(), t.test_scope.as_str(), t.notes.as_str()),
+            ("d", "s", "n")
+        );
     }
 
     #[test]
@@ -308,9 +346,11 @@ mod tests {
             id: 12,
             title: "Login Page".into(),
             test_scope: "OAuth".into(),
+            notes: "Ask Sam".into(),
             ..Default::default()
         };
         assert!(t.matches("login"));
+        assert!(t.matches("sam"));
         assert!(t.matches("oauth"));
         assert!(t.matches("00012"));
         assert!(t.matches("  "));

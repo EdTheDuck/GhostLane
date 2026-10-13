@@ -125,8 +125,8 @@ pub fn ticket_update_prompt(request: &str, path: &Path, id: &str) -> String {
         "Update the existing ticket at {path} (ticket {id}). The requested change is: {request} -- Look through the \
          project files for context if needed, then edit only that file and change nothing else. Keep its format: a YAML \
          front matter block between two lines of three dashes with id, title, priority (one of low, medium, high or \
-         highest) and run_count, followed by a '## Description' section and a '## Test Scope' section. Leave the id and \
-         run_count as they are.",
+         highest) and run_count, followed by a '## Description' section, a '## Test Scope' section and, if it has one, a \
+         '## Notes' section. Leave the id and run_count as they are.",
         path = path.display()
     )
 }
