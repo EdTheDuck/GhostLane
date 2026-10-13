@@ -424,12 +424,26 @@ impl Project {
 }
 
 impl Project {
+    /// "**Name** (`tickets/folder/`)" for column `col`, on one line.
+    pub fn column_label(&self, col: usize) -> String {
+        let c = &self.meta.columns[col];
+        format!("**{}** (`tickets/{}/`)", c.name.replace(['\n', '\r'], " "), c.folder)
+    }
+
     /// Markdown telling an AI CLI how this project's tickets and columns work.
     pub fn ai_guide(&self) -> String {
         let mut columns = String::new();
         for (i, c) in self.meta.columns.iter().enumerate() {
-            let name = c.name.replace(['\n', '\r'], " ");
-            columns.push_str(&format!("{}. {name}: `tickets/{}/`\n", i + 1, c.folder));
+            let arrives = match (i.checked_sub(1).map(|p| self.column_label(p)), c.auto_move) {
+                (Some(prev), AutoMove::AiWorking) => {
+                    format!(" (GhostLane moves tickets here from {prev} when the AI starts on them)")
+                }
+                (Some(prev), AutoMove::AiComplete) => {
+                    format!(" (GhostLane moves tickets here from {prev} when the AI finishes them)")
+                }
+                _ => String::new(),
+            };
+            columns.push_str(&format!("{}. {}{arrives}\n", i + 1, self.column_label(i)));
         }
         let ghost = self.ghost_path.file_name().unwrap_or_default().to_string_lossy();
         format!(
@@ -630,12 +644,21 @@ mod tests {
         let p = new_project(d.path());
         p.write_ai_guide("CLAUDE.md").unwrap();
         let text = fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
-        assert!(text.contains("3. Ready For Test: `tickets/ready_for_test/`"));
+        assert!(text.contains("3. **Ready For Test** (`tickets/ready_for_test/`)\n"));
         assert!(text.contains("`my_project.ghost`"));
         p.write_ai_guide("CLAUDE.md").unwrap();
         assert_eq!(fs::read_to_string(d.path().join("CLAUDE.md")).unwrap(), text);
         p.write_ai_guide(".github/copilot-instructions.md").unwrap();
         assert!(d.path().join(".github/copilot-instructions.md").is_file());
+
+        let mut p = p;
+        for (c, m) in p.meta.columns.iter_mut().zip(DEFAULT_AUTO_MOVES) {
+            c.auto_move = m;
+        }
+        assert!(p.ai_guide().contains(
+            "2. **In Dev** (`tickets/in_dev/`) (GhostLane moves tickets here from **To Do** (`tickets/to_do/`) \
+             when the AI starts on them)\n"
+        ));
     }
 
     #[test]

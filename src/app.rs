@@ -1150,12 +1150,24 @@ fn ai_activity(
 }
 
 /// Writes the ticket guide into the instructions file the project's AI CLI reads (CLAUDE.md for
-/// Claude Code, AGENTS.md for Codex, ...).
+/// Claude Code, AGENTS.md for Codex, ...), plus Developer and Tester sub agents where the CLI has them.
 fn write_ai_guide(p: &Project) -> Result<(), String> {
     let id = p.meta.ai_cli.as_deref().unwrap_or(terminal::DEFAULT_CLI);
     let Some(cli) = terminal::ai_cli(id) else { return Ok(()) };
     p.write_ai_guide(cli.instructions_file)
-        .map_err(|e| format!("Couldn't update {}: {e}", cli.instructions_file))
+        .map_err(|e| format!("Couldn't update {}: {e}", cli.instructions_file))?;
+    let skipped = crate::agents::write_agents(p, cli.id).map_err(|e| format!("Couldn't write the AI agents: {e}"))?;
+    match skipped.as_slice() {
+        [] => Ok(()),
+        files => Err(format!(
+            "Left {} as it is: it wasn't made by GhostLane",
+            files
+                .iter()
+                .map(|f| f.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )),
+    }
 }
 
 /// Windows `canonicalize` yields `\\?\C:\...`; keep paths human-readable.
