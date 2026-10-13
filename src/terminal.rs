@@ -12,6 +12,8 @@ pub struct AiCli {
     pub program: &'static str,
     /// Flag that starts an interactive session with an initial prompt; `None` = positional prompt.
     pub prompt_flag: Option<&'static str>,
+    /// Project instructions file the CLI reads, relative to the project root.
+    pub instructions_file: &'static str,
 }
 
 pub const DEFAULT_CLI: &str = "claude";
@@ -22,42 +24,49 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "Claude Code",
         program: "claude",
         prompt_flag: None,
+        instructions_file: "CLAUDE.md",
     },
     AiCli {
         id: "codex",
         name: "OpenAI Codex",
         program: "codex",
         prompt_flag: None,
+        instructions_file: "AGENTS.md",
     },
     AiCli {
         id: "gemini",
         name: "Gemini CLI",
         program: "gemini",
         prompt_flag: Some("-i"),
+        instructions_file: "GEMINI.md",
     },
     AiCli {
         id: "copilot",
         name: "GitHub Copilot CLI",
         program: "copilot",
         prompt_flag: Some("-i"),
+        instructions_file: ".github/copilot-instructions.md",
     },
     AiCli {
         id: "cursor",
         name: "Cursor",
         program: "cursor-agent",
         prompt_flag: None,
+        instructions_file: "AGENTS.md",
     },
     AiCli {
         id: "opencode",
         name: "opencode",
         program: "opencode",
         prompt_flag: Some("--prompt"),
+        instructions_file: "AGENTS.md",
     },
     AiCli {
         id: "aider",
         name: "Aider",
         program: "aider",
         prompt_flag: Some("--message"),
+        instructions_file: "CONVENTIONS.md",
     },
 ];
 

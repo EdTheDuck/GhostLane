@@ -77,7 +77,7 @@ Click a card to read it with the Markdown fully rendered. Right-click it to **Ed
 
 ### Boards shaped to your workflow
 
-New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that: drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. This is also where you pick the project's AI CLI.
+New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that: drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. This is also where you pick the project's AI CLI. Whenever you create or save a project, GhostLane writes a short guide to its tickets and columns into that CLI's instructions file (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and so on), so your AI knows how to read, write and move tickets. Anything else in that file is left alone.
 
 ![Editing a project's columns and AI CLI](docs/screenshots/project.png)
 

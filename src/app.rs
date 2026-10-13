@@ -905,6 +905,9 @@ impl App {
                     if let Err(e) = p.save_meta() {
                         self.toast(format!("Couldn't save the project's settings: {e}"));
                     }
+                    if let Err(e) = write_ai_guide(&p) {
+                        self.toast(e);
+                    }
                     self.add_project(p, ctx);
                 }
                 Err(e) => {
@@ -922,9 +925,15 @@ impl App {
                 self.modal = None;
                 let Some(p) = self.active_project_mut() else { return };
                 p.meta.ai_cli = Some(ai_cli);
-                if let Err(e) = p.apply_columns(&name, &edits, &targets) {
-                    self.toast(format!("Couldn't update project: {e}"));
-                    self.reload_active();
+                let result = p
+                    .apply_columns(&name, &edits, &targets)
+                    .map_err(|e| format!("Couldn't update project: {e}"));
+                match result.and_then(|_| write_ai_guide(p)) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.toast(e);
+                        self.reload_active();
+                    }
                 }
             }
         }
@@ -1138,6 +1147,15 @@ fn ai_activity(
     let active = request.is_some() && (within(request, 4000) || within(output, 4000));
     let working = active && within(output, 1200) && !within(typing, 800);
     (active, working)
+}
+
+/// Writes the ticket guide into the instructions file the project's AI CLI reads (CLAUDE.md for
+/// Claude Code, AGENTS.md for Codex, ...).
+fn write_ai_guide(p: &Project) -> Result<(), String> {
+    let id = p.meta.ai_cli.as_deref().unwrap_or(terminal::DEFAULT_CLI);
+    let Some(cli) = terminal::ai_cli(id) else { return Ok(()) };
+    p.write_ai_guide(cli.instructions_file)
+        .map_err(|e| format!("Couldn't update {}: {e}", cli.instructions_file))
 }
 
 /// Windows `canonicalize` yields `\\?\C:\...`; keep paths human-readable.

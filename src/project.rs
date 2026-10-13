@@ -97,6 +97,10 @@ pub struct Column {
     pub ai_prompt: Option<String>,
 }
 
+/// Markers around the ticket guide GhostLane keeps in an AI CLI's instructions file.
+const GUIDE_START: &str = "<!-- ghostlane:start -->";
+const GUIDE_END: &str = "<!-- ghostlane:end -->";
+
 fn one() -> u32 {
     1
 }
@@ -419,6 +423,97 @@ impl Project {
     }
 }
 
+impl Project {
+    /// Markdown telling an AI CLI how this project's tickets and columns work.
+    pub fn ai_guide(&self) -> String {
+        let mut columns = String::new();
+        for (i, c) in self.meta.columns.iter().enumerate() {
+            let name = c.name.replace(['\n', '\r'], " ");
+            columns.push_str(&format!("{}. {name}: `tickets/{}/`\n", i + 1, c.folder));
+        }
+        let ghost = self.ghost_path.file_name().unwrap_or_default().to_string_lossy();
+        format!(
+            r#"## GhostLane tickets
+
+This project's tickets are managed with GhostLane, a board that keeps every ticket as a Markdown file. The folder a ticket sits in is its column, and GhostLane picks up changes on disk straight away.
+
+### Columns
+
+In board order, with each column's folder:
+
+{columns}
+To move a ticket to another column, move its file into that column's folder and keep the file name. A ticket lives in exactly one folder, so never copy it. Columns can be referred to by name or by initials (for example "RFT" for "Ready For Test").
+
+### Ticket files
+
+- The file name is the ticket's ID, zero-padded to five digits: `00042.md`. Never rename a ticket file.
+- A new ticket takes the next unused ID: one higher than the highest ID in any column folder. IDs are never reused.
+- Every ticket has this layout:
+
+```markdown
+---
+id: '00042'
+title: Short title
+priority: medium
+run_count: 0
+---
+
+## Description
+
+What needs doing and why.
+
+## Test Scope
+
+How to check it is done.
+
+## Notes
+
+Anything else worth keeping, such as why a test failed.
+```
+
+- `priority` is one of `low`, `medium`, `high` or `highest`.
+- `## Test Scope` and `## Notes` are optional; leave a section out when it is empty.
+- Leave `id` and `run_count` as they are; GhostLane maintains them.
+- To add a note, append it under `## Notes` (create the section if it is missing) rather than changing the description.
+- Don't edit `{ghost}`; it holds the board's columns and settings.
+"#
+        )
+    }
+
+    /// Puts `ai_guide` into `file` (relative to the root) between GhostLane's markers, replacing the
+    /// previous guide and keeping the rest of the file. Creates the file if needed.
+    pub fn write_ai_guide(&self, file: &str) -> io::Result<()> {
+        let path = self.root.join(file);
+        let existing = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        let updated = replace_guide(&existing, &self.ai_guide());
+        if updated == existing {
+            return Ok(());
+        }
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        write_atomic(&path, &updated)
+    }
+}
+
+/// `text` with the block between GhostLane's markers set to `guide`, appended when there is none yet.
+fn replace_guide(text: &str, guide: &str) -> String {
+    let block = format!("{GUIDE_START}\n{}\n{GUIDE_END}", guide.trim());
+    if let (Some(start), Some(end)) = (text.find(GUIDE_START), text.find(GUIDE_END))
+        && start < end
+    {
+        return format!("{}{block}{}", &text[..start], &text[end + GUIDE_END.len()..]);
+    }
+    match text.trim_end() {
+        "" => format!("{block}\n"),
+        rest => format!("{rest}\n\n{block}\n"),
+    }
+}
+
 pub fn find_ghost_file(dir: &Path) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?
@@ -515,6 +610,32 @@ mod tests {
         assert_eq!(p.auto_target(4, AutoMove::AiComplete), None);
         let yaml = serde_yaml_ng::to_string(&p.meta).unwrap();
         assert!(yaml.contains("auto_move: ai_working") && !yaml.contains("none"));
+    }
+
+    #[test]
+    fn guide_is_added_once_and_keeps_the_rest_of_the_file() {
+        assert_eq!(replace_guide("", "G"), format!("{GUIDE_START}\nG\n{GUIDE_END}\n"));
+        let mine = "# Mine\n\nKeep this.\n";
+        let once = replace_guide(mine, "Old");
+        assert!(once.starts_with("# Mine\n\nKeep this.\n\n<!--"));
+        let twice = replace_guide(&format!("{once}\nAfter\n"), "New");
+        assert_eq!(twice.matches(GUIDE_START).count(), 1);
+        assert!(twice.contains("\nNew\n") && !twice.contains("Old"));
+        assert!(twice.starts_with("# Mine") && twice.ends_with("\nAfter\n"));
+    }
+
+    #[test]
+    fn guide_lists_columns_and_lands_in_the_cli_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = new_project(d.path());
+        p.write_ai_guide("CLAUDE.md").unwrap();
+        let text = fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
+        assert!(text.contains("3. Ready For Test: `tickets/ready_for_test/`"));
+        assert!(text.contains("`my_project.ghost`"));
+        p.write_ai_guide("CLAUDE.md").unwrap();
+        assert_eq!(fs::read_to_string(d.path().join("CLAUDE.md")).unwrap(), text);
+        p.write_ai_guide(".github/copilot-instructions.md").unwrap();
+        assert!(d.path().join(".github/copilot-instructions.md").is_file());
     }
 
     #[test]
