@@ -7,6 +7,43 @@ use std::path::{Path, PathBuf};
 use crate::ticket::{self, Ticket, write_atomic};
 
 pub const DEFAULT_COLUMNS: [&str; 5] = ["To Do", "In Dev", "Ready For Test", "In Test", "Done"];
+/// Index-aligned with `DEFAULT_COLUMNS`.
+pub const DEFAULT_AUTO_MOVES: [AutoMove; 5] = [
+    AutoMove::Manual,
+    AutoMove::AiWorking,
+    AutoMove::AiComplete,
+    AutoMove::AiWorking,
+    AutoMove::AiComplete,
+];
+
+/// What moves a ticket into a column from the column before it, without the user dragging it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoMove {
+    #[default]
+    #[serde(rename = "none")]
+    Manual,
+    /// The play button was pressed on a ticket in the column before.
+    AiWorking,
+    /// The AI finished a ticket in the column before.
+    AiComplete,
+}
+
+impl AutoMove {
+    pub const ALL: [AutoMove; 3] = [AutoMove::Manual, AutoMove::AiWorking, AutoMove::AiComplete];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AutoMove::Manual => "None",
+            AutoMove::AiWorking => "AI Working",
+            AutoMove::AiComplete => "AI Complete",
+        }
+    }
+
+    fn is_manual(&self) -> bool {
+        *self == AutoMove::Manual
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,6 +75,11 @@ pub struct Column {
     pub folder: String,
     #[serde(default)]
     pub sort: Sort,
+    #[serde(default, skip_serializing_if = "AutoMove::is_manual")]
+    pub auto_move: AutoMove,
+    /// Play button prompt for tickets in this column; `None` = the one in Settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_prompt: Option<String>,
 }
 
 fn one() -> u32 {
@@ -59,10 +101,12 @@ pub struct GhostFile {
 }
 
 /// A column as edited in the project modal. `orig_folder` links it to an existing column.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnEdit {
     pub name: String,
     pub orig_folder: Option<String>,
+    pub auto_move: AutoMove,
+    pub ai_prompt: Option<String>,
 }
 
 pub struct Project {
@@ -156,6 +200,8 @@ impl Project {
                 name: n.trim().to_string(),
                 folder: f,
                 sort: Sort::default(),
+                auto_move: AutoMove::Manual,
+                ai_prompt: None,
             })
             .collect();
         let meta = GhostFile {
@@ -229,6 +275,19 @@ impl Project {
         self.meta.columns[col].sort = sort;
         ticket::sort(&mut self.tickets[col], sort.by, sort.dir);
         self.save_meta()
+    }
+
+    /// (column, ticket) of ticket `id`.
+    pub fn find_ticket(&self, id: u32) -> Option<(usize, &Ticket)> {
+        self.tickets
+            .iter()
+            .enumerate()
+            .find_map(|(c, ts)| ts.iter().find(|t| t.id == id).map(|t| (c, t)))
+    }
+
+    /// The column after `col`, when tickets move into it on `trigger`.
+    pub fn auto_target(&self, col: usize, trigger: AutoMove) -> Option<usize> {
+        (self.meta.columns.get(col + 1)?.auto_move == trigger).then_some(col + 1)
     }
 
     pub fn move_ticket(&mut self, path: &Path, to_col: usize) -> io::Result<()> {
@@ -335,6 +394,8 @@ impl Project {
                     name: e.name.trim().to_string(),
                     folder,
                     sort,
+                    auto_move: e.auto_move,
+                    ai_prompt: e.ai_prompt.clone(),
                 }
             })
             .collect();
@@ -426,6 +487,22 @@ mod tests {
     }
 
     #[test]
+    fn auto_targets_follow_the_next_column() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = new_project(d.path());
+        for (c, m) in p.meta.columns.iter_mut().zip(DEFAULT_AUTO_MOVES) {
+            c.auto_move = m;
+        }
+        assert_eq!(p.auto_target(0, AutoMove::AiWorking), Some(1));
+        assert_eq!(p.auto_target(0, AutoMove::AiComplete), None);
+        assert_eq!(p.auto_target(1, AutoMove::AiComplete), Some(2));
+        assert_eq!(p.auto_target(3, AutoMove::AiComplete), Some(4));
+        assert_eq!(p.auto_target(4, AutoMove::AiComplete), None);
+        let yaml = serde_yaml_ng::to_string(&p.meta).unwrap();
+        assert!(yaml.contains("auto_move: ai_working") && !yaml.contains("none"));
+    }
+
+    #[test]
     fn move_between_columns() {
         let d = tempfile::tempdir().unwrap();
         let mut p = new_project(d.path());
@@ -446,9 +523,12 @@ mod tests {
         let edit = |name: &str, orig: Option<&str>| ColumnEdit {
             name: name.into(),
             orig_folder: orig.map(Into::into),
+            ..Default::default()
         };
         // Swap A and B by name, drop C into the renamed "A" (old b), add D.
-        let edits = [edit("B", Some("a")), edit("A", Some("b")), edit("D", None)];
+        let mut edits = [edit("B", Some("a")), edit("A", Some("b")), edit("D", None)];
+        edits[1].auto_move = AutoMove::AiWorking;
+        edits[2].ai_prompt = Some("Test {ticket_path}".into());
         let targets = HashMap::from([("c".to_string(), 1)]);
         p.apply_columns("P2", &edits, &targets).unwrap();
 
@@ -459,6 +539,10 @@ mod tests {
         assert_eq!(titles(0), ["in a"]);
         assert_eq!(titles(1), ["in b", "in c"]);
         assert!(titles(2).is_empty());
+        assert_eq!(p.meta.columns[1].auto_move, AutoMove::AiWorking);
+        assert_eq!(p.meta.columns[2].ai_prompt.as_deref(), Some("Test {ticket_path}"));
+        let back = Project::load(&p.ghost_path).unwrap();
+        assert_eq!(back.meta, p.meta);
         assert!(!p.tickets_dir().join("c").exists());
         assert!(!a.path.exists()); // a's file now lives under folder b
         assert!(p.tickets_dir().join("b").join(a.path.file_name().unwrap()).exists());

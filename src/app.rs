@@ -10,7 +10,7 @@ use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 
 use crate::config::AppConfig;
-use crate::project::{Project, Sort};
+use crate::project::{AutoMove, Project, Sort};
 use crate::terminal::{self, Terminals};
 use crate::theme;
 use crate::ticket::Ticket;
@@ -111,6 +111,13 @@ impl Generation {
     }
 }
 
+/// A ticket the play button handed to the AI CLI.
+struct AiRun {
+    ghost: PathBuf,
+    id: u32,
+    started: Instant,
+}
+
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
 
 pub struct App {
@@ -130,6 +137,8 @@ pub struct App {
     /// When a request was last sent to the AI CLI (play button, ticket generation, or Enter in
     /// the terminal). The busy animation only runs for output that follows a request.
     ai_request: Option<Instant>,
+    /// Tickets handed to the AI by the play button, waiting to move on "AI Complete".
+    ai_runs: Vec<AiRun>,
     toasts: Vec<(String, Instant)>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
@@ -170,6 +179,7 @@ impl App {
             next_cli_check: Instant::now(),
             last_terminal_typing: None,
             ai_request: None,
+            ai_runs: Vec::new(),
             toasts: Vec::new(),
             watcher: None,
             watch_tx,
@@ -201,11 +211,7 @@ impl App {
 
     /// (column, ticket) of a ticket in the active project.
     pub fn find_ticket(&self, id: u32) -> Option<(usize, &Ticket)> {
-        let p = self.active_project()?;
-        p.tickets
-            .iter()
-            .enumerate()
-            .find_map(|(c, ts)| ts.iter().find(|t| t.id == id).map(|t| (c, t)))
+        self.active_project()?.find_ticket(id)
     }
 
     fn save_config(&mut self) {
@@ -335,12 +341,14 @@ impl App {
             }
             Action::NewProject => {
                 let clis = self.config.settings.enabled_clis();
-                self.modal = Some(Modal::Project(ProjectForm::new_project(clis)));
+                let form = ProjectForm::new_project(clis, &self.config.settings.ai_prompt);
+                self.modal = Some(Modal::Project(form));
             }
             Action::EditProject => {
                 let clis = self.config.settings.enabled_clis();
                 if let Some(p) = self.active_project() {
-                    self.modal = Some(Modal::Project(ProjectForm::edit(p, clis)));
+                    let form = ProjectForm::edit(p, clis, &self.config.settings.ai_prompt);
+                    self.modal = Some(Modal::Project(form));
                 }
             }
             Action::ImportDocument => self.modal = Some(Modal::Import(ImportForm::default())),
@@ -426,13 +434,17 @@ impl App {
 
     fn run_ai(&mut self, id: u32, ctx: &egui::Context) {
         let Some(p) = self.active_project() else { return };
-        let Some((_, t)) = self.find_ticket(id) else { return };
+        let Some((col, t)) = self.find_ticket(id) else { return };
         let (key, root, mut t) = (p.ghost_path.clone(), p.root.clone(), t.clone());
         let cli = match self.project_cli(p) {
             Ok(cli) => cli,
             Err(e) => return self.toast(e),
         };
-        let prompt = match terminal::fill_prompt(&self.config.settings.ai_prompt, &t.path, &t.id_str(), &root) {
+        let template = p.meta.columns[col]
+            .ai_prompt
+            .clone()
+            .unwrap_or_else(|| self.config.settings.ai_prompt.clone());
+        let prompt = match terminal::fill_prompt(&template, &t.path, &t.id_str(), &root) {
             Ok(prompt) => prompt,
             Err(e) => return self.toast(e),
         };
@@ -444,6 +456,49 @@ impl App {
             self.toast(format!("Couldn't update run count for {}: {e}", t.id_str()));
         }
         self.reload_active();
+        let p = self.active_project_mut().expect("checked above");
+        if let Some(to) = p.auto_target(col, AutoMove::AiWorking)
+            && let Err(e) = p.move_ticket(&t.path, to)
+        {
+            self.toast(format!("Couldn't move {}: {e}", t.id_str()));
+        }
+        self.ai_runs.push(AiRun {
+            ghost: key,
+            id,
+            started: Instant::now(),
+        });
+    }
+
+    /// Once a project's AI CLI goes quiet, moves the tickets it was working on into the next
+    /// column if that column takes tickets on "AI Complete".
+    // ponytail: "quiet" is the same output heuristic as the busy title, so a CLI waiting on a
+    // permission prompt counts as done; a CLI-side completion hook would be exact.
+    fn poll_ai_runs(&mut self) {
+        let now = Instant::now();
+        let terminals = &self.terminals;
+        let (done, running): (Vec<AiRun>, Vec<AiRun>) = std::mem::take(&mut self.ai_runs)
+            .into_iter()
+            .partition(|r| !ai_activity(Some(r.started), terminals.last_output(&r.ghost), None, now).0);
+        self.ai_runs = running;
+        for run in done {
+            let Some(p) = self
+                .projects
+                .iter_mut()
+                .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == run.ghost))
+            else {
+                continue;
+            };
+            let _ = p.rescan();
+            let Some((col, t)) = p.find_ticket(run.id) else {
+                continue;
+            };
+            let path = t.path.clone();
+            if let Some(to) = p.auto_target(col, AutoMove::AiComplete)
+                && let Err(e) = p.move_ticket(&path, to)
+            {
+                self.toast(format!("Couldn't move {}: {e}", crate::ticket::format_id(run.id)));
+            }
+        }
     }
 
     /// Asks the AI CLI to write a new ticket into column `col` and waits for it.
@@ -833,12 +888,16 @@ impl App {
                 name,
                 columns,
                 ai_cli,
-            } => match Project::create(&dir, &name, &columns) {
+            } => match Project::create(&dir, &name, &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()) {
                 Ok(mut p) => {
                     self.modal = None;
                     p.meta.ai_cli = Some(ai_cli);
+                    for (c, edit) in p.meta.columns.iter_mut().zip(columns) {
+                        c.auto_move = edit.auto_move;
+                        c.ai_prompt = edit.ai_prompt;
+                    }
                     if let Err(e) = p.save_meta() {
-                        self.toast(format!("Couldn't save the project's AI CLI: {e}"));
+                        self.toast(format!("Couldn't save the project's settings: {e}"));
                     }
                     self.add_project(p, ctx);
                 }
@@ -1089,6 +1148,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_watcher();
         self.poll_generation();
+        self.poll_ai_runs();
         let mut actions = Vec::new();
 
         let inset = ui::chrome::maximized_overflow(&ctx);

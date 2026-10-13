@@ -9,7 +9,7 @@ use egui_phosphor::regular as icon;
 
 use super::{icon_button, priority_icon};
 use crate::app::{Action, OpenProject};
-use crate::project::{Column, Sort, SortBy, SortDir};
+use crate::project::{AutoMove, Column, Sort, SortBy, SortDir};
 use crate::theme;
 use crate::ticket::Ticket;
 
@@ -104,8 +104,10 @@ fn column_ui(
             .auto_shrink(false)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
+                // Tickets arrive here because the AI is already on them.
+                let play = column.auto_move != AutoMove::AiWorking;
                 for t in tickets.iter().filter(|t| t.matches(query)) {
-                    card(ui, t, actions);
+                    card(ui, t, play, actions);
                 }
             });
     }
@@ -150,7 +152,7 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
     }
 }
 
-fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
+fn card(ui: &mut Ui, t: &Ticket, play: bool, actions: &mut Vec<Action>) {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
     let response = ui
         .scope_builder(builder, |ui| {
@@ -167,7 +169,7 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
                 .fill(fill)
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(12))
-                .show(ui, |ui| card_contents(ui, t, actions));
+                .show(ui, |ui| card_contents(ui, t, play, actions));
         })
         .response;
 
@@ -198,12 +200,12 @@ fn card(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
     });
 }
 
-fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
+fn card_contents(ui: &mut Ui, t: &Ticket, play: bool, actions: &mut Vec<Action>) {
     const PLAY: f32 = 30.0;
     let full = ui.available_width();
     let left = ui.cursor().left();
     ui.set_min_width(full);
-    let width = (full - PLAY - 6.0).max(40.0);
+    let width = if play { (full - PLAY - 6.0).max(40.0) } else { full };
     let text_rect = ui
         .allocate_ui(vec2(width, 0.0), |ui| {
             ui.set_width(width);
@@ -222,6 +224,9 @@ fn card_contents(ui: &mut Ui, t: &Ticket, actions: &mut Vec<Action>) {
         })
         .response
         .rect;
+    if !play {
+        return;
+    }
     // Fixed slot at the right edge, vertically centred.
     let slot = egui::Rect::from_min_size(
         egui::pos2(left + full - PLAY, text_rect.center().y - PLAY / 2.0),
@@ -289,13 +294,27 @@ mod tests {
     }
 
     fn harness_with(dir: &std::path::Path, titles: &[&str]) -> Harness<'static, State> {
+        harness_cols(dir, titles, AutoMove::Manual)
+    }
+
+    /// Two columns, "To Do" then "Done" (which tickets move into on `done_move`); `titles` go in "To Do",
+    /// plus one ticket in "Done".
+    fn harness_cols(dir: &std::path::Path, titles: &[&str], done_move: AutoMove) -> Harness<'static, State> {
         let mut p = Project::create(dir, "P", &["To Do".into(), "Done".into()]).unwrap();
+        p.meta.columns[1].auto_move = done_move;
         for title in titles {
             let t = Ticket {
                 title: title.to_string(),
                 ..Default::default()
             };
             p.add_ticket(0, t).unwrap();
+        }
+        if done_move != AutoMove::Manual {
+            let t = Ticket {
+                title: "Finished".into(),
+                ..Default::default()
+            };
+            p.add_ticket(1, t).unwrap();
         }
         let op = OpenProject {
             path: p.ghost_path.clone(),
@@ -327,6 +346,16 @@ mod tests {
         let actions = &h.state().1;
         assert!(actions.iter().any(|a| matches!(a, Action::RunAi(1))));
         assert!(!actions.iter().any(|a| matches!(a, Action::ViewTicket(_))));
+    }
+
+    #[test]
+    fn ai_working_columns_have_no_play_button() {
+        let d = tempfile::tempdir().unwrap();
+        let h = harness_cols(d.path(), &["Hello"], AutoMove::AiWorking);
+        assert_eq!(h.get_all_by_label(icon::PLAY).count(), 1);
+        let d = tempfile::tempdir().unwrap();
+        let h = harness_cols(d.path(), &["Hello"], AutoMove::AiComplete);
+        assert_eq!(h.get_all_by_label(icon::PLAY).count(), 2);
     }
 
     #[test]

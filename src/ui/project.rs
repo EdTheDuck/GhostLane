@@ -6,7 +6,9 @@ use egui_dnd::{DragDropItem, dnd};
 use egui_phosphor::regular as icon;
 
 use super::{accent_button, icon_button};
-use crate::project::{ColumnEdit, DEFAULT_COLUMNS, Project, find_ghost_file, folder_name, validate_columns};
+use crate::project::{
+    AutoMove, ColumnEdit, DEFAULT_AUTO_MOVES, DEFAULT_COLUMNS, Project, find_ghost_file, folder_name, validate_columns,
+};
 use crate::theme;
 
 pub struct ColumnRow {
@@ -14,6 +16,11 @@ pub struct ColumnRow {
     name: String,
     orig_folder: Option<String>,
     tickets: usize,
+    /// How tickets move in from the row above.
+    auto_move: AutoMove,
+    /// Play button prompt; starts as the one in Settings.
+    ai_prompt: String,
+    show_prompt: bool,
 }
 
 impl DragDropItem for &mut ColumnRow {
@@ -38,6 +45,8 @@ pub struct ProjectForm {
     /// AI CLI id for the play button, chosen from `cli_options`.
     ai_cli: String,
     cli_options: Vec<String>,
+    /// Play button prompt from Settings; columns that keep it follow later changes there.
+    default_prompt: String,
     pub error: Option<String>,
 }
 
@@ -46,7 +55,7 @@ pub enum ProjectOutcome {
     Create {
         dir: PathBuf,
         name: String,
-        columns: Vec<String>,
+        columns: Vec<ColumnEdit>,
         ai_cli: String,
     },
     Save {
@@ -59,16 +68,20 @@ pub enum ProjectOutcome {
 }
 
 impl ProjectForm {
-    /// `clis`: AI CLI ids ticked in Settings (never empty).
-    pub fn new_project(clis: Vec<String>) -> Self {
+    /// `clis`: AI CLI ids ticked in Settings (never empty). `prompt`: the play button prompt in Settings.
+    pub fn new_project(clis: Vec<String>, prompt: &str) -> Self {
         let rows = DEFAULT_COLUMNS
             .iter()
+            .zip(DEFAULT_AUTO_MOVES)
             .enumerate()
-            .map(|(i, n)| ColumnRow {
+            .map(|(i, (n, auto_move))| ColumnRow {
                 key: i as u64,
                 name: n.to_string(),
                 orig_folder: None,
                 tickets: 0,
+                auto_move,
+                ai_prompt: prompt.to_string(),
+                show_prompt: false,
             })
             .collect();
         ProjectForm {
@@ -80,11 +93,12 @@ impl ProjectForm {
             next_key: DEFAULT_COLUMNS.len() as u64,
             ai_cli: clis[0].clone(),
             cli_options: clis,
+            default_prompt: prompt.to_string(),
             error: None,
         }
     }
 
-    pub fn edit(p: &Project, mut clis: Vec<String>) -> Self {
+    pub fn edit(p: &Project, mut clis: Vec<String>, prompt: &str) -> Self {
         let ai_cli = p.meta.ai_cli.clone().unwrap_or_else(|| clis[0].clone());
         // Keep the project's current choice selectable even if it was unticked in Settings.
         if !clis.contains(&ai_cli) {
@@ -100,6 +114,9 @@ impl ProjectForm {
                 name: c.name.clone(),
                 orig_folder: Some(c.folder.clone()),
                 tickets: p.tickets[i].len(),
+                auto_move: c.auto_move,
+                ai_prompt: c.ai_prompt.clone().unwrap_or_else(|| prompt.to_string()),
+                show_prompt: false,
             })
             .collect();
         ProjectForm {
@@ -111,6 +128,7 @@ impl ProjectForm {
             removed: Vec::new(),
             ai_cli,
             cli_options: clis,
+            default_prompt: prompt.to_string(),
             error: None,
         }
     }
@@ -189,6 +207,9 @@ impl ProjectForm {
                     name: "New Column".into(),
                     orig_folder: None,
                     tickets: 0,
+                    auto_move: AutoMove::Manual,
+                    ai_prompt: self.default_prompt.clone(),
+                    show_prompt: false,
                 });
                 self.next_key += 1;
             }
@@ -255,7 +276,11 @@ impl ProjectForm {
     fn columns_ui(&mut self, ui: &mut Ui) {
         let only_one = self.rows.len() == 1;
         let mut remove = None;
-        dnd(ui, "project_columns").show_vec(&mut self.rows, |ui, row, handle, _state| {
+        let default_prompt = &self.default_prompt;
+        dnd(ui, "project_columns").show_vec(&mut self.rows, |ui, row, handle, state| {
+            if state.index > 0 {
+                auto_move_ui(ui, row);
+            }
             ui.horizontal(|ui| {
                 handle.ui(ui, |ui| {
                     ui.label(
@@ -290,6 +315,19 @@ impl ProjectForm {
                     {
                         remove = Some(row.key);
                     }
+                    let custom = row.ai_prompt.trim() != default_prompt.trim();
+                    let idle = if custom { theme::ACCENT } else { theme::TEXT };
+                    let tip = if custom {
+                        "Play button command (customised)"
+                    } else {
+                        "Play button command"
+                    };
+                    if super::glyph_button(ui, icon::TERMINAL_WINDOW, idle, theme::ACCENT, false)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        row.show_prompt = !row.show_prompt;
+                    }
                     if row.tickets > 0 {
                         ui.label(
                             RichText::new(plural(row.tickets, "ticket"))
@@ -299,6 +337,9 @@ impl ProjectForm {
                     }
                 });
             });
+            if row.show_prompt {
+                prompt_ui(ui, row, default_prompt);
+            }
         });
         if let Some(key) = remove {
             let i = self.rows.iter().position(|r| r.key == key).expect("removed row exists");
@@ -350,22 +391,28 @@ impl ProjectForm {
 
     fn submit(&self) -> ProjectOutcome {
         let name = self.name.trim().to_string();
+        let edits = self
+            .rows
+            .iter()
+            .map(|r| {
+                let prompt = r.ai_prompt.trim();
+                ColumnEdit {
+                    name: r.name.trim().to_string(),
+                    orig_folder: r.orig_folder.clone(),
+                    auto_move: r.auto_move,
+                    // Unchanged or cleared: keep following Settings.
+                    ai_prompt: (!prompt.is_empty() && prompt != self.default_prompt.trim()).then(|| prompt.to_string()),
+                }
+            })
+            .collect();
         if !self.editing {
             return ProjectOutcome::Create {
                 dir: self.location.clone().expect("validated"),
                 name,
-                columns: self.rows.iter().map(|r| r.name.trim().to_string()).collect(),
+                columns: edits,
                 ai_cli: self.ai_cli.clone(),
             };
         }
-        let edits = self
-            .rows
-            .iter()
-            .map(|r| ColumnEdit {
-                name: r.name.trim().to_string(),
-                orig_folder: r.orig_folder.clone(),
-            })
-            .collect();
         let targets = self
             .removed
             .iter()
@@ -383,6 +430,44 @@ impl ProjectForm {
     }
 }
 
+/// Dropdown between two rows: what moves tickets from the row above into `row`.
+fn auto_move_ui(ui: &mut Ui, row: &mut ColumnRow) {
+    ui.horizontal(|ui| {
+        ui.add_space(26.0);
+        ui.label(RichText::new(icon::ARROW_DOWN).color(theme::TEXT_MUTED));
+        ui.label(RichText::new("Moves in on").color(theme::TEXT_MUTED).small());
+        let combo = ComboBox::from_id_salt(("auto_move", row.key))
+            .selected_text(row.auto_move.label())
+            .show_ui(ui, |ui| {
+                for m in AutoMove::ALL {
+                    ui.selectable_value(&mut row.auto_move, m, m.label());
+                }
+            });
+        super::pointer(combo.response)
+            .on_hover_text("AI Working: when ▶ is pressed above. AI Complete: when the AI finishes.");
+    });
+}
+
+/// Play button prompt for one row, with a reset to the one in Settings.
+fn prompt_ui(ui: &mut Ui, row: &mut ColumnRow, default_prompt: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(26.0);
+        ui.add(
+            TextEdit::singleline(&mut row.ai_prompt)
+                .margin(super::INPUT_MARGIN)
+                .hint_text(default_prompt)
+                .desired_width(ui.available_width() - 40.0),
+        )
+        .on_hover_text(
+            "Prompt the ▶ button sends for tickets in this column. \
+             {ticket_path}, {ticket_id} and {project_dir} are filled in.",
+        );
+        if icon_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Reset to the command in Settings").clicked() {
+            row.ai_prompt = default_prompt.to_string();
+        }
+    });
+}
+
 fn plural(n: usize, word: &str) -> String {
     if n == 1 {
         format!("1 {word}")
@@ -398,7 +483,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     fn harness() -> Harness<'static, (ProjectForm, Option<bool>)> {
-        let form = ProjectForm::new_project(vec!["claude".into()]);
+        let form = ProjectForm::new_project(vec!["claude".into()], "Do {ticket_path}");
         let mut h = Harness::new_ui_state(
             |ui, (form, cancelled): &mut (ProjectForm, Option<bool>)| {
                 if let Some(outcome) = form.show(ui.ctx()) {
@@ -428,5 +513,25 @@ mod tests {
         h.get_by_label_contains("Add column").click();
         h.run();
         assert_eq!(h.state().0.rows.len(), DEFAULT_COLUMNS.len() + 1);
+    }
+
+    #[test]
+    fn default_columns_move_on_ai_and_keep_the_settings_prompt() {
+        let mut form = ProjectForm::new_project(vec!["claude".into()], "Do {ticket_path}");
+        form.location = Some(PathBuf::from("/p"));
+        form.rows[2].ai_prompt = " Test {ticket_path} ".into();
+        let ProjectOutcome::Create { columns, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        let moves: Vec<_> = columns.iter().map(|c| c.auto_move).collect();
+        assert_eq!(moves, DEFAULT_AUTO_MOVES);
+        let prompts: Vec<_> = columns.iter().map(|c| c.ai_prompt.as_deref()).collect();
+        assert_eq!(prompts, [None, None, Some("Test {ticket_path}"), None, None]);
+    }
+
+    #[test]
+    fn dropdowns_sit_between_columns() {
+        let h = harness();
+        assert_eq!(h.get_all_by_label("Moves in on").count(), DEFAULT_COLUMNS.len() - 1);
     }
 }
