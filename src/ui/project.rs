@@ -281,6 +281,8 @@ impl ProjectForm {
             if state.index > 0 {
                 auto_move_ui(ui, row);
             }
+            // Same rule as the board: tickets that arrive on "AI Working" get no play button.
+            let has_play = state.index == 0 || row.auto_move != AutoMove::AiWorking;
             ui.horizontal(|ui| {
                 handle.ui(ui, |ui| {
                     ui.label(
@@ -322,9 +324,10 @@ impl ProjectForm {
                     } else {
                         "Play button command"
                     };
-                    if super::glyph_button(ui, icon::TERMINAL_WINDOW, idle, theme::ACCENT, false)
-                        .on_hover_text(tip)
-                        .clicked()
+                    if has_play
+                        && super::glyph_button(ui, icon::TERMINAL_WINDOW, idle, theme::ACCENT, false)
+                            .on_hover_text(tip)
+                            .clicked()
                     {
                         row.show_prompt = !row.show_prompt;
                     }
@@ -337,7 +340,7 @@ impl ProjectForm {
                     }
                 });
             });
-            if row.show_prompt {
+            if row.show_prompt && has_play {
                 prompt_ui(ui, row, default_prompt);
             }
         });
@@ -394,12 +397,14 @@ impl ProjectForm {
         let edits = self
             .rows
             .iter()
-            .map(|r| {
+            .enumerate()
+            .map(|(i, r)| {
                 let prompt = r.ai_prompt.trim();
                 ColumnEdit {
                     name: r.name.trim().to_string(),
                     orig_folder: r.orig_folder.clone(),
-                    auto_move: r.auto_move,
+                    // Nothing comes before the first column; it has no dropdown.
+                    auto_move: if i == 0 { AutoMove::Manual } else { r.auto_move },
                     // Unchanged or cleared: keep following Settings.
                     ai_prompt: (!prompt.is_empty() && prompt != self.default_prompt.trim()).then(|| prompt.to_string()),
                 }
@@ -533,5 +538,23 @@ mod tests {
     fn dropdowns_sit_between_columns() {
         let h = harness();
         assert_eq!(h.get_all_by_label("Moves in on").count(), DEFAULT_COLUMNS.len() - 1);
+    }
+
+    #[test]
+    fn command_icon_only_on_columns_with_a_play_button() {
+        // Defaults: In Dev and In Test take tickets on AI Working, so 3 of 5 columns keep the icon.
+        let h = harness();
+        assert_eq!(h.get_all_by_label(icon::TERMINAL_WINDOW).count(), 3);
+    }
+
+    #[test]
+    fn first_column_never_auto_moves() {
+        let mut form = ProjectForm::new_project(vec!["claude".into()], "Do");
+        form.location = Some(PathBuf::from("/p"));
+        form.rows[0].auto_move = AutoMove::AiWorking;
+        let ProjectOutcome::Create { columns, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        assert_eq!(columns[0].auto_move, AutoMove::Manual);
     }
 }
