@@ -7,7 +7,8 @@ use egui_phosphor::regular as icon;
 
 use super::{accent_button, icon_button};
 use crate::project::{
-    AutoMove, ColumnEdit, DEFAULT_AUTO_MOVES, DEFAULT_COLUMNS, Project, find_ghost_file, folder_name, validate_columns,
+    AutoMove, ColumnEdit, DEFAULT_AUTO_MOVES, DEFAULT_COLUMNS, DEFAULT_PROMPTS, Project, find_ghost_file, folder_name,
+    validate_columns,
 };
 use crate::theme;
 
@@ -73,14 +74,15 @@ impl ProjectForm {
         let rows = DEFAULT_COLUMNS
             .iter()
             .zip(DEFAULT_AUTO_MOVES)
+            .zip(DEFAULT_PROMPTS)
             .enumerate()
-            .map(|(i, (n, auto_move))| ColumnRow {
+            .map(|(i, ((n, auto_move), column_prompt))| ColumnRow {
                 key: i as u64,
                 name: n.to_string(),
                 orig_folder: None,
                 tickets: 0,
                 auto_move,
-                ai_prompt: prompt.to_string(),
+                ai_prompt: column_prompt.unwrap_or(prompt).to_string(),
                 show_prompt: false,
             })
             .collect();
@@ -531,7 +533,12 @@ mod tests {
         let moves: Vec<_> = columns.iter().map(|c| c.auto_move).collect();
         assert_eq!(moves, DEFAULT_AUTO_MOVES);
         let prompts: Vec<_> = columns.iter().map(|c| c.ai_prompt.as_deref()).collect();
-        assert_eq!(prompts, [None, None, Some("Test {ticket_path}"), None, None]);
+        assert_eq!(
+            prompts,
+            [DEFAULT_PROMPTS[0], None, Some("Test {ticket_path}"), None, None]
+        );
+        assert!(DEFAULT_PROMPTS[0].unwrap().contains("{ticket_path}"));
+        assert!(DEFAULT_PROMPTS[2].unwrap().contains("{ticket_path}"));
     }
 
     #[test]

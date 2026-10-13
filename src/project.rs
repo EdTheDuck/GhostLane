@@ -15,6 +15,21 @@ pub const DEFAULT_AUTO_MOVES: [AutoMove; 5] = [
     AutoMove::AiWorking,
     AutoMove::AiComplete,
 ];
+/// Play button prompts for the default columns; `None` = the one in Settings.
+pub const DEFAULT_PROMPTS: [Option<&str>; 5] = [
+    Some(
+        "Move the ticket {ticket_path} to In Dev and then develop the ticket. When complete move the ticket to the \
+         RFT column",
+    ),
+    None,
+    Some(
+        "Move the ticket {ticket_path} to the In Test column. Test the ticket with the Test Criteria. If it passes, \
+         move the ticket to Done. If it fails, add the failure reason as a note on the ticket and move the ticket \
+         back to the To Do column",
+    ),
+    None,
+    None,
+];
 
 /// What moves a ticket into a column from the column before it, without the user dragging it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

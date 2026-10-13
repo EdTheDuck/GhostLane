@@ -444,7 +444,13 @@ impl App {
             .ai_prompt
             .clone()
             .unwrap_or_else(|| self.config.settings.ai_prompt.clone());
-        let prompt = match terminal::fill_prompt(&template, &t.path, &t.id_str(), &root) {
+        let working_col = p.auto_target(col, AutoMove::AiWorking);
+        // The AI reads the ticket after it has moved, so point it at the new location.
+        let ai_path = match (working_col, t.path.file_name()) {
+            (Some(to), Some(file)) => p.column_dir(to).join(file),
+            _ => t.path.clone(),
+        };
+        let prompt = match terminal::fill_prompt(&template, &ai_path, &t.id_str(), &root) {
             Ok(prompt) => prompt,
             Err(e) => return self.toast(e),
         };
@@ -457,7 +463,7 @@ impl App {
         }
         self.reload_active();
         let p = self.active_project_mut().expect("checked above");
-        if let Some(to) = p.auto_target(col, AutoMove::AiWorking)
+        if let Some(to) = working_col
             && let Err(e) = p.move_ticket(&t.path, to)
         {
             self.toast(format!("Couldn't move {}: {e}", t.id_str()));
