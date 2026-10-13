@@ -1,6 +1,6 @@
 [package]
 name = "ghostlane"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
@@ -28,10 +28,13 @@ tempfile = "3.27.0"
 [build-dependencies]
 winresource = "0.1.31"
 
-# Used by `cargo bundle` (https://github.com/burtonageo/cargo-bundle) for the macOS .app and Linux .deb.
-[package.metadata.bundle]
-name = "GhostLane"
+# Installers for GitHub releases, built by `cargo packager` (see .github/workflows/release.yml).
+[package.metadata.packager]
+product-name = "GhostLane"
 identifier = "com.edtheduck.ghostlane"
-icon = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/256x256.png", "assets/icons/512x512.png", "assets/icons/ghostlane.icns"]
-category = "public.app-category.developer-tools"
-short_description = "Project board that lives in your folders"
+description = "Project board that lives in your folders"
+category = "DeveloperTool"
+icons = ["assets/icons/*.png", "assets/icons/ghostlane.icns", "assets/icons/ghostlane.ico"]
+before-packaging-command = "cargo build --release"
+binaries-dir = "target/release"
+out-dir = "dist"
