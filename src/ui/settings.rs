@@ -14,6 +14,7 @@ pub struct SettingsForm {
     clis: Vec<bool>,
     shell: String,
     terminal_font_size: f32,
+    check_for_updates: bool,
     detected_shell: String,
     installed: Vec<String>,
 }
@@ -31,6 +32,7 @@ impl SettingsForm {
             clis: AI_CLIS.iter().map(|c| enabled.iter().any(|id| id == c.id)).collect(),
             shell: s.shell.clone().unwrap_or_default(),
             terminal_font_size: s.terminal_font_size,
+            check_for_updates: s.check_for_updates,
             detected_shell: detect_shell(None).0,
             installed: detect_ai_clis(),
         }
@@ -131,6 +133,18 @@ impl SettingsForm {
                     });
                 super::pointer(combo.response);
             });
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                super::toggle(ui, &mut self.check_for_updates);
+                let label = ui.add(
+                    egui::Label::new(RichText::new("Check for updates on startup").strong())
+                        .sense(egui::Sense::click()),
+                );
+                if super::pointer(label).clicked() {
+                    self.check_for_updates = !self.check_for_updates;
+                }
+            });
 
             ui.add_space(8.0);
             ui.separator();
@@ -168,6 +182,7 @@ impl SettingsForm {
             ai_clis: Some(clis),
             shell: (!shell.is_empty()).then(|| shell.to_string()),
             terminal_font_size: self.terminal_font_size,
+            check_for_updates: self.check_for_updates,
         }
     }
 }
@@ -201,12 +216,14 @@ mod tests {
             terminal_font_size: 18.0,
             ai_clis: Some(vec!["aider".into()]),
             shell: Some("fish".into()),
+            check_for_updates: false,
         });
         form.reset();
         let s = form.to_settings();
         assert_eq!(s.ai_prompt, crate::config::DEFAULT_AI_PROMPT);
         assert_eq!(s.terminal_font_size, 13.0);
         assert_eq!(s.shell, None);
+        assert!(s.check_for_updates);
         assert_eq!(s.ai_clis, Some(detect_ai_clis()));
     }
 

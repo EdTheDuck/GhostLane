@@ -140,6 +140,9 @@ pub struct App {
     /// Tickets handed to the AI by the play button, waiting to move on "AI Complete".
     ai_runs: Vec<AiRun>,
     toasts: Vec<(String, Instant)>,
+    /// Newer release found by the startup check, shown as a top bar button.
+    update: Option<String>,
+    update_rx: Option<Receiver<String>>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
     watch_rx: Receiver<DebounceEventResult>,
@@ -181,6 +184,8 @@ impl App {
             ai_request: None,
             ai_runs: Vec::new(),
             toasts: Vec::new(),
+            update: None,
+            update_rx: None,
             watcher: None,
             watch_tx,
             watch_rx,
@@ -192,6 +197,17 @@ impl App {
             }
         }
         app.watch_active(ctx);
+        if app.config.settings.check_for_updates {
+            let (tx, rx) = mpsc::channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                if let Some(v) = crate::update::newer_release() {
+                    let _ = tx.send(v);
+                    ctx.request_repaint();
+                }
+            });
+            app.update_rx = Some(rx);
+        }
         app
     }
 
@@ -1020,6 +1036,13 @@ impl App {
                         if ui.button(format!("{}  Open Project", icon::FOLDER_OPEN)).clicked() {
                             actions.push(Action::OpenProjectDialog);
                         }
+                        if let Some(v) = &self.update {
+                            let text = RichText::new(format!("{}  Update", icon::ARROW_CIRCLE_UP)).color(theme::ACCENT);
+                            let tip = format!("GhostLane {v} is available. Download the installer and run it; no need to uninstall first.");
+                            if ui.button(text).on_hover_text(tip).clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(crate::update::RELEASES_URL));
+                            }
+                        }
                     });
                     right_start = right_group.response.rect.left();
                 });
@@ -1185,6 +1208,9 @@ impl eframe::App for App {
         self.poll_watcher();
         self.poll_generation();
         self.poll_ai_runs();
+        if let Some(v) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.update = Some(v);
+        }
         let mut actions = Vec::new();
 
         let inset = ui::chrome::maximized_overflow(&ctx);

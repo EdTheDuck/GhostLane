@@ -17,6 +17,8 @@ pub struct Settings {
     /// `None` = auto-detect.
     pub shell: Option<String>,
     pub terminal_font_size: f32,
+    /// Look for a newer GitHub release on startup.
+    pub check_for_updates: bool,
 }
 
 impl Default for Settings {
@@ -26,6 +28,7 @@ impl Default for Settings {
             ai_clis: None,
             shell: None,
             terminal_font_size: 13.0,
+            check_for_updates: true,
         }
     }
 }

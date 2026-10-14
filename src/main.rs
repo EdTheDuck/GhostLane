@@ -8,6 +8,7 @@ mod richtext;
 mod terminal;
 mod ticket;
 mod ui;
+mod update;
 
 pub const GHOST_SVG: &[u8] = include_bytes!("../assets/ghost.svg");
 
