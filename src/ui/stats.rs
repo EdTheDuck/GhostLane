@@ -11,7 +11,7 @@ const MONTHS: [&str; 12] = [
 /// True once closed.
 pub fn show(ctx: &egui::Context, name: &str, s: &Stats, today: u64) -> bool {
     let modal = super::show_modal(ctx, "stats", |ui| {
-        ui.set_width(640.0);
+        ui.set_width(790.0);
         let close = super::modal_header(ui, &format!("Stats - {name}"), "Close");
         let done: u32 = s.done_per_day.iter().sum();
         let (passed, worked) = s.first_try;
@@ -24,6 +24,16 @@ pub fn show(ctx: &egui::Context, name: &str, s: &Stats, today: u64) -> bool {
                 .checked_div(worked)
                 .map_or("–".into(), |pct| format!("{pct}%"));
             tile(ui, &rate, &format!("passed first try ({passed} of {worked})"));
+            let tokens = match s.runs_with_tokens {
+                0 => "–".to_string(),
+                _ => crate::ticket::compact(s.tokens.total()),
+            };
+            tile(ui, &tokens, &format!("tokens over {} runs", s.runs_with_tokens)).on_hover_text(format!(
+                "{} input, {} from cache, {} output. Counted for Claude Code runs.",
+                crate::ticket::compact(s.tokens.input),
+                crate::ticket::compact(s.tokens.cached),
+                crate::ticket::compact(s.tokens.output)
+            ));
         });
         ui.add_space(6.0);
         ui.label(RichText::new("Done per day").strong());
@@ -51,7 +61,7 @@ pub fn show(ctx: &egui::Context, name: &str, s: &Stats, today: u64) -> bool {
 }
 
 /// A headline number with what it counts underneath.
-fn tile(ui: &mut Ui, value: &str, label: &str) {
+fn tile(ui: &mut Ui, value: &str, label: &str) -> egui::Response {
     Frame::new()
         .fill(theme::CARD)
         .corner_radius(CornerRadius::same(6))
@@ -61,7 +71,8 @@ fn tile(ui: &mut Ui, value: &str, label: &str) {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.label(RichText::new(value).size(22.0).strong());
             ui.add(egui::Label::new(RichText::new(label).small().color(theme::TEXT_MUTED)).wrap());
-        });
+        })
+        .response
 }
 
 /// One bar per day, today on the right; hover a day for its count.

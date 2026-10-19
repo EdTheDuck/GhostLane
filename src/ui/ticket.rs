@@ -325,7 +325,7 @@ fn diff_view(ui: &mut Ui, diff: &str) {
 /// Newest run first: when, how long, where the ticket went and how it ended.
 fn run_history(ui: &mut Ui, runs: &[RunRecord]) {
     egui::Grid::new("run_history")
-        .num_columns(4)
+        .num_columns(5)
         .spacing([24.0, 4.0])
         .show(ui, |ui| {
             for r in runs.iter().rev() {
@@ -339,6 +339,21 @@ fn run_history(ui: &mut Ui, runs: &[RunRecord]) {
                     theme::ACCENT
                 };
                 ui.label(RichText::new(r.result.label()).color(color));
+                match r.tokens {
+                    Some(t) => {
+                        let text = format!("{} tokens", crate::ticket::compact(t.total()));
+                        ui.label(RichText::new(text).color(theme::TEXT_MUTED))
+                            .on_hover_text(format!(
+                                "{} input, {} from cache, {} output",
+                                crate::ticket::compact(t.input),
+                                crate::ticket::compact(t.cached),
+                                crate::ticket::compact(t.output)
+                            ));
+                    }
+                    None => {
+                        ui.label("");
+                    }
+                }
                 ui.end_row();
             }
         });

@@ -2201,6 +2201,10 @@ fn record_run(p: &mut Project, run: &AiRun, seconds: u64, result: RunResult) -> 
         to: p.meta.columns[col].name.clone(),
         result,
         base: run.base.clone(),
+        tokens: run
+            .marker
+            .as_deref()
+            .and_then(|m| terminal::run_tokens(m, run.started_at)),
     });
     t.save()
         .map_err(|e| format!("Couldn't save the run history of {}: {e}", t.id_str()))?;

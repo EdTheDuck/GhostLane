@@ -84,6 +84,41 @@ pub struct RunRecord {
     /// The git commit checked out when the run started, so the ticket's changes can be shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// What the run used, when the AI CLI reports it (Claude Code does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Tokens>,
+}
+
+/// Tokens an AI run used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tokens {
+    /// Read fresh, including what was written to the prompt cache.
+    pub input: u64,
+    /// Read back from the prompt cache.
+    pub cached: u64,
+    pub output: u64,
+}
+
+impl Tokens {
+    pub fn total(&self) -> u64 {
+        self.input + self.cached + self.output
+    }
+
+    pub fn add(&mut self, other: Tokens) {
+        self.input += other.input;
+        self.cached += other.cached;
+        self.output += other.output;
+    }
+}
+
+/// `950`, `12.3k`, `4.5M`.
+pub fn compact(n: u64) -> String {
+    match n {
+        0..1000 => n.to_string(),
+        1000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
 }
 
 /// Runs kept per ticket; older ones are dropped.
@@ -548,6 +583,11 @@ mod tests {
                 to: "Ready For Test".into(),
                 result: RunResult::MovedOn,
                 base: Some("3f2a9c1e".into()),
+                tokens: Some(Tokens {
+                    input: 1200,
+                    cached: 40_000,
+                    output: 800,
+                }),
             }],
             malformed: false,
             modified: None,
@@ -556,6 +596,20 @@ mod tests {
         assert!(text.contains("blocked_by:\n- '00002'\n- '00005'\n"), "{text}");
         let back = Ticket::parse(7, p(), &text);
         assert_eq!(back, t);
+    }
+
+    #[test]
+    fn token_counts_read_compactly() {
+        assert_eq!(compact(950), "950");
+        assert_eq!(compact(12_340), "12.3k");
+        assert_eq!(compact(4_500_000), "4.5M");
+        let mut t = Tokens::default();
+        t.add(Tokens {
+            input: 1,
+            cached: 2,
+            output: 3,
+        });
+        assert_eq!(t.total(), 6);
     }
 
     #[test]
@@ -591,6 +645,7 @@ mod tests {
                 to: "B".into(),
                 result: RunResult::Unmoved,
                 base: None,
+                tokens: None,
             });
         }
         assert_eq!(t.runs.len(), MAX_RUNS);

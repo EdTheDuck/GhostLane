@@ -100,7 +100,7 @@ Every ticket has:
 - a **run count** showing how many times the ticket has been sent to AI
 - optional **labels** such as `ui` or `backend`, shown as tags on the card
 - an optional **Blocked by** list of tickets that have to be finished first
-- a **run history**: every time the AI worked on it, how long it took, where the ticket went and how it ended
+- a **run history**: every time the AI worked on it, how long it took, where the ticket went, how it ended and, with Claude Code, how many tokens it used
 
 Click a card to read it with the Markdown fully rendered, including its run history. Right-click it to **Edit**, **Duplicate** or **Delete**. Deleted tickets go to your Recycle Bin or Trash, so you can get them back.
 
@@ -160,7 +160,7 @@ Prefer the keyboard? With nothing else focused, the **arrow keys** walk between 
 
 ### See how it's going
 
-The chart icon in the title bar opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, and which tickets needed the most runs.
+The chart icon in the title bar opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, how many tokens the AI has used (with Claude Code), and which tickets needed the most runs.
 
 ### Take the board with you
 

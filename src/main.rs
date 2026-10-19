@@ -116,12 +116,19 @@ fn window_icon() -> Option<egui::IconData> {
 fn main() -> eframe::Result {
     // Completion hook mode: an AI CLI finished a turn. Touch the marker the app watches and exit.
     let args: Vec<String> = std::env::args().collect();
-    if let [_, flag, marker, ..] = args.as_slice()
+    if let [_, flag, marker, rest @ ..] = args.as_slice()
         && flag == terminal::DONE_FLAG
     {
+        // Claude Code passes the hook its session details as JSON on stdin; other CLIs aren't read from.
+        let input = (rest.first().map(String::as_str) == Some(terminal::HOOK_INPUT_FLAG)).then(|| {
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::Read::take(std::io::stdin(), 1 << 20), &mut text);
+            text
+        });
         // Fresh contents each time: truncating an empty file may leave its modified time alone.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-        let _ = std::fs::write(marker, format!("{}", now.map_or(0, |d| d.as_nanos())));
+        let nanos = now.map_or(0, |d| d.as_nanos());
+        let _ = std::fs::write(marker, terminal::marker_contents(nanos, input.as_deref()));
         return Ok(());
     }
     let mut viewport = egui::ViewportBuilder::default()

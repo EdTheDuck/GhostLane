@@ -199,6 +199,62 @@ pub fn cli_command(cli: &AiCli, extra: Option<&str>, prompt: Option<&str>, shell
 
 /// Command-line flag that runs GhostLane as a completion hook: it touches the file named next and exits.
 pub const DONE_FLAG: &str = "--ai-done";
+/// Follows the marker when the hook gets the CLI's JSON on stdin (Claude Code): its transcript path goes into the
+/// marker so the run's token use can be read back.
+pub const HOOK_INPUT_FLAG: &str = "--hook-input";
+
+/// What done mode writes to the marker: the time, then the transcript path from the hook's JSON `input`, if any.
+pub fn marker_contents(nanos: u128, input: Option<&str>) -> String {
+    let transcript = input
+        .and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok())
+        .and_then(|v| v.get("transcript_path")?.as_str().map(str::to_string))
+        .filter(|p| !p.contains(['\n', '\r']));
+    match transcript {
+        Some(path) => format!("{nanos}\n{path}"),
+        None => nanos.to_string(),
+    }
+}
+
+/// Tokens a run that started at `since` used, from the transcript named in its hook's marker file.
+pub fn run_tokens(marker: &Path, since: std::time::SystemTime) -> Option<crate::ticket::Tokens> {
+    let text = std::fs::read_to_string(marker).ok()?;
+    let transcript = text.lines().nth(1).filter(|p| p.ends_with(".jsonl"))?;
+    let since = since.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    transcript_tokens(&std::fs::read_to_string(transcript).ok()?, since)
+}
+
+/// Tokens of the assistant messages in a Claude Code transcript (JSON lines) from `since` (seconds since 1970) on.
+/// A message is logged once per content block with the same usage, so each message id counts once.
+// ponytail: sub agents keep their own transcripts, so their tokens aren't counted.
+pub fn transcript_tokens(jsonl: &str, since: u64) -> Option<crate::ticket::Tokens> {
+    let mut seen = std::collections::HashSet::new();
+    let mut total = None::<crate::ticket::Tokens>;
+    for line in jsonl.lines().filter(|l| l.contains("\"usage\"")) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let at = v["timestamp"]
+            .as_str()
+            .and_then(|t| crate::ticket::parse_utc(&format!("{}Z", t.get(..19)?)));
+        let message = &v["message"];
+        if v["type"] != "assistant" || at.is_none_or(|at| at < since) {
+            continue;
+        }
+        if let Some(id) = message["id"].as_str()
+            && !seen.insert(id.to_string())
+        {
+            continue;
+        }
+        let usage = &message["usage"];
+        let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+        total.get_or_insert_default().add(crate::ticket::Tokens {
+            input: n("input_tokens") + n("cache_creation_input_tokens"),
+            cached: n("cache_read_input_tokens"),
+            output: n("output_tokens"),
+        });
+    }
+    total
+}
 
 /// Where a project's completion hook reports to.
 pub struct DoneHook {
@@ -220,7 +276,7 @@ fn hook_path(path: &Path) -> Option<String> {
 pub fn claude_hook_settings(hook: &DoneHook) -> Option<String> {
     let (exe, marker) = (hook_path(&hook.exe)?, hook_path(&hook.marker)?);
     // The paths hold no quotes or backslashes, so escaping the quotes around them is all JSON needs.
-    let command = format!(r#"\"{exe}\" {DONE_FLAG} \"{marker}\""#);
+    let command = format!(r#"\"{exe}\" {DONE_FLAG} \"{marker}\" {HOOK_INPUT_FLAG}"#);
     Some(format!(
         r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"{command}"}}]}}]}}}}"#
     ))
@@ -608,8 +664,45 @@ mod tests {
         let json = claude_hook_settings(&h).unwrap();
         assert_eq!(
             json,
-            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\"C:/Apps/GhostLane/ghostlane.exe\" --ai-done \"C:/Cfg/hooks/abc.done\""}]}]}}"#
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\"C:/Apps/GhostLane/ghostlane.exe\" --ai-done \"C:/Cfg/hooks/abc.done\" --hook-input"}]}]}}"#
         );
+    }
+
+    #[test]
+    fn markers_carry_the_transcript_and_runs_count_its_tokens() {
+        assert_eq!(marker_contents(7, None), "7");
+        assert_eq!(marker_contents(7, Some("not json")), "7");
+        assert_eq!(
+            marker_contents(7, Some(r#"{"session_id":"s","transcript_path":"C:/t/abc.jsonl"}"#)),
+            "7\nC:/t/abc.jsonl"
+        );
+        let line = |ts: &str, id: &str, out: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","usage":{{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":5000,"output_tokens":{out}}}}}}}"#
+            )
+        };
+        let jsonl = [
+            line("2024-02-29T12:00:00.000Z", "old", 9), // before the run
+            r#"{"type":"user","timestamp":"2024-02-29T12:35:00.000Z","message":{"usage":{"output_tokens":1}}}"#.into(),
+            line("2024-02-29T12:35:00.120Z", "a", 30),
+            line("2024-02-29T12:35:01.000Z", "a", 30), // same message, next content block
+            line("2024-02-29T12:36:00.000Z", "b", 70),
+            "garbage with \"usage\"".into(),
+        ]
+        .join("\n");
+        let t = transcript_tokens(&jsonl, 1_709_210_096).unwrap(); // 2024-02-29T12:34:56Z
+        assert_eq!((t.input, t.cached, t.output), (204, 10_000, 100));
+        assert_eq!(transcript_tokens(&jsonl, 1_909_210_096), None);
+
+        let d = tempfile::tempdir().unwrap();
+        let transcript = d.path().join("s.jsonl");
+        std::fs::write(&transcript, &jsonl).unwrap();
+        let marker = d.path().join("m.done");
+        std::fs::write(&marker, format!("1\n{}", transcript.display())).unwrap();
+        let since = std::time::UNIX_EPOCH + Duration::from_secs(1_709_210_096);
+        assert_eq!(run_tokens(&marker, since), Some(t));
+        std::fs::write(&marker, "1").unwrap();
+        assert_eq!(run_tokens(&marker, since), None);
     }
 
     #[test]

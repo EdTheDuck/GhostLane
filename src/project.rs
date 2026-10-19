@@ -665,6 +665,9 @@ pub struct Stats {
     pub first_try: (usize, usize),
     /// (id, title, run count) of the tickets sent to the AI most often, more than once, most first.
     pub most_retried: Vec<(u32, String, u32)>,
+    /// Tokens used by the runs that reported them.
+    pub tokens: ticket::Tokens,
+    pub runs_with_tokens: usize,
 }
 
 impl Project {
@@ -675,6 +678,10 @@ impl Project {
         let runs: Vec<&ticket::RunRecord> = all().flat_map(|t| &t.runs).collect();
         s.runs = runs.len();
         s.avg_run_secs = (!runs.is_empty()).then(|| runs.iter().map(|r| r.seconds).sum::<u64>() / runs.len() as u64);
+        for tokens in runs.iter().filter_map(|r| r.tokens) {
+            s.tokens.add(tokens);
+            s.runs_with_tokens += 1;
+        }
         for t in self.tickets.get(self.last_col()).into_iter().flatten() {
             if let Some(ago) = t.done_at.and_then(|d| today.checked_sub(d / 86_400))
                 && (ago as usize) < STATS_DAYS
@@ -1094,6 +1101,11 @@ mod tests {
             to: "Done".into(),
             result,
             base: None,
+            tokens: (seconds > 50).then_some(ticket::Tokens {
+                input: seconds,
+                cached: 0,
+                output: 1,
+            }),
         };
         let day = 86_400;
         let now = 100 * day + 3600;
@@ -1125,6 +1137,7 @@ mod tests {
         assert_eq!(st.done_per_day[STATS_DAYS - 2], 1);
         assert_eq!(st.done_per_day.iter().sum::<u32>(), 2); // "Old" is outside the window
         assert_eq!((st.runs, st.avg_run_secs), (4, Some(45)));
+        assert_eq!((st.tokens.total(), st.runs_with_tokens), (162, 2));
         assert_eq!(st.first_try, (1, 2));
         assert_eq!(
             st.most_retried,
