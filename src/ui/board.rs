@@ -66,6 +66,8 @@ fn column_ui(
             ui.label(RichText::new(&column.name).strong().size(15.0));
             ui.label(RichText::new(format!("({})", tickets.len())).color(theme::TEXT_MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Visible gap between glyphs was 14 (30px button, 16px glyph) + 12 spacing; 75% of that.
+                ui.spacing_mut().item_spacing.x = 5.5;
                 if icon_button(ui, icon::PLUS, "Add ticket").clicked() {
                     actions.push(Action::NewTicket(col));
                 }
