@@ -873,6 +873,55 @@ mod tests {
     }
 
     #[test]
+    fn a_tall_modal_fits_a_small_window_and_scrolls() {
+        let mut h = harness();
+        h.set_size(egui::vec2(700.0, 420.0));
+        h.run_steps(3);
+        let modal = h.ctx.memory(|m| m.area_rect(egui::Id::new("project_modal"))).unwrap();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 420.0));
+        assert!(screen.contains_rect(modal), "{modal:?} within {screen:?}");
+        // The X stays in the corner and the button at the bottom is reachable by scrolling.
+        let x = h.get_by_label(icon::X).rect();
+        assert!(
+            modal.contains_rect(x) && x.top() - modal.top() < 20.0,
+            "{x:?} in {modal:?}"
+        );
+        assert!(
+            h.get_by_label("Create").rect().top() > modal.bottom(),
+            "below the fold until scrolled"
+        );
+        h.hover_at(modal.center());
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -2000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        // Scrolling animates, so it keeps repainting for a while.
+        h.run_steps(60);
+        let create = h.get_by_label("Create").rect();
+        assert!(modal.contains_rect(create), "{create:?} scrolled into {modal:?}");
+        assert!(
+            (h.get_by_label(icon::X).rect().top() - x.top()).abs() < 0.5,
+            "the X doesn't scroll away"
+        );
+        // A real click on it lands, scroll bar or not.
+        let pos = x.center();
+        h.hover_at(pos);
+        h.run();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        assert_eq!(h.state().1, Some(true));
+    }
+
+    #[test]
     fn first_column_never_auto_moves() {
         let mut form = ProjectForm::new_project(vec!["claude".into()], "Do");
         form.location = Some(PathBuf::from("/p"));

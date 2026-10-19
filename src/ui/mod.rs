@@ -34,11 +34,37 @@ pub fn show_modal<R>(
     id: impl std::hash::Hash + std::fmt::Debug,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> egui::ModalResponse<R> {
-    let frame =
-        egui::Frame::popup(&ctx.style_of(egui::Theme::Dark)).inner_margin(egui::Margin::same(MODAL_PADDING as i8));
-    egui::Modal::new(egui::Id::new(id)).frame(frame).show(ctx, |ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-        add_contents(ui)
+    let style = ctx.style_of(egui::Theme::Dark);
+    let frame = egui::Frame::popup(&style).inner_margin(egui::Margin::same(MODAL_PADDING as i8));
+    // Never taller than the window: contents that were taller last frame scroll. Only then, so contents sized from
+    // the space they're given don't shrink a scroll area that sizes itself from them.
+    // ponytail: height only; every modal is narrower than the window's 900px minimum width.
+    let edges = 2.0 * (MODAL_PADDING + style.visuals.window_stroke.width);
+    let fit = ctx.content_rect().height() - edges;
+    let id = egui::Id::new(id);
+    let tall = id.with("content_height");
+    let overflowed = ctx.data(|d| d.get_temp::<f32>(tall)).is_some_and(|h| h > fit + 0.5);
+    egui::Modal::new(id).frame(frame).show(ctx, |ui| {
+        let contents = |ui: &mut Ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+            add_contents(ui)
+        };
+        let (inner, height) = if overflowed {
+            let out = egui::ScrollArea::vertical()
+                .id_salt("modal_scroll")
+                .max_height(fit)
+                .auto_shrink([true, false])
+                .show(ui, contents);
+            (out.inner, out.content_size.y)
+        } else {
+            let inner = contents(ui);
+            (inner, ui.min_rect().height())
+        };
+        ui.ctx().data_mut(|d| d.insert_temp(tall, height));
+        if overflowed != (height > fit + 0.5) {
+            ui.ctx().request_repaint();
+        }
+        inner
     })
 }
 
@@ -50,12 +76,14 @@ pub fn modal_header(ui: &mut Ui, title: &str, close_tip: &str) -> bool {
 }
 
 /// The X in a modal's top right corner, tucked into the padding: the gap between the glyph and the modal's top
-/// and right edges is half what it would be at the corner of the contents. Call it first thing in the modal, while
-/// `ui` still spans the whole content area. True when clicked.
+/// and right edges is half what it would be at the corner of the contents. It stays put while the contents scroll.
+/// True when clicked.
 pub fn modal_close(ui: &mut Ui, tooltip: &str) -> bool {
     const SIZE: f32 = 30.0;
     const GLYPH: f32 = 16.0;
-    let content = ui.max_rect();
+    // The contents' top right corner; when they scroll, the top of the part showing.
+    let max = ui.max_rect();
+    let content = egui::Rect::from_min_max(egui::pos2(max.left(), max.top().max(ui.clip_rect().top())), max.max);
     // Laid out at the contents' corner, the glyph's gap to the edge is the border, the padding and the button's own
     // margin.
     let edge = MODAL_PADDING + ui.visuals().window_stroke.width;
@@ -65,9 +93,19 @@ pub fn modal_close(ui: &mut Ui, tooltip: &str) -> bool {
         egui::pos2(content.right() - inset, content.top() + inset),
         egui::vec2(SIZE, SIZE),
     );
-    let response = ui.interact(rect, ui.id().with("modal_close"), egui::Sense::click());
-    paint_glyph(ui, rect, &response, icon::X, theme::TEXT, theme::ACCENT, false);
-    pointer(response).on_hover_text(tooltip).clicked()
+    // A layer of its own just above the modal: half of it sits in the padding, outside a scrolling modal's clip, and
+    // it must win over that modal's scroll bar.
+    let parent = ui.layer_id();
+    let corner = egui::Area::new(ui.id().with("modal_close"))
+        .order(parent.order)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            let (rect, response) = ui.allocate_exact_size(rect.size(), egui::Sense::click());
+            paint_glyph(ui, rect, &response, icon::X, theme::TEXT, theme::ACCENT, false);
+            pointer(response).on_hover_text(tooltip).clicked()
+        });
+    ui.ctx().set_sublayer(parent, corner.response.layer_id);
+    corner.inner
 }
 
 /// A switch with a label that toggles it too, like a checkbox label.
