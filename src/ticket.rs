@@ -74,6 +74,11 @@ impl Ticket {
         format_id(self.id)
     }
 
+    /// Has the ticket been sent to the AI `limit` times already? Auto skips it then. 0 = no limit.
+    pub fn at_run_limit(&self, limit: u32) -> bool {
+        limit > 0 && self.run_count >= limit
+    }
+
     pub fn matches(&self, query: &str) -> bool {
         let q = query.trim().to_lowercase();
         q.is_empty()

@@ -8,6 +8,7 @@ use crate::terminal::{AI_CLIS, detect_ai_clis, detect_shell};
 use crate::theme;
 
 const FONT_SIZES: std::ops::RangeInclusive<u8> = 10..=20;
+const RUN_LIMITS: std::ops::RangeInclusive<u32> = 1..=20;
 
 pub struct SettingsForm {
     ai_prompt: String,
@@ -17,6 +18,9 @@ pub struct SettingsForm {
     terminal_font_size: f32,
     check_for_updates: bool,
     auto_order: AutoOrder,
+    auto_run_limit: u32,
+    notify_idle: bool,
+    notify_failed: bool,
     detected_shell: String,
     installed: Vec<String>,
 }
@@ -36,6 +40,9 @@ impl SettingsForm {
             terminal_font_size: s.terminal_font_size,
             check_for_updates: s.check_for_updates,
             auto_order: s.auto_order,
+            auto_run_limit: s.auto_run_limit,
+            notify_idle: s.notify_idle,
+            notify_failed: s.notify_failed,
             detected_shell: detect_shell(None).0,
             installed: detect_ai_clis(),
         }
@@ -114,6 +121,37 @@ impl SettingsForm {
                     });
                 super::pointer(combo.response);
             });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Auto run limit").strong()).on_hover_text(
+                    "Auto skips a ticket once it has been sent to the AI this many times, so a ticket that keeps                      failing its tests doesn't loop forever. You can still run it with ▶.",
+                );
+                let label = |n: u32| match n {
+                    0 => "No limit".to_string(),
+                    1 => "1 run".to_string(),
+                    n => format!("{n} runs"),
+                };
+                let combo = ComboBox::from_id_salt("auto_run_limit")
+                    .selected_text(label(self.auto_run_limit))
+                    .show_ui(ui, |ui| {
+                        for n in std::iter::once(0).chain(RUN_LIMITS) {
+                            ui.selectable_value(&mut self.auto_run_limit, n, label(n));
+                        }
+                    });
+                super::pointer(combo.response);
+            });
+            ui.add_space(8.0);
+
+            ui.label(RichText::new("Notifications").strong());
+            switch_row(
+                ui,
+                &mut self.notify_idle,
+                "Get my attention when the AI has finished all its work",
+            );
+            switch_row(
+                ui,
+                &mut self.notify_failed,
+                "Get my attention when a ticket fails and comes back",
+            );
             ui.add_space(8.0);
 
             ui.label(RichText::new("Shell").strong());
@@ -152,16 +190,11 @@ impl SettingsForm {
             });
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                super::toggle(ui, &mut self.check_for_updates);
-                let label = ui.add(
-                    egui::Label::new(RichText::new("Check for updates on startup").strong())
-                        .sense(egui::Sense::click()),
-                );
-                if super::pointer(label).clicked() {
-                    self.check_for_updates = !self.check_for_updates;
-                }
-            });
+            switch_row(
+                ui,
+                &mut self.check_for_updates,
+                RichText::new("Check for updates on startup").strong(),
+            );
 
             ui.add_space(8.0);
             ui.separator();
@@ -201,8 +234,22 @@ impl SettingsForm {
             terminal_font_size: self.terminal_font_size,
             check_for_updates: self.check_for_updates,
             auto_order: self.auto_order,
+            auto_run_limit: self.auto_run_limit,
+            notify_idle: self.notify_idle,
+            notify_failed: self.notify_failed,
         }
     }
+}
+
+/// A switch with a label that toggles it too, like a checkbox label.
+fn switch_row(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText>) {
+    ui.horizontal(|ui| {
+        super::toggle(ui, on);
+        let label = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+        if super::pointer(label).clicked() {
+            *on = !*on;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -236,6 +283,9 @@ mod tests {
             shell: Some("fish".into()),
             check_for_updates: false,
             auto_order: AutoOrder::IdAsc,
+            auto_run_limit: 0,
+            notify_idle: false,
+            notify_failed: false,
         });
         form.reset();
         let s = form.to_settings();
@@ -244,6 +294,8 @@ mod tests {
         assert_eq!(s.shell, None);
         assert!(s.check_for_updates);
         assert_eq!(s.auto_order, AutoOrder::PriorityDesc);
+        assert_eq!(s.auto_run_limit, 6);
+        assert!(s.notify_idle && s.notify_failed);
         assert_eq!(s.ai_clis, Some(detect_ai_clis()));
     }
 
@@ -265,5 +317,22 @@ mod tests {
         h.run();
         let ids = h.state().to_settings().ai_clis.unwrap();
         assert_eq!(ids, ["claude", "gemini"]);
+    }
+
+    #[test]
+    fn clicking_a_notification_label_toggles_it() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::new_ui_state(
+            |ui, f: &mut SettingsForm| _ = f.show(ui.ctx()),
+            SettingsForm::new(&Settings::default()),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(egui::vec2(900.0, 1000.0));
+        h.run_steps(3);
+        h.get_by_label_contains("fails and comes back").click();
+        h.run();
+        let s = h.state().to_settings();
+        assert!(s.notify_idle);
+        assert!(!s.notify_failed);
     }
 }

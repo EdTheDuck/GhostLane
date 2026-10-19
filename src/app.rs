@@ -29,6 +29,8 @@ pub struct OpenProject {
     pub queue: Vec<u32>,
     /// Folders of the columns set to Auto. Kept in memory only, so a cloned repo never starts the AI by itself.
     pub auto: std::collections::HashSet<String>,
+    /// Start nothing new from the queue or Auto columns; the ticket the AI is on still finishes.
+    pub paused: bool,
 }
 
 impl OpenProject {
@@ -40,6 +42,7 @@ impl OpenProject {
             search: HashMap::new(),
             queue: Vec::new(),
             auto: std::collections::HashSet::new(),
+            paused: false,
         }
     }
 
@@ -67,6 +70,7 @@ pub enum Action {
     DuplicateTicket(u32),
     AskDelete(u32),
     RunAi(u32),
+    ResetRunCount(u32),
 }
 
 pub enum Modal {
@@ -121,7 +125,22 @@ impl Generation {
 struct AiRun {
     ghost: PathBuf,
     id: u32,
+    /// Folder of the column the ticket was in when it started; ending up left of it means it failed.
+    from: String,
     started: Instant,
+    started_at: std::time::SystemTime,
+    /// The CLI's completion hook touches this when it finishes. `None` = the CLI has no hook, so a quiet
+    /// terminal counts as finished.
+    marker: Option<PathBuf>,
+    program: &'static str,
+    next_alive_check: Instant,
+}
+
+/// How a run ended.
+enum RunEnd {
+    Finished,
+    /// The CLI quit before its completion hook fired.
+    CliGone,
 }
 
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
@@ -317,6 +336,7 @@ impl App {
                     search: HashMap::new(),
                     queue: Vec::new(),
                     auto: std::collections::HashSet::new(),
+                    paused: false,
                 });
                 self.projects.len() - 1
             }
@@ -406,6 +426,16 @@ impl App {
             }
             Action::AskDelete(id) => self.modal = Some(Modal::ConfirmDelete(id)),
             Action::RunAi(id) => self.play(id, ctx),
+            Action::ResetRunCount(id) => {
+                let Some(mut t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
+                    return;
+                };
+                t.run_count = 0;
+                if let Err(e) = t.save() {
+                    self.toast(format!("Couldn't reset {}: {e}", t.id_str()));
+                }
+                self.reload_active();
+            }
             Action::OpenSettings => self.modal = Some(Modal::Settings(SettingsForm::new(&self.config.settings))),
         }
     }
@@ -420,8 +450,41 @@ impl App {
         terminal::ai_cli(&id).ok_or_else(|| format!("Unknown AI CLI \"{id}\"; pick one in the project settings"))
     }
 
+    /// Completion hook files for the project with .ghost `key`, with the Claude Code settings written.
+    /// `None` when they can't be set up; runs then finish once the terminal goes quiet.
+    fn done_hook(key: &Path) -> Option<terminal::DoneHook> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let name = format!("{:016x}", hasher.finish());
+        let dir = crate::config::config_dir()?.join("hooks");
+        let hook = terminal::DoneHook {
+            exe: std::env::current_exe().ok().map(strip_unc)?,
+            marker: dir.join(format!("{name}.done")),
+            settings: dir.join(format!("{name}.json")),
+        };
+        let json = terminal::claude_hook_settings(&hook)?;
+        let written = std::fs::create_dir_all(&dir).and_then(|()| crate::ticket::write_atomic(&hook.settings, &json));
+        if let Err(e) = written {
+            eprintln!("couldn't write {}: {e}", hook.settings.display());
+            return None;
+        }
+        Some(hook)
+    }
+
+    /// Shell command that starts `cli`, with its completion hook when it has one, and `prompt`.
+    /// Also returns the hook's marker file.
+    fn cli_launch(&self, key: &Path, cli: &'static terminal::AiCli, prompt: Option<&str>) -> (String, Option<PathBuf>) {
+        let shell = terminal::detect_shell(self.config.settings.shell.as_deref()).0;
+        let hook = Self::done_hook(key);
+        let args = hook.as_ref().and_then(|h| terminal::done_hook_args(cli, h, &shell));
+        let marker = hook.filter(|_| args.is_some()).map(|h| h.marker);
+        (terminal::cli_command(cli, args.as_deref(), prompt, &shell), marker)
+    }
+
     /// Hands `prompt` to the project's AI CLI in its terminal: typed into the CLI when it is already
-    /// running there, otherwise run as a command that starts the CLI with the prompt.
+    /// running there, otherwise run as a command that starts the CLI with the prompt. Returns the marker
+    /// file the CLI's completion hook touches, if it was started with one.
     fn send_to_cli(
         &mut self,
         key: &Path,
@@ -429,9 +492,9 @@ impl App {
         cli: &'static terminal::AiCli,
         prompt: &str,
         ctx: &egui::Context,
-    ) -> Result<(), String> {
+    ) -> Result<Option<PathBuf>, String> {
         let shell = self.config.settings.shell.clone();
-        let command = terminal::cli_command(cli, prompt, &terminal::detect_shell(shell.as_deref()).0);
+        let (command, mut marker) = self.cli_launch(key, cli, Some(prompt));
         if self.config.terminal_collapsed {
             self.config.terminal_collapsed = false;
             self.save_config();
@@ -446,14 +509,21 @@ impl App {
                 .terminals
                 .get_or_start(key, root, shell.as_deref(), None, ctx)
                 .expect("session is live");
-            if terminal::runs_program(session.shell_pid(), cli.program) {
-                session.type_prompt(prompt, ctx);
-            } else {
-                session.run(&command);
+            match terminal::program_command_line(session.shell_pid(), cli.program) {
+                Some(running) => {
+                    session.type_prompt(prompt, ctx);
+                    // Started by hand, the CLI has no hook; GhostLane's launches name the hook's files.
+                    let hooked = |m: &PathBuf| {
+                        m.file_stem()
+                            .is_some_and(|stem| running.contains(&stem.to_string_lossy().to_lowercase()))
+                    };
+                    marker = marker.filter(hooked);
+                }
+                None => session.run(&command),
             }
         }
         self.ai_request = Some(Instant::now());
-        Ok(())
+        Ok(marker)
     }
 
     /// Play button: hands ticket `id` to the AI now, or queues it while the AI is on another ticket.
@@ -471,11 +541,25 @@ impl App {
     /// Is project `i`'s AI on a ticket from the play button, or are tickets waiting for it? Play buttons queue then.
     fn ai_engaged(&self, i: usize) -> bool {
         let op = &self.projects[i];
-        !op.queue.is_empty()
-            || op
-                .project
-                .as_ref()
-                .is_ok_and(|p| self.ai_runs.iter().any(|r| r.ghost == p.ghost_path))
+        (!op.queue.is_empty() && !op.paused) || self.ai_running(i)
+    }
+
+    /// Is project `i`'s AI on a ticket from the play button?
+    fn ai_running(&self, i: usize) -> bool {
+        let ghost = self.projects[i].project.as_ref().map(|p| &p.ghost_path);
+        self.ai_runs.iter().any(|r| ghost.is_ok_and(|g| *g == r.ghost))
+    }
+
+    /// Stop button: interrupts the AI's current ticket, leaving it where it is, and pauses the queue.
+    fn stop_ai(&mut self, i: usize) {
+        self.projects[i].paused = true;
+        let Ok(p) = &self.projects[i].project else { return };
+        let key = p.ghost_path.clone();
+        self.ai_runs.retain(|r| r.ghost != key);
+        let Ok(cli) = self.project_cli(p) else { return };
+        if let Some(session) = self.terminals.live_mut(&key) {
+            session.interrupt(cli.interrupt);
+        }
     }
 
     /// Hands ticket `id` of project `pi` to its AI CLI. False if it couldn't.
@@ -487,6 +571,7 @@ impl App {
             return false;
         };
         let (key, root, mut t) = (p.ghost_path.clone(), p.root.clone(), t.clone());
+        let from = p.meta.columns[col].folder.clone();
         let cli = match self.project_cli(p) {
             Ok(cli) => cli,
             Err(e) => {
@@ -511,10 +596,14 @@ impl App {
                 return false;
             }
         };
-        if let Err(e) = self.send_to_cli(&key, &root, cli, &prompt, ctx) {
-            self.toast(e);
-            return false;
-        }
+        let started_at = std::time::SystemTime::now();
+        let marker = match self.send_to_cli(&key, &root, cli, &prompt, ctx) {
+            Ok(marker) => marker,
+            Err(e) => {
+                self.toast(e);
+                return false;
+            }
+        };
         let mut errors = Vec::new();
         t.run_count += 1;
         if let Err(e) = t.save() {
@@ -533,30 +622,63 @@ impl App {
         for e in errors {
             self.toast(e);
         }
+        let now = Instant::now();
         self.ai_runs.push(AiRun {
             ghost: key,
             id,
-            started: Instant::now(),
+            from,
+            started: now,
+            started_at,
+            marker,
+            program: cli.program,
+            // Give a freshly started CLI time to appear before checking it is alive.
+            next_alive_check: now + Duration::from_secs(8),
         });
         true
     }
 
-    /// Once a project's AI CLI goes quiet, moves the tickets it was working on into the next
-    /// column if that column takes tickets on "AI Complete".
-    // ponytail: "quiet" is the same output heuristic as the busy title, so a CLI waiting on a
-    // permission prompt counts as done; a CLI-side completion hook would be exact.
+    /// Has `run` ended? Hooked runs end when the hook fires (or the CLI quits), others once the terminal
+    /// goes quiet.
+    fn run_end(&self, run: &mut AiRun, now: Instant) -> Option<RunEnd> {
+        let Some(marker) = &run.marker else {
+            let output = self.terminals.last_output(&run.ghost);
+            return (!ai_activity(Some(run.started), output, None, now).0).then_some(RunEnd::Finished);
+        };
+        let modified = std::fs::metadata(marker).and_then(|m| m.modified());
+        if modified.is_ok_and(|m| m > run.started_at) {
+            return Some(RunEnd::Finished);
+        }
+        if now < run.next_alive_check {
+            return None;
+        }
+        run.next_alive_check = now + Duration::from_secs(2);
+        let alive = self
+            .terminals
+            .shell_pid(&run.ghost)
+            .is_some_and(|pid| terminal::runs_program(pid, run.program));
+        (!alive).then_some(RunEnd::CliGone)
+    }
+
+    /// Once a project's AI CLI has finished a ticket, moves it into the next column if that column takes
+    /// tickets on "AI Complete", then starts the next queued or Auto ticket.
+    // ponytail: CLIs without a completion hook finish once the terminal goes quiet (the busy title's
+    // heuristic), so one waiting on a permission prompt counts as done.
     fn poll_ai_runs(&mut self, ctx: &egui::Context) {
         if !self.ai_runs.is_empty() {
             // A quiet CLI makes no repaints, so look again to notice it has finished.
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         let now = Instant::now();
-        let terminals = &self.terminals;
-        let (done, running): (Vec<AiRun>, Vec<AiRun>) = std::mem::take(&mut self.ai_runs)
-            .into_iter()
-            .partition(|r| !ai_activity(Some(r.started), terminals.last_output(&r.ghost), None, now).0);
-        self.ai_runs = running;
-        for run in done {
+        let mut ended = Vec::new();
+        for mut run in std::mem::take(&mut self.ai_runs) {
+            match self.run_end(&mut run, now) {
+                Some(end) => ended.push((run, end)),
+                None => self.ai_runs.push(run),
+            }
+        }
+        let settings = self.config.settings.clone();
+        let mut attention = false;
+        for (run, end) in &ended {
             let Some(p) = self
                 .projects
                 .iter_mut()
@@ -564,6 +686,12 @@ impl App {
             else {
                 continue;
             };
+            let id = crate::ticket::format_id(run.id);
+            if let RunEnd::CliGone = end {
+                self.toasts
+                    .push((format!("The AI CLI closed before it finished {id}"), Instant::now()));
+                continue;
+            }
             let _ = p.rescan();
             let Some((col, t)) = p.find_ticket(run.id) else {
                 continue;
@@ -572,48 +700,72 @@ impl App {
             if let Some(to) = p.auto_target(col, AutoMove::AiComplete)
                 && let Err(e) = p.move_ticket(&path, to)
             {
-                self.toast(format!("Couldn't move {}: {e}", crate::ticket::format_id(run.id)));
+                self.toasts.push((format!("Couldn't move {id}: {e}"), Instant::now()));
+            }
+            // A ticket that ends up left of where it started came back from testing.
+            let from = p.meta.columns.iter().position(|c| c.folder == run.from);
+            if settings.notify_failed
+                && let Some((col, _)) = p.find_ticket(run.id)
+                && from.is_some_and(|from| col < from)
+            {
+                attention = true;
+                let msg = format!("{id} came back to {}", p.meta.columns[col].name);
+                self.toasts.push((msg, Instant::now()));
             }
         }
         // A project whose AI is free starts its next queued ticket, or with an empty queue, the next one
         // from its Auto columns. Not while a ticket is being written: that prompt is still in flight.
-        if self.generating.is_some() {
+        if self.generating.is_none() {
+            for i in 0..self.projects.len() {
+                self.start_next(i, settings.auto_order, settings.auto_run_limit, ctx);
+            }
+        }
+        // Out of work: a run just ended and nothing took its place.
+        let idle = self.generating.is_none()
+            && ended
+                .iter()
+                .any(|(run, _)| !self.ai_runs.iter().any(|r| r.ghost == run.ghost));
+        if attention || (idle && settings.notify_idle) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
+    }
+
+    /// Starts project `i`'s next queued ticket, or with an empty queue, the next one from its Auto columns,
+    /// unless its AI is busy or paused.
+    fn start_next(&mut self, i: usize, order: crate::project::AutoOrder, run_limit: u32, ctx: &egui::Context) {
+        if self.projects[i].paused || self.projects[i].project.is_err() || self.ai_running(i) {
             return;
         }
-        let order = self.config.settings.auto_order;
-        for i in 0..self.projects.len() {
-            let Ok(p) = &self.projects[i].project else { continue };
-            if self.ai_runs.iter().any(|r| r.ghost == p.ghost_path) {
-                continue;
+        while !self.projects[i].queue.is_empty() {
+            let id = self.projects[i].queue.remove(0);
+            if self.run_ai(i, id, ctx) {
+                return;
             }
-            while !self.projects[i].queue.is_empty() {
-                let id = self.projects[i].queue.remove(0);
-                if self.run_ai(i, id, ctx) {
-                    break;
-                }
-            }
-            let op = &self.projects[i];
-            let Ok(p) = &op.project else { continue };
-            if !op.queue.is_empty() || self.ai_runs.iter().any(|r| r.ghost == p.ghost_path) {
-                continue;
-            }
-            let Some((col, id)) = p.next_auto(&op.auto, order) else {
-                continue;
-            };
-            let started = self.run_ai(i, id, ctx);
-            let op = &mut self.projects[i];
-            let moved = op
-                .project
-                .as_ref()
-                .is_ok_and(|p| p.find_ticket(id).is_none_or(|(c, _)| c != col));
-            if !started || !moved {
-                // Otherwise Auto would pick the same ticket again and again.
-                op.auto.clear();
-                self.toast(format!(
-                    "Auto turned off: {} didn't start",
-                    crate::ticket::format_id(id)
-                ));
-            }
+        }
+        let op = &self.projects[i];
+        let Some((col, id)) = op
+            .project
+            .as_ref()
+            .ok()
+            .and_then(|p| p.next_auto(&op.auto, order, run_limit))
+        else {
+            return;
+        };
+        let started = self.run_ai(i, id, ctx);
+        let op = &mut self.projects[i];
+        let moved = op
+            .project
+            .as_ref()
+            .is_ok_and(|p| p.find_ticket(id).is_none_or(|(c, _)| c != col));
+        if !started || !moved {
+            // Otherwise Auto would pick the same ticket again and again.
+            op.auto.clear();
+            self.toast(format!(
+                "Auto turned off: {} didn't start",
+                crate::ticket::format_id(id)
+            ));
         }
     }
 
@@ -682,7 +834,7 @@ impl App {
         let prompt =
             terminal::tickets_from_document_prompt(doc, &p.column_dir(0), &p.tickets_dir(), p.meta.next_ticket_id);
         let (key, root) = (p.ghost_path.clone(), p.root.clone());
-        self.send_to_cli(&key, &root, cli, &prompt, ctx)
+        self.send_to_cli(&key, &root, cli, &prompt, ctx).map(|_| ())
     }
 
     /// A file dropped on the window opens the document import with it (the import modal reads the drop itself).
@@ -783,6 +935,7 @@ impl App {
                 .size_range(100.0..=max)
         };
         let (key, cwd) = self.terminal_target();
+        let (mut toggle_pause, mut stop) = (false, false);
         panel.frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (glyph, tip) = if collapsed {
@@ -809,6 +962,31 @@ impl App {
                         if let Err(e) = self.config.save() {
                             eprintln!("couldn't save settings: {e}");
                         }
+                    }
+                    let Some(i) = self.active else { return };
+                    let running = self.ai_running(i);
+                    let op = &self.projects[i];
+                    if op.paused {
+                        let resume = ui::glyph_button(ui, icon::PLAY, theme::ACCENT, theme::ACCENT, true)
+                            .on_hover_text("Resume: start queued and Auto tickets again");
+                        if resume.clicked() {
+                            toggle_pause = true;
+                        }
+                        ui.label(RichText::new("Paused").color(theme::ACCENT));
+                    } else if (running || !op.queue.is_empty() || !op.auto.is_empty())
+                        && icon_button(
+                            ui,
+                            icon::PAUSE,
+                            "Pause: let the AI finish this ticket, then start nothing new",
+                        )
+                        .clicked()
+                    {
+                        toggle_pause = true;
+                    }
+                    if running
+                        && ui::danger_icon_button(ui, icon::STOP, "Stop the AI now and pause the queue").clicked()
+                    {
+                        stop = true;
                     }
                 });
             });
@@ -846,18 +1024,28 @@ impl App {
                 }
             });
         });
+        if let Some(i) = self.active {
+            if stop {
+                self.stop_ai(i);
+            } else if toggle_pause {
+                self.projects[i].paused = !self.projects[i].paused;
+            }
+        }
     }
 
     fn terminal_view(&mut self, ui: &mut Ui, key: &Path, cwd: &Path) {
         let shell = self.config.settings.shell.clone();
-        // A project's terminal opens with its AI CLI running, ready to use.
-        let startup = self
-            .active_project()
-            .and_then(|p| self.project_cli(p).ok())
-            .map(|c| c.program);
+        // A project's terminal opens with its AI CLI running, ready to use (worked out only when it opens:
+        // that writes the completion hook's settings).
+        let startup = match self.active_project() {
+            Some(p) if !self.terminals.contains(key) => {
+                self.project_cli(p).ok().map(|cli| self.cli_launch(key, cli, None).0)
+            }
+            _ => None,
+        };
         match self
             .terminals
-            .get_or_start(key, cwd, shell.as_deref(), startup, ui.ctx())
+            .get_or_start(key, cwd, shell.as_deref(), startup.as_deref(), ui.ctx())
         {
             Ok(session) if session.exited => {
                 ui.add_space(8.0);
@@ -1392,7 +1580,8 @@ impl eframe::App for App {
             .show(ui, |ui| match self.active {
                 Some(i) if self.projects[i].project.is_ok() => {
                     let engaged = self.ai_engaged(i);
-                    ui::board::show(ui, &mut self.projects[i], engaged, &mut actions)
+                    let limit = self.config.settings.auto_run_limit;
+                    ui::board::show(ui, &mut self.projects[i], engaged, limit, &mut actions)
                 }
                 _ => Self::empty_state(ui, &mut actions),
             })

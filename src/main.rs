@@ -113,6 +113,16 @@ fn window_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result {
+    // Completion hook mode: an AI CLI finished a turn. Touch the marker the app watches and exit.
+    let args: Vec<String> = std::env::args().collect();
+    if let [_, flag, marker, ..] = args.as_slice()
+        && flag == terminal::DONE_FLAG
+    {
+        // Fresh contents each time: truncating an empty file may leave its modified time alone.
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        let _ = std::fs::write(marker, format!("{}", now.map_or(0, |d| d.as_nanos())));
+        return Ok(());
+    }
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("GhostLane")
         .with_inner_size([1280.0, 800.0])

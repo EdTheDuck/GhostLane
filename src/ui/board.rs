@@ -20,7 +20,8 @@ const COLUMN_GAP: f32 = 12.0;
 pub struct DragTicket(pub u32);
 
 /// `engaged`: the AI is busy with or has queued tickets, so play buttons add to the queue instead.
-pub fn show(ui: &mut Ui, op: &mut OpenProject, engaged: bool, actions: &mut Vec<Action>) {
+/// `run_limit`: Auto skips tickets sent to the AI this many times; their cards are flagged.
+pub fn show(ui: &mut Ui, op: &mut OpenProject, engaged: bool, run_limit: u32, actions: &mut Vec<Action>) {
     let Ok(project) = &op.project else { return };
     let columns = project.meta.columns.len();
     let width = column_width(ui.available_width(), columns);
@@ -30,7 +31,7 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, engaged: bool, actions: &mut Vec<
             let height = ui.available_height();
             for col in 0..columns {
                 ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
-                    column_ui(ui, op, col, width, engaged, actions);
+                    column_ui(ui, op, col, width, engaged, run_limit, actions);
                 });
             }
         });
@@ -44,7 +45,15 @@ fn column_width(available: f32, columns: usize) -> f32 {
     ((available - COLUMN_GAP * (n - 1.0)) / n).floor().max(MIN_COLUMN_WIDTH)
 }
 
-fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, engaged: bool, actions: &mut Vec<Action>) {
+fn column_ui(
+    ui: &mut Ui,
+    op: &mut OpenProject,
+    col: usize,
+    width: f32,
+    engaged: bool,
+    run_limit: u32,
+    actions: &mut Vec<Action>,
+) {
     let OpenProject {
         project: Ok(project),
         search,
@@ -55,6 +64,7 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, engaged:
         return;
     };
     let (column, tickets) = (&project.meta.columns[col], &project.tickets[col]);
+    let auto_column = project.auto_target(col, AutoMove::AiWorking).is_some();
     let mut prepared = Frame::new()
         .fill(theme::PANEL)
         .corner_radius(CornerRadius::same(8))
@@ -83,7 +93,7 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, engaged:
                     search.insert(column.folder.clone(), String::new());
                     focus_search = true;
                 }
-                if project.auto_target(col, AutoMove::AiWorking).is_some() {
+                if auto_column {
                     auto_toggle(ui, auto, &column.folder);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -137,7 +147,7 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, engaged:
                     (icon::PLAY, "Complete task with AI")
                 });
                 for t in tickets.iter().filter(|t| t.matches(query)) {
-                    card(ui, t, play, actions);
+                    card(ui, t, play, auto_column && t.at_run_limit(run_limit), actions);
                 }
             });
     }
@@ -202,7 +212,8 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
     }
 }
 
-fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &mut Vec<Action>) {
+/// `flagged`: Auto skips the ticket, it has been sent to the AI too many times.
+fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: bool, actions: &mut Vec<Action>) {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
     let response = ui
         .scope_builder(builder, |ui| {
@@ -219,7 +230,7 @@ fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &mut Vec<A
                 .fill(fill)
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(12))
-                .show(ui, |ui| card_contents(ui, t, play, actions));
+                .show(ui, |ui| card_contents(ui, t, play, flagged, actions));
         })
         .response;
 
@@ -241,6 +252,13 @@ fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &mut Vec<A
         if ui.button(format!("{}  Duplicate Ticket", icon::COPY)).clicked() {
             actions.push(Action::DuplicateTicket(t.id));
         }
+        if t.run_count > 0
+            && ui
+                .button(format!("{}  Reset Run Count", icon::ARROW_COUNTER_CLOCKWISE))
+                .clicked()
+        {
+            actions.push(Action::ResetRunCount(t.id));
+        }
         if ui
             .button(RichText::new(format!("{}  Delete Ticket", icon::TRASH)).color(theme::DANGER))
             .clicked()
@@ -251,7 +269,7 @@ fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &mut Vec<A
 }
 
 /// play: glyph and tooltip of the AI button, if the card has one.
-fn card_contents(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &mut Vec<Action>) {
+fn card_contents(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: bool, actions: &mut Vec<Action>) {
     const PLAY: f32 = 30.0;
     let full = ui.available_width();
     let left = ui.cursor().left();
@@ -273,6 +291,13 @@ fn card_contents(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &
                 if t.malformed {
                     ui.label(RichText::new(icon::WARNING).color(theme::DANGER))
                         .on_hover_text("This ticket file's header couldn't be read");
+                }
+                if flagged {
+                    let tip = format!(
+                        "Sent to the AI {} times, so Auto skips it. Press ▶ to run it anyway, or right-click to reset                          its run count.",
+                        t.run_count
+                    );
+                    ui.label(RichText::new(icon::FLAG).color(theme::DANGER)).on_hover_text(tip);
                 }
             });
             ui.label(title_job(ui, &t.title, width));
@@ -377,9 +402,10 @@ mod tests {
             search: HashMap::new(),
             queue: Vec::new(),
             auto: HashSet::new(),
+            paused: false,
         };
         let mut h = Harness::new_ui_state(
-            |ui, (op, actions, engaged): &mut State| show(ui, op, *engaged, actions),
+            |ui, (op, actions, engaged): &mut State| show(ui, op, *engaged, 3, actions),
             (op, Vec::new(), false),
         );
         crate::theme::apply(&h.ctx);
@@ -448,6 +474,25 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let h = harness_cols(d.path(), &["Hello"], AutoMove::AiComplete);
         assert_eq!(h.query_all_by_label("Auto").count(), 0);
+    }
+
+    #[test]
+    fn tickets_at_the_run_limit_are_flagged_in_auto_columns() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_cols(d.path(), &["Fresh", "Tired"], AutoMove::AiWorking);
+        assert_eq!(h.query_all_by_label(icon::FLAG).count(), 0);
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        let mut t = p.tickets[0].iter().find(|t| t.title == "Tired").unwrap().clone();
+        t.run_count = 3;
+        t.save().unwrap();
+        p.rescan().unwrap();
+        h.run();
+        assert_eq!(h.get_all_by_label(icon::FLAG).count(), 1);
+        h.get_by_label("Tired").click_secondary();
+        h.run();
+        h.get_by_label_contains("Reset Run Count").click();
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::ResetRunCount(2))));
     }
 
     #[test]

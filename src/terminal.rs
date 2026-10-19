@@ -14,6 +14,8 @@ pub struct AiCli {
     pub prompt_flag: Option<&'static str>,
     /// Project instructions file the CLI reads, relative to the project root.
     pub instructions_file: &'static str,
+    /// Keys that stop the CLI's current turn without quitting it.
+    pub interrupt: &'static [u8],
 }
 
 pub const DEFAULT_CLI: &str = "claude";
@@ -24,6 +26,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "Claude Code",
         program: "claude",
         prompt_flag: None,
+        interrupt: b"\x1b",
         instructions_file: "CLAUDE.md",
     },
     AiCli {
@@ -31,6 +34,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "OpenAI Codex",
         program: "codex",
         prompt_flag: None,
+        interrupt: b"\x1b",
         instructions_file: "AGENTS.md",
     },
     AiCli {
@@ -38,6 +42,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "Gemini CLI",
         program: "gemini",
         prompt_flag: Some("-i"),
+        interrupt: b"\x1b",
         instructions_file: "GEMINI.md",
     },
     AiCli {
@@ -45,6 +50,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "GitHub Copilot CLI",
         program: "copilot",
         prompt_flag: Some("-i"),
+        interrupt: b"\x1b",
         instructions_file: ".github/copilot-instructions.md",
     },
     AiCli {
@@ -52,6 +58,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "Cursor",
         program: "cursor-agent",
         prompt_flag: None,
+        interrupt: b"\x1b",
         instructions_file: "AGENTS.md",
     },
     AiCli {
@@ -59,6 +66,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "opencode",
         program: "opencode",
         prompt_flag: Some("--prompt"),
+        interrupt: b"\x1b",
         instructions_file: "AGENTS.md",
     },
     AiCli {
@@ -66,6 +74,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         name: "Aider",
         program: "aider",
         prompt_flag: Some("--message"),
+        interrupt: b"\x03",
         instructions_file: "CONVENTIONS.md",
     },
 ];
@@ -162,15 +171,71 @@ pub fn tickets_from_document_prompt(doc: &Path, dir: &Path, tickets: &Path, firs
     )
 }
 
-/// Shell command that starts `cli` with `prompt`, quoted as a single argument for `shell`.
-pub fn cli_command(cli: &AiCli, prompt: &str, shell: &str) -> String {
-    let flag = cli.prompt_flag.map(|f| format!("{f} ")).unwrap_or_default();
-    format!("{} {flag}{}", cli.program, quote(shell, prompt))
+/// Shell command that starts `cli` with `extra` arguments and `prompt`, quoted as a single argument for `shell`.
+pub fn cli_command(cli: &AiCli, extra: Option<&str>, prompt: Option<&str>, shell: &str) -> String {
+    let mut command = cli.program.to_string();
+    if let Some(extra) = extra {
+        command = format!("{command} {extra}");
+    }
+    if let Some(prompt) = prompt {
+        let flag = cli.prompt_flag.map(|f| format!("{f} ")).unwrap_or_default();
+        command = format!("{command} {flag}{}", quote(shell, prompt));
+    }
+    command
+}
+
+/// Command-line flag that runs GhostLane as a completion hook: it touches the file named next and exits.
+pub const DONE_FLAG: &str = "--ai-done";
+
+/// Where a project's completion hook reports to.
+pub struct DoneHook {
+    /// The GhostLane executable.
+    pub exe: PathBuf,
+    /// Touched each time the CLI finishes a turn.
+    pub marker: PathBuf,
+    /// Claude Code settings file holding the Stop hook.
+    pub settings: PathBuf,
+}
+
+/// `path` with forward slashes, or `None` if it holds characters some shell would need escaped.
+fn hook_path(path: &Path) -> Option<String> {
+    let s = path.display().to_string().replace('\\', "/");
+    (!s.contains(['"', '\'', '`', '$', '!', '%', '\n', '\r'])).then_some(s)
+}
+
+/// Claude Code settings with a Stop hook that runs GhostLane's done mode.
+pub fn claude_hook_settings(hook: &DoneHook) -> Option<String> {
+    let (exe, marker) = (hook_path(&hook.exe)?, hook_path(&hook.marker)?);
+    // The paths hold no quotes or backslashes, so escaping the quotes around them is all JSON needs.
+    let command = format!(r#"\"{exe}\" {DONE_FLAG} \"{marker}\""#);
+    Some(format!(
+        r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"{command}"}}]}}]}}}}"#
+    ))
+}
+
+/// Arguments that make `cli` run GhostLane's done mode each time it finishes a turn; `None` for CLIs without
+/// a hook for that.
+pub fn done_hook_args(cli: &AiCli, hook: &DoneHook, shell: &str) -> Option<String> {
+    let (exe, marker) = (hook_path(&hook.exe)?, hook_path(&hook.marker)?);
+    match cli.id {
+        "claude" => Some(format!("--settings {}", quote(shell, &hook_path(&hook.settings)?))),
+        // Codex runs `notify` with the turn's JSON as one more argument, which done mode ignores.
+        "codex" => Some(format!(
+            "-c {}",
+            quote(shell, &format!("notify=['{exe}','{DONE_FLAG}','{marker}']"))
+        )),
+        _ => None,
+    }
 }
 
 /// Is `program` running somewhere below the shell with process id `shell_pid`?
-/// Matches the executable name or, for Node/Python CLIs, any argument mentioning it.
 pub fn runs_program(shell_pid: u32, program: &str) -> bool {
+    program_command_line(shell_pid, program).is_some()
+}
+
+/// Lowercased command line of `program` running somewhere below the shell with process id `shell_pid`.
+/// Matches the executable name or, for Node/Python CLIs, any argument mentioning it.
+pub fn program_command_line(shell_pid: u32, program: &str) -> Option<String> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
     sys.refresh_processes_specifics(
@@ -188,12 +253,13 @@ pub fn runs_program(shell_pid: u32, program: &str) -> bool {
                 continue;
             }
             if mentions(proc.name()) || proc.cmd().iter().skip(1).any(|a| mentions(a)) {
-                return true;
+                let args: Vec<_> = proc.cmd().iter().map(|a| a.to_string_lossy().to_lowercase()).collect();
+                return Some(args.join(" "));
             }
             parents.push(*pid);
         }
     }
-    false
+    None
 }
 
 /// Shell program and arguments. `custom` wins when set.
@@ -302,6 +368,16 @@ impl Terminals {
             .map(|(_, s)| s.shell_pid())
     }
 
+    /// The session for `key`, if its shell is still alive.
+    pub fn live_mut(&mut self, key: &Path) -> Option<&mut Session> {
+        self.sessions.get_mut(key).map(|(_, s)| s).filter(|s| !s.exited)
+    }
+
+    /// Is there a session for `key`, alive or not?
+    pub fn contains(&self, key: &Path) -> bool {
+        self.sessions.contains_key(key)
+    }
+
     /// Is there a session for `key` whose shell is still alive?
     pub fn is_live(&self, key: &Path) -> bool {
         self.sessions.get(key).is_some_and(|(_, s)| !s.exited)
@@ -347,6 +423,11 @@ impl Terminals {
 }
 
 impl Session {
+    /// Sends the CLI's interrupt keys.
+    pub fn interrupt(&mut self, keys: &[u8]) {
+        self.backend.process_command(BackendCommand::Write(keys.to_vec()));
+    }
+
     pub fn run(&mut self, command: &str) {
         self.backend
             .process_command(BackendCommand::Write(format!("{command}\r").into_bytes()));
@@ -383,7 +464,12 @@ mod tests {
         dir: &Path,
         shell: &str,
     ) -> Result<String, String> {
-        Ok(cli_command(cli, &fill_prompt(prompt, path, id, dir)?, shell))
+        Ok(cli_command(
+            cli,
+            None,
+            Some(&fill_prompt(prompt, path, id, dir)?),
+            shell,
+        ))
     }
 
     #[test]
@@ -426,6 +512,45 @@ mod tests {
         let pwsh_unix = build_ai_command(claude(), "it's", path, "7", Path::new("/p"), "/usr/bin/pwsh");
         assert_eq!(pwsh_unix.unwrap(), "claude 'it''s'");
         assert!(build_ai_command(claude(), "  ", path, "1", Path::new("/p"), "/bin/sh").is_err());
+    }
+
+    fn hook(dir: &str) -> DoneHook {
+        DoneHook {
+            exe: PathBuf::from(r"C:\Apps\GhostLane\ghostlane.exe"),
+            marker: PathBuf::from(format!(r"{dir}\abc.done")),
+            settings: PathBuf::from(format!(r"{dir}\abc.json")),
+        }
+    }
+
+    #[test]
+    fn done_hooks_for_claude_and_codex() {
+        let h = hook(r"C:\Cfg\hooks");
+        let claude = done_hook_args(claude(), &h, "pwsh.exe").unwrap();
+        assert_eq!(claude, "--settings 'C:/Cfg/hooks/abc.json'");
+        assert_eq!(
+            cli_command(self::claude(), Some(&claude), Some("go"), "pwsh.exe"),
+            "claude --settings 'C:/Cfg/hooks/abc.json' 'go'"
+        );
+        let codex = done_hook_args(ai_cli("codex").unwrap(), &h, "/bin/bash").unwrap();
+        assert_eq!(
+            codex,
+            r"-c 'notify=['\''C:/Apps/GhostLane/ghostlane.exe'\'','\''--ai-done'\'','\''C:/Cfg/hooks/abc.done'\'']'"
+        );
+        assert_eq!(done_hook_args(ai_cli("aider").unwrap(), &h, "/bin/bash"), None);
+        let json = claude_hook_settings(&h).unwrap();
+        assert_eq!(
+            json,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\"C:/Apps/GhostLane/ghostlane.exe\" --ai-done \"C:/Cfg/hooks/abc.done\""}]}]}}"#
+        );
+    }
+
+    #[test]
+    fn done_hooks_refuse_paths_a_shell_would_expand() {
+        for dir in [r"C:\$HOME", r"C:\it's", r#"C:\a"b"#, r"C:\%TEMP%", "C:\\a`b"] {
+            let h = hook(dir);
+            assert_eq!(done_hook_args(claude(), &h, "/bin/bash"), None, "{dir}");
+            assert_eq!(claude_hook_settings(&h), None, "{dir}");
+        }
     }
 
     #[test]

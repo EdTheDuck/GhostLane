@@ -53,6 +53,12 @@ Busy AI? While it works, the ▶ on each card turns into an add-to-queue button.
 
 Want it hands-free? Flip the **Auto** switch on a column whose tickets the AI picks up (like To Do or Ready For Test). Whenever the queue is empty, GhostLane starts the next ticket from your Auto columns by itself, in the **Auto order** you choose in Settings (highest priority first, unless you change it). On a tie, the ticket further along the board goes first, so work gets finished before new work starts. Auto switches off when you close GhostLane, so a project never sets the AI going until you say so.
 
+A ticket that keeps failing its tests won't loop forever: once it has been sent to the AI as many times as the **Auto run limit** in Settings (6 by default), Auto skips it and its card shows a red flag. Press ▶ to give it another go yourself, or right-click it and choose **Reset Run Count**.
+
+Need to step in? The terminal bar has a ⏸ **Pause** button that lets the AI finish the ticket it's on and then starts nothing new, and a ⏹ **Stop** button that interrupts the AI straight away, leaves the ticket where it is and pauses the queue. Press ▶ **Resume** when you're ready.
+
+GhostLane also gets your attention when you're in another window: the taskbar flashes (or the Dock icon bounces) when the AI has run out of work, and when a ticket fails and comes back to an earlier column.
+
 Each column can have its own command. New projects come with two ready to go:
 
 - **To Do** asks the AI to develop the ticket and move it to Ready For Test when it's finished.
@@ -106,7 +112,7 @@ Between each pair of columns is a dropdown that decides when tickets move on wit
 
 New projects come set up as **To Do →** *AI Working* **→ In Dev →** *AI Complete* **→ Ready For Test →** *AI Working* **→ In Test →** *AI Complete* **→ Done**.
 
-GhostLane decides the AI has finished once the terminal goes quiet, so if your AI CLI stops to ask for permission, approve it promptly or the ticket may move on early.
+With Claude Code and OpenAI Codex, GhostLane knows exactly when the AI has finished: it starts them with a small completion hook, so a ticket waits patiently while the CLI asks you for permission. Other CLIs count as finished once the terminal goes quiet, so if one stops to ask for permission, approve it promptly or the ticket may move on early. Nothing is written into your project for this; the hook lives in GhostLane's own settings folder.
 
 ### Your AI knows the board
 
@@ -138,6 +144,8 @@ Click the ⚙ cog to choose:
 - which **AI CLIs** are available to your projects (installed ones are switched on for you the first time)
 - the **Default AI command** the ▶ button sends for columns that don't have their own, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
 - the **Auto order** your Auto columns work through tickets in: by priority or by number, ascending or descending
+- the **Auto run limit**: how many times a ticket can be sent to the AI before Auto skips it
+- **notifications**: whether GhostLane gets your attention when the AI runs out of work, and when a ticket fails
 - which **shell** to use (detected automatically by default)
 - the **terminal font size**
 

@@ -22,6 +22,12 @@ pub struct Settings {
     pub check_for_updates: bool,
     /// Which ticket columns set to Auto start next.
     pub auto_order: AutoOrder,
+    /// Auto skips tickets sent to the AI this many times. 0 = no limit.
+    pub auto_run_limit: u32,
+    /// Ask for the user's attention when the AI runs out of work.
+    pub notify_idle: bool,
+    /// Ask for the user's attention when a ticket comes back to an earlier column.
+    pub notify_failed: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +39,9 @@ impl Default for Settings {
             terminal_font_size: 13.0,
             check_for_updates: true,
             auto_order: AutoOrder::default(),
+            auto_run_limit: 6,
+            notify_idle: true,
+            notify_failed: true,
         }
     }
 }
@@ -57,9 +66,14 @@ pub struct AppConfig {
     pub settings: Settings,
 }
 
+/// `<config_dir>/GhostLane`.
+pub fn config_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "GhostLane").map(|d| d.config_dir().to_path_buf())
+}
+
 impl AppConfig {
     fn path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "GhostLane").map(|d| d.config_dir().join("config.yaml"))
+        config_dir().map(|d| d.join("config.yaml"))
     }
 
     /// Loads config (defaults if missing/corrupt) and drops projects whose .ghost is gone.

@@ -325,16 +325,17 @@ impl Project {
         self.save_meta()
     }
 
-    /// (column, ticket) of ticket `id`.
     /// (column, id) of the ticket Auto works on next, from the columns whose folder is in `auto` and whose
     /// tickets move on "AI Working": first by `order`, then the right-most column, then the lowest id.
-    pub fn next_auto(&self, auto: &HashSet<String>, order: AutoOrder) -> Option<(usize, u32)> {
+    /// Tickets at `run_limit` are skipped.
+    pub fn next_auto(&self, auto: &HashSet<String>, order: AutoOrder, run_limit: u32) -> Option<(usize, u32)> {
         self.meta
             .columns
             .iter()
             .enumerate()
             .filter(|(c, col)| auto.contains(&col.folder) && self.auto_target(*c, AutoMove::AiWorking).is_some())
             .flat_map(|(c, _)| self.tickets.get(c).into_iter().flatten().map(move |t| (c, t)))
+            .filter(|(_, t)| !t.at_run_limit(run_limit))
             .min_by(|(ca, a), (cb, b)| {
                 let ord = match order {
                     AutoOrder::PriorityAsc => a.priority.cmp(&b.priority),
@@ -347,6 +348,7 @@ impl Project {
             .map(|(c, t)| (c, t.id))
     }
 
+    /// (column, ticket) of ticket `id`.
     pub fn find_ticket(&self, id: u32) -> Option<(usize, &Ticket)> {
         self.tickets
             .iter()
@@ -681,11 +683,18 @@ mod tests {
         );
         let _not_auto = put(4, ticket::Priority::Highest);
         let auto: HashSet<String> = ["to_do", "ready_for_test", "done"].map(String::from).into();
-        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc), Some((2, b)));
-        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityAsc), Some((0, c)));
-        assert_eq!(p.next_auto(&auto, AutoOrder::IdAsc), Some((0, a)));
-        assert_eq!(p.next_auto(&auto, AutoOrder::IdDesc), Some((0, c)));
-        assert_eq!(p.next_auto(&HashSet::new(), AutoOrder::IdAsc), None);
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 0), Some((2, b)));
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityAsc, 0), Some((0, c)));
+        assert_eq!(p.next_auto(&auto, AutoOrder::IdAsc, 0), Some((0, a)));
+        assert_eq!(p.next_auto(&auto, AutoOrder::IdDesc, 0), Some((0, c)));
+        assert_eq!(p.next_auto(&HashSet::new(), AutoOrder::IdAsc, 0), None);
+        // A ticket the AI has had enough goes at is skipped.
+        let mut t = p.find_ticket(b).unwrap().1.clone();
+        t.run_count = 3;
+        t.save().unwrap();
+        p.rescan().unwrap();
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 3), Some((0, a)));
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 4), Some((2, b)));
     }
 
     #[test]
