@@ -10,7 +10,7 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 
 **[⬇ Download the latest release](../../releases/latest)**
 
-![The GhostLane board with Claude Code running in the built-in terminal](docs/screenshots/board.png)
+![The GhostLane board with Claude Code working on a ticket, Auto switched on for To Do and two tickets queued beside the terminal](docs/screenshots/board.png)
 
 ---
 
@@ -19,6 +19,7 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 - **Big changes become a queue of small prompts.** Break a feature into tickets, give each one a test scope, then hand them to your AI one at a time. You review ticket 3 while ticket 4 runs, and nothing gets lost in a scrollback.
 - **Your AI writes the tickets.** Describe what you want in a sentence. GhostLane asks the project's AI CLI to read the codebase and write a full ticket with a priority, a description and a test scope.
 - **One click to run.** The ▶ button on every card sends that ticket to your AI CLI. If the CLI is already open in the terminal, GhostLane types the prompt straight into it.
+- **Hands-free when you want it.** Queue up tickets while the AI is busy, or switch a column to Auto and let it work through the backlog by itself. Pause or stop it whenever you need to step in.
 - **Tickets move themselves.** Press ▶ on a To Do ticket and it slides into In Dev while the AI works, then on to Ready For Test when it's done. Testing works the same way, so a ticket can go from idea to Done with two clicks.
 - **A Developer and a Tester on call.** GhostLane sets up developer and tester sub agents for your AI CLI that know your columns, which tickets are theirs and where to move them next.
 - **The AI can see the plan.** Tickets live in `tickets/` inside your project, so your AI can read past and upcoming work, and can create or edit tickets itself. The board picks up every change the moment the file changes.
@@ -44,6 +45,12 @@ When the file appears, the new ticket lands on the board. If the CLI exits early
 Existing tickets work the same way. Open a ticket, click the pencil, and the **AI Assisted** tab lets you say what should change ("raise the priority and add a test for expired links"). The AI updates the file in place and keeps its ID and run count.
 
 Prefer to write it yourself? The **Manual** tab is always one click away.
+
+### Tickets from a spec or plan
+
+Already have a technical spec, design doc or project plan? Click the upload icon next to the project name and choose the file, or just drop it anywhere on the window. Press **Generate Tickets** and your AI reads the document and writes a ticket for each piece of work into the first column, skipping anything that already has a ticket. The new tickets appear on the board as they're written.
+
+![Choosing a document to turn into tickets](docs/screenshots/import.png)
 
 ### Send a ticket to AI with one click
 
@@ -148,6 +155,7 @@ Click the ⚙ cog to choose:
 - **notifications**: whether GhostLane gets your attention when the AI runs out of work, and when a ticket fails
 - which **shell** to use (detected automatically by default)
 - the **terminal font size**
+- whether to **check for updates** on startup. When a newer release is out, an **Update** button appears in the title bar and takes you to the download.
 
 ![The settings dialog](docs/screenshots/settings.png)
 
@@ -211,7 +219,7 @@ You, your teammates or your AI can write tickets like this by hand, and GhostLan
 1. **Download** the build for your platform from the [releases page](../../releases/latest) and run it.
 2. Click **New Project**, give it a name and choose a folder. An existing code repository works well, since that's what your AI will read.
 3. Pick the project's AI CLI, adjust the columns if you like, then click **Create**.
-4. Press **➕** on a column and describe your first ticket on the **AI Assisted** tab, or write it yourself on **Manual**.
+4. Press **➕** on a column and describe your first ticket on the **AI Assisted** tab, or write it yourself on **Manual**. Got a spec or plan already? Drop it on the window and let your AI turn it into tickets.
 5. Press **▶** on a To Do ticket to hand it to your AI. It moves into In Dev while the AI works and on to Ready For Test when it's done; press ▶ there to have it tested. You can always drag cards yourself too.
 
 To open an existing project, click **Open Project** and select its `.ghost` file.
