@@ -456,15 +456,13 @@ fn column_ui(
                     let picked = selected.contains(&t.id);
                     let dragging = if picked { selected.len() } else { 1 };
                     let at = *cursor == Some(t.id);
-                    let card = card(
-                        ui,
-                        t,
-                        play,
+                    let blockers = project.blockers(t);
+                    let marks = Marks {
                         flagged,
-                        &project.blockers(t),
-                        (picked, dragging, at),
-                        actions,
-                    );
+                        blockers: &blockers,
+                        filtered: &filter.labels,
+                    };
+                    let card = card(ui, t, play, marks, (picked, dragging, at), actions);
                     if at && *scroll_to_cursor {
                         card.scroll_to_me(None);
                     }
@@ -579,15 +577,24 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
     }
 }
 
-/// `flagged`: Auto skips the ticket, it has been sent to the AI too many times. `blockers`: tickets it waits for.
+/// What a card shows besides the ticket itself.
+#[derive(Clone, Copy)]
+struct Marks<'a> {
+    /// Auto skips the ticket: it has been sent to the AI too many times.
+    flagged: bool,
+    /// Tickets it waits for.
+    blockers: &'a [u32],
+    /// Labels the board is filtered by; their pills show as picked.
+    filtered: &'a [String],
+}
+
 /// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along. `cursor`: the arrow
 /// keys are on it.
 fn card(
     ui: &mut Ui,
     t: &Ticket,
     play: Option<(&str, &str)>,
-    flagged: bool,
-    blockers: &[u32],
+    marks: Marks,
     (selected, dragging, cursor): (bool, usize, bool),
     actions: &mut Vec<Action>,
 ) -> egui::Response {
@@ -607,7 +614,7 @@ fn card(
                 .fill(fill)
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(12))
-                .show(ui, |ui| card_contents(ui, t, play, flagged, blockers, actions))
+                .show(ui, |ui| card_contents(ui, t, play, marks, actions))
                 .response
                 .rect;
             if selected {
@@ -658,8 +665,11 @@ fn card_contents(
     ui: &mut Ui,
     t: &Ticket,
     play: Option<(&str, &str)>,
-    flagged: bool,
-    blockers: &[u32],
+    Marks {
+        flagged,
+        blockers,
+        filtered,
+    }: Marks,
     actions: &mut Vec<Action>,
 ) {
     const PLAY: f32 = 30.0;
@@ -708,10 +718,13 @@ fn card_contents(
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                     for l in &t.labels {
-                        if super::label_chip(ui, l, true)
-                            .on_hover_text(format!("Show only tickets labelled {l}"))
-                            .clicked()
-                        {
+                        let picked = filtered.iter().any(|f| f.to_lowercase() == l.to_lowercase());
+                        let tip = if picked {
+                            format!("Stop filtering by {l}")
+                        } else {
+                            format!("Show only tickets labelled {l}")
+                        };
+                        if super::label_chip(ui, l, Some(picked)).on_hover_text(tip).clicked() {
                             actions.push(Action::FilterByLabel(l.clone()));
                         }
                     }
@@ -1087,6 +1100,24 @@ mod tests {
                 .any(|a| matches!(a, Action::FilterByLabel(l) if l == "ui"))
         );
         assert!(!actions.iter().any(|a| matches!(a, Action::ViewTicket(_))));
+        // Hovered: dark text on the accent. Picked by the filter: lit, and inverted on hover.
+        let color = |h: &Harness<'static, State>| pill_text_color(h, "ui");
+        assert_eq!(color(&h), Some(theme::ACCENT_TEXT));
+        h.state_mut().0.filter.labels = vec!["UI".into()];
+        h.get_by_label("Tagged").hover();
+        h.run();
+        assert_eq!(color(&h), Some(theme::ACCENT_TEXT));
+        h.get_by_label("ui").hover();
+        h.run();
+        assert_eq!(color(&h), Some(theme::ACCENT));
+    }
+
+    /// The colour a pill's text is painted in.
+    fn pill_text_color(h: &Harness<'static, State>, label: &str) -> Option<egui::Color32> {
+        h.output().shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(t) if t.galley.text() == label => t.override_text_color,
+            _ => None,
+        })
     }
 
     #[test]

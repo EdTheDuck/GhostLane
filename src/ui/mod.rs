@@ -144,38 +144,33 @@ pub fn priority_color(p: Priority) -> Color32 {
 }
 
 /// A ticket label as a pill. Laid out on one line and sized to its text, so it never wraps or gets clipped.
-/// `clickable` pills light up in the accent colour on hover.
-pub fn label_chip(ui: &mut Ui, label: &str, clickable: bool) -> Response {
+/// `picked`: `None` for a plain pill. Otherwise it is clickable and lights up in the accent colour on hover; a
+/// picked pill (one the board is filtered by) stays lit and inverts on hover, ready to be unpicked.
+pub fn label_chip(ui: &mut Ui, label: &str, picked: Option<bool>) -> Response {
     const PAD: egui::Vec2 = egui::vec2(10.0, 4.0);
-    let galley = egui::WidgetText::from(RichText::new(label).small().color(theme::TEXT)).into_galley(
+    let galley = egui::WidgetText::from(RichText::new(label).small()).into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
         f32::INFINITY,
         egui::TextStyle::Small,
     );
-    let sense = if clickable {
-        egui::Sense::click()
-    } else {
-        egui::Sense::hover()
+    let (sense, kind) = match picked {
+        Some(_) => (egui::Sense::click(), egui::WidgetType::Button),
+        None => (egui::Sense::hover(), egui::WidgetType::Label),
     };
     let (rect, response) = ui.allocate_exact_size(galley.size() + PAD * 2.0, sense);
-    let kind = if clickable {
-        egui::WidgetType::Button
-    } else {
-        egui::WidgetType::Label
-    };
     response.widget_info(|| egui::WidgetInfo::labeled(kind, true, galley.text()));
     if ui.is_rect_visible(rect) {
-        let hot = clickable && response.hovered();
-        let (fill, text) = if hot {
-            (theme::ACCENT, theme::ACCENT_TEXT)
-        } else {
-            (theme::BORDER, theme::TEXT)
+        let (fill, text, stroke) = match (picked, response.hovered()) {
+            (Some(true), true) => (theme::ACCENT_TEXT, theme::ACCENT, egui::Stroke::new(1.0, theme::ACCENT)),
+            (Some(true), false) | (Some(false), true) => (theme::ACCENT, theme::ACCENT_TEXT, egui::Stroke::NONE),
+            _ => (theme::BORDER, theme::TEXT, egui::Stroke::NONE),
         };
-        ui.painter().rect_filled(rect, rect.height() / 2.0, fill);
-        ui.painter().galley(rect.min + PAD, galley, text);
+        let painter = ui.painter();
+        painter.rect(rect, rect.height() / 2.0, fill, stroke, egui::StrokeKind::Inside);
+        painter.galley_with_override_text_color(rect.min + PAD, galley, text);
     }
-    if clickable { pointer(response) } else { response }
+    if picked.is_some() { pointer(response) } else { response }
 }
 
 pub fn priority_icon(p: Priority) -> RichText {
