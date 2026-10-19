@@ -13,7 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, formats: nsis }
           - { os: macos-latest, formats: dmg }
           # Oldest supported runner so the .deb/AppImage work on older glibc.
           - { os: ubuntu-22.04, formats: "deb,appimage" }
