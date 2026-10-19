@@ -13,7 +13,7 @@ use crate::config::AppConfig;
 use crate::project::{AutoMove, Project, Sort};
 use crate::terminal::{self, Terminals};
 use crate::theme;
-use crate::ticket::Ticket;
+use crate::ticket::{RunRecord, RunResult, Ticket, format_id};
 use crate::ui::import::{ImportForm, ImportOutcome};
 use crate::ui::project::{ProjectForm, ProjectOutcome};
 use crate::ui::settings::{SettingsForm, SettingsOutcome};
@@ -31,6 +31,8 @@ pub struct OpenProject {
     pub auto: HashSet<String>,
     /// Start nothing new from the queue or Auto columns; the ticket the AI is on still finishes.
     pub paused: bool,
+    /// The last column shows its archived tickets too.
+    pub show_archived: bool,
 }
 
 impl OpenProject {
@@ -42,6 +44,7 @@ impl OpenProject {
             queue: Vec::new(),
             auto: HashSet::new(),
             paused: false,
+            show_archived: false,
         }
     }
 
@@ -171,6 +174,26 @@ enum RunEnd {
     CliGone,
 }
 
+/// A ticket the AI finished in the last column, waiting on the project's test command.
+struct Check {
+    run: AiRun,
+    /// How long the AI took.
+    seconds: u64,
+    command: String,
+}
+
+/// Work done on a background thread, reported back to the UI.
+enum Job {
+    /// The test command of project `ghost` finished for ticket `id`.
+    Checked {
+        ghost: PathBuf,
+        id: u32,
+        passed: bool,
+        output: String,
+    },
+    GitFailed(String),
+}
+
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
 
 pub struct App {
@@ -192,6 +215,10 @@ pub struct App {
     ai_request: Option<Instant>,
     /// Tickets handed to the AI by the play button, waiting to move on "AI Complete".
     ai_runs: Vec<AiRun>,
+    /// Finished runs whose test command is still going. Their project starts nothing new meanwhile.
+    checks: Vec<Check>,
+    jobs_tx: Sender<Job>,
+    jobs_rx: Receiver<Job>,
     toasts: Vec<(String, Instant)>,
     /// Newer release found by the startup check, shown as a top bar button.
     update: Option<String>,
@@ -222,6 +249,7 @@ impl App {
             .or_else(|| projects.iter().position(|p| p.project.is_ok()));
 
         let (watch_tx, watch_rx) = mpsc::channel();
+        let (jobs_tx, jobs_rx) = mpsc::channel();
         let mut app = App {
             config,
             projects,
@@ -236,6 +264,9 @@ impl App {
             last_terminal_typing: None,
             ai_request: None,
             ai_runs: Vec::new(),
+            checks: Vec::new(),
+            jobs_tx,
+            jobs_rx,
             toasts: Vec::new(),
             update: None,
             update_rx: None,
@@ -397,8 +428,11 @@ impl App {
                 }
                 let path = t.path.clone();
                 let p = self.active_project_mut().expect("ticket found in active project");
-                if let Err(e) = p.move_ticket(&path, to_col) {
-                    self.toast(format!("Couldn't move {}: {e}", crate::ticket::format_id(id)));
+                let (ghost, done) = (p.ghost_path.clone(), to_col == p.last_col());
+                match p.move_ticket(&path, to_col) {
+                    Ok(()) if done => self.ticket_done(&ghost, id, ctx),
+                    Ok(()) => {}
+                    Err(e) => self.toast(format!("Couldn't move {}: {e}", format_id(id))),
                 }
             }
             Action::SetSort { col, sort } => {
@@ -414,7 +448,8 @@ impl App {
             Action::EditProject => {
                 let clis = self.config.settings.enabled_clis();
                 if let Some(p) = self.active_project() {
-                    let form = ProjectForm::edit(p, clis, &self.config.settings.ai_prompt);
+                    let settings = self.config.project(&p.ghost_path);
+                    let form = ProjectForm::edit(p, clis, &self.config.settings.ai_prompt, settings);
                     self.modal = Some(Modal::Project(form));
                 }
             }
@@ -443,6 +478,8 @@ impl App {
                     path: PathBuf::new(),
                     title: format!("Duplicate: {}", t.title),
                     malformed: false,
+                    runs: Vec::new(),
+                    done_at: None,
                     ..t.clone()
                 };
                 self.modal = Some(Modal::EditTicket(Box::new(TicketForm::create(col, copy))));
@@ -562,23 +599,51 @@ impl App {
 
     /// Is project `i`'s AI on a ticket from the play button, or are tickets waiting for it? Play buttons queue then.
     fn ai_engaged(&self, i: usize) -> bool {
-        let op = &self.projects[i];
-        (!op.queue.is_empty() && !op.paused) || self.ai_running(i)
+        (self.next_queued(i).is_some() && !self.projects[i].paused) || self.ai_running(i)
     }
 
-    /// Is project `i`'s AI on a ticket from the play button?
+    /// Position in project `i`'s queue of the first ticket not waiting for others.
+    fn next_queued(&self, i: usize) -> Option<usize> {
+        let op = &self.projects[i];
+        let blocked = |id: u32| op.project.as_ref().is_ok_and(|p| p.is_blocked(id));
+        op.queue.iter().position(|&id| !blocked(id))
+    }
+
+    /// Is project `i`'s AI on a ticket from the play button, or is its test command checking one?
     fn ai_running(&self, i: usize) -> bool {
         let ghost = self.projects[i].project.as_ref().map(|p| &p.ghost_path);
-        self.ai_runs.iter().any(|r| ghost.is_ok_and(|g| *g == r.cli.ghost))
+        let ours = |g: &PathBuf| ghost.is_ok_and(|ghost| ghost == g);
+        self.ai_runs.iter().any(|r| ours(&r.cli.ghost)) || self.checks.iter().any(|c| ours(&c.run.cli.ghost))
     }
 
     /// Stop button: interrupts the AI's current ticket, leaving it where it is, and pauses the queue.
     fn stop_ai(&mut self, i: usize) {
         self.projects[i].paused = true;
-        let Ok(p) = &self.projects[i].project else { return };
+        let Ok(p) = &mut self.projects[i].project else { return };
         let key = p.ghost_path.clone();
-        self.ai_runs.retain(|r| r.cli.ghost != key);
-        let Ok(cli) = self.project_cli(p) else { return };
+        let (stopped, running): (Vec<AiRun>, Vec<AiRun>) = std::mem::take(&mut self.ai_runs)
+            .into_iter()
+            .partition(|r| r.cli.ghost == key);
+        self.ai_runs = running;
+        let (checks, others): (Vec<Check>, Vec<Check>) = std::mem::take(&mut self.checks)
+            .into_iter()
+            .partition(|c| c.run.cli.ghost == key);
+        self.checks = others;
+        let mut errors = Vec::new();
+        for run in stopped.iter().chain(checks.iter().map(|c| &c.run)) {
+            errors.extend(record_run(p, run, elapsed(run), RunResult::Stopped).err());
+        }
+        for e in errors {
+            self.toast(e);
+        }
+        let Some(cli) = self.projects[i]
+            .project
+            .as_ref()
+            .ok()
+            .and_then(|p| self.project_cli(p).ok())
+        else {
+            return;
+        };
         if let Some(session) = self.terminals.live_mut(&key) {
             session.interrupt(cli.interrupt);
         }
@@ -687,18 +752,22 @@ impl App {
         }
         let settings = self.config.settings.clone();
         let mut attention = false;
-        for (run, end) in &ended {
+        let ended_ghosts: Vec<PathBuf> = ended.iter().map(|(run, _)| run.cli.ghost.clone()).collect();
+        for (run, end) in ended {
+            let ghost = run.cli.ghost.clone();
             let Some(p) = self
                 .projects
                 .iter_mut()
-                .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == run.cli.ghost))
+                .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == ghost))
             else {
                 continue;
             };
-            let id = crate::ticket::format_id(run.id);
+            let (id, seconds) = (format_id(run.id), elapsed(&run));
+            let mut messages = Vec::new();
             if let RunEnd::CliGone = end {
-                self.toasts
-                    .push((format!("The AI CLI closed before it finished {id}"), Instant::now()));
+                messages.push(format!("The AI CLI closed before it finished {id}"));
+                messages.extend(record_run(p, &run, seconds, RunResult::CliClosed).err());
+                self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
                 continue;
             }
             let _ = p.rescan();
@@ -709,17 +778,48 @@ impl App {
             if let Some(to) = p.auto_target(col, AutoMove::AiComplete)
                 && let Err(e) = p.move_ticket(&path, to)
             {
-                self.toasts.push((format!("Couldn't move {id}: {e}"), Instant::now()));
+                messages.push(format!("Couldn't move {id}: {e}"));
             }
-            // A ticket that ends up left of where it started came back from testing.
             let from = p.meta.columns.iter().position(|c| c.folder == run.from);
+            let now_col = p.find_ticket(run.id).map(|(c, _)| c);
+            let arrived = now_col == Some(p.last_col()) && from.is_some_and(|f| f < p.last_col());
+            let command = self.config.project(&ghost).test_command;
+            if arrived && !command.is_empty() {
+                // The ticket only counts as done once the project's own test command passes.
+                let (tx, ctx2, root, shell) = (
+                    self.jobs_tx.clone(),
+                    ctx.clone(),
+                    p.root.clone(),
+                    settings.shell.clone(),
+                );
+                let (job_ghost, job_id, script) = (ghost.clone(), run.id, command.clone());
+                std::thread::spawn(move || {
+                    let (passed, output) = terminal::run_script(shell.as_deref(), &script, &root);
+                    let _ = tx.send(Job::Checked {
+                        ghost: job_ghost,
+                        id: job_id,
+                        passed,
+                        output,
+                    });
+                    ctx2.request_repaint();
+                });
+                self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
+                self.checks.push(Check { run, seconds, command });
+                continue;
+            }
+            let result = moved(p, &run);
+            messages.extend(record_run(p, &run, seconds, result).err());
+            // A ticket that ends up left of where it started came back from testing.
             if settings.notify_failed
+                && result == RunResult::SentBack
                 && let Some((col, _)) = p.find_ticket(run.id)
-                && from.is_some_and(|from| col < from)
             {
                 attention = true;
-                let msg = format!("{id} came back to {}", p.meta.columns[col].name);
-                self.toasts.push((msg, Instant::now()));
+                messages.push(format!("{id} came back to {}", p.meta.columns[col].name));
+            }
+            self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
+            if arrived {
+                self.ticket_done(&ghost, run.id, ctx);
             }
         }
         // A project whose AI is free starts its next queued ticket, or with an empty queue, the next one
@@ -731,9 +831,9 @@ impl App {
         }
         // Out of work: a run just ended and nothing took its place.
         let idle = self.generating.is_none()
-            && ended
-                .iter()
-                .any(|(run, _)| !self.ai_runs.iter().any(|r| r.cli.ghost == run.cli.ghost));
+            && ended_ghosts.iter().any(|g| {
+                !self.ai_runs.iter().any(|r| r.cli.ghost == *g) && !self.checks.iter().any(|c| c.run.cli.ghost == *g)
+            });
         if attention || (idle && settings.notify_idle) {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
@@ -747,8 +847,9 @@ impl App {
         if self.projects[i].paused || self.projects[i].project.is_err() || self.ai_running(i) {
             return;
         }
-        while !self.projects[i].queue.is_empty() {
-            let id = self.projects[i].queue.remove(0);
+        // Queued tickets waiting for others stay queued until those are done.
+        while let Some(pos) = self.next_queued(i) {
+            let id = self.projects[i].queue.remove(pos);
             if self.run_ai(i, id, ctx) {
                 return;
             }
@@ -776,6 +877,110 @@ impl App {
                 crate::ticket::format_id(id)
             ));
         }
+    }
+
+    /// Picks up work finished on background threads: test commands and commits.
+    fn poll_jobs(&mut self, ctx: &egui::Context) {
+        while let Ok(job) = self.jobs_rx.try_recv() {
+            match job {
+                Job::GitFailed(e) => self.toast(e),
+                Job::Checked {
+                    ghost,
+                    id,
+                    passed,
+                    output,
+                } => {
+                    // Gone when Stop was pressed meanwhile.
+                    let Some(i) = self
+                        .checks
+                        .iter()
+                        .position(|c| c.run.cli.ghost == ghost && c.run.id == id)
+                    else {
+                        continue;
+                    };
+                    let check = self.checks.remove(i);
+                    self.check_done(check, passed, &output, ctx);
+                    // The project is free again; the next frame starts its next ticket.
+                    ctx.request_repaint();
+                }
+            }
+        }
+    }
+
+    /// The test command finished for a ticket the AI moved to the last column. Passed: the ticket is done.
+    /// Failed: it goes back to the first column with the output in its notes, like a failed test run.
+    fn check_done(&mut self, check: Check, passed: bool, output: &str, ctx: &egui::Context) {
+        let ghost = check.run.cli.ghost.clone();
+        let Some(p) = self
+            .projects
+            .iter_mut()
+            .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == ghost))
+        else {
+            return;
+        };
+        let mut messages = Vec::new();
+        if passed {
+            messages.extend(record_run(p, &check.run, check.seconds, RunResult::MovedOn).err());
+        } else {
+            let _ = p.rescan();
+            if let Some((_, t)) = p.find_ticket(check.run.id) {
+                let mut t = t.clone();
+                t.notes = with_failure_note(&t.notes, &check.command, output, crate::ticket::now_secs());
+                let back = t.save().and_then(|()| p.move_ticket(&t.path, 0));
+                messages.extend(back.err().map(|e| format!("Couldn't send {} back: {e}", t.id_str())));
+            }
+            messages.extend(record_run(p, &check.run, check.seconds, RunResult::TestsFailed).err());
+            let first = p.meta.columns.first().map_or_else(String::new, |c| c.name.clone());
+            messages.push(format!(
+                "{} failed \"{}\" and went back to {first}",
+                format_id(check.run.id),
+                check.command
+            ));
+        }
+        for m in messages {
+            self.toast(m);
+        }
+        if passed {
+            self.ticket_done(&ghost, check.run.id, ctx);
+        } else if self.config.settings.notify_failed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
+    }
+
+    /// Ticket `id` of project `ghost` reached the last column: notes when (archiving counts from then) and
+    /// commits, then pushes, if the project asks for it.
+    fn ticket_done(&mut self, ghost: &Path, id: u32, ctx: &egui::Context) {
+        let settings = self.config.project(ghost);
+        let Some(p) = self
+            .projects
+            .iter_mut()
+            .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == ghost))
+        else {
+            return;
+        };
+        let Some(mut t) = p.find_ticket(id).map(|(_, t)| t.clone()) else {
+            return;
+        };
+        let root = p.root.clone();
+        t.done_at = Some(crate::ticket::now_secs());
+        if let Err(e) = t.save().and_then(|()| p.rescan()) {
+            self.toast(format!("Couldn't update {}: {e}", t.id_str()));
+        }
+        if !settings.commit {
+            return;
+        }
+        let message = format!("{}: {}", t.id_str(), t.title.replace(['\n', '\r'], " "));
+        let (tx, ctx) = (self.jobs_tx.clone(), ctx.clone());
+        // ponytail: commits in the background, so a ticket Auto starts next could slip edits in; it starts
+        // seconds later, and the git commands take milliseconds.
+        std::thread::spawn(move || {
+            if let Err(e) = crate::git::commit(&root, &message, settings.push) {
+                let _ = tx.send(Job::GitFailed(format!("Couldn't commit {}: {e}", format_id(id))));
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// Asks the AI CLI to write a new ticket into column `col` and waits for it.
@@ -961,6 +1166,8 @@ impl App {
                     let Some(i) = self.active else { return };
                     let running = self.ai_running(i);
                     let op = &self.projects[i];
+                    let ghost = op.project.as_ref().ok().map(|p| p.ghost_path.clone());
+                    let checking = self.checks.iter().find(|c| Some(&c.run.cli.ghost) == ghost.as_ref());
                     if op.paused {
                         let resume = ui::glyph_button(ui, icon::PLAY, theme::ACCENT, theme::ACCENT, true)
                             .on_hover_text("Resume: start queued and Auto tickets again");
@@ -982,6 +1189,11 @@ impl App {
                         && ui::danger_icon_button(ui, icon::STOP, "Stop the AI now and pause the queue").clicked()
                     {
                         stop = true;
+                    }
+                    if let Some(c) = checking {
+                        let text = format!("Testing {}…", format_id(c.run.id));
+                        ui.label(RichText::new(text).color(theme::TEXT_MUTED))
+                            .on_hover_text(format!("Running \"{}\"", c.command));
                     }
                 });
             });
@@ -1116,7 +1328,8 @@ impl App {
                     self.modal = None;
                     return;
                 };
-                match ticket_ui::view(ctx, &t, &mut self.md_cache) {
+                let deps = self.dependencies(&t);
+                match ticket_ui::view(ctx, &t, &deps, &mut self.md_cache) {
                     Some(ViewOutcome::Close) => self.modal = None,
                     Some(ViewOutcome::Edit) => self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(&t)))),
                     None => {}
@@ -1192,6 +1405,26 @@ impl App {
         }
     }
 
+    /// The tickets `t` is blocked by, with their titles and columns.
+    fn dependencies(&self, t: &Ticket) -> Vec<ticket_ui::Dependency> {
+        let Some(p) = self.active_project() else {
+            return Vec::new();
+        };
+        t.blocked_by
+            .iter()
+            .map(|&b| match p.find_ticket(b) {
+                Some((c, dep)) => ticket_ui::Dependency {
+                    label: format!("{} {} ({})", dep.id_str(), dep.title, p.meta.columns[c].name),
+                    waiting: c != p.last_col(),
+                },
+                None => ticket_ui::Dependency {
+                    label: format!("{} (missing)", format_id(b)),
+                    waiting: false,
+                },
+            })
+            .collect()
+    }
+
     fn save_ticket_form(&mut self) {
         let Some(Modal::EditTicket(form)) = &self.modal else {
             return;
@@ -1236,6 +1469,7 @@ impl App {
                 name,
                 columns,
                 ai_cli,
+                settings,
             } => match Project::create(&dir, &name, &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()) {
                 Ok(mut p) => {
                     self.modal = None;
@@ -1250,6 +1484,7 @@ impl App {
                     if let Err(e) = write_ai_guide(&p) {
                         self.toast(e);
                     }
+                    self.config.projects.insert(p.ghost_path.clone(), settings);
                     self.add_project(p, ctx);
                 }
                 Err(e) => {
@@ -1263,8 +1498,13 @@ impl App {
                 edits,
                 targets,
                 ai_cli,
+                settings,
             } => {
                 self.modal = None;
+                if let Some(ghost) = self.active_project().map(|p| p.ghost_path.clone()) {
+                    self.config.projects.insert(ghost, settings);
+                    self.save_config();
+                }
                 let Some(p) = self.active_project_mut() else { return };
                 p.meta.ai_cli = Some(ai_cli);
                 let result = p
@@ -1495,6 +1735,70 @@ fn ai_activity(
     (active, working)
 }
 
+/// How long `run` has been going, in seconds.
+fn elapsed(run: &AiRun) -> u64 {
+    run.started_at.elapsed().map_or(0, |d| d.as_secs())
+}
+
+/// Adds `run` to its ticket's run history, with the column the ticket is in now.
+fn record_run(p: &mut Project, run: &AiRun, seconds: u64, result: RunResult) -> Result<(), String> {
+    p.rescan().map_err(|e| format!("Couldn't reload project: {e}"))?;
+    let Some((col, t)) = p.find_ticket(run.id) else {
+        return Ok(());
+    };
+    let mut t = t.clone();
+    let from = p
+        .meta
+        .columns
+        .iter()
+        .find(|c| c.folder == run.from)
+        .map_or_else(|| run.from.clone(), |c| c.name.clone());
+    let started = run
+        .started_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    t.record_run(RunRecord {
+        started: crate::ticket::utc_timestamp(started),
+        seconds,
+        from,
+        to: p.meta.columns[col].name.clone(),
+        result,
+    });
+    t.save()
+        .map_err(|e| format!("Couldn't save the run history of {}: {e}", t.id_str()))?;
+    p.rescan().map_err(|e| format!("Couldn't reload project: {e}"))
+}
+
+/// Where a finished run left its ticket. Staying in the column the play button moved it to counts as not moving.
+fn moved(p: &Project, run: &AiRun) -> RunResult {
+    let Some(from) = p.meta.columns.iter().position(|c| c.folder == run.from) else {
+        return RunResult::Unmoved;
+    };
+    let working = p.auto_target(from, AutoMove::AiWorking);
+    match p.find_ticket(run.id).map(|(c, _)| c) {
+        Some(c) if c == from || Some(c) == working => RunResult::Unmoved,
+        Some(c) if c > from => RunResult::MovedOn,
+        Some(_) => RunResult::SentBack,
+        None => RunResult::Unmoved,
+    }
+}
+
+/// `notes` with a note saying `command` failed at `when`, followed by its output.
+fn with_failure_note(notes: &str, command: &str, output: &str, when: u64) -> String {
+    // A fence longer than any run of backticks in the output, so the output can't close it.
+    let longest = output.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    let when = crate::ticket::readable_utc(&crate::ticket::utc_timestamp(when));
+    let note = format!(
+        "Test command `{command}` failed on {when}:\n\n{fence}\n{}\n{fence}",
+        output.trim_end()
+    );
+    match notes.trim_end() {
+        "" => note,
+        notes => format!("{notes}\n\n{note}"),
+    }
+}
+
 /// Writes the ticket guide into the instructions file the project's AI CLI reads (CLAUDE.md for
 /// Claude Code, AGENTS.md for Codex, ...), plus Developer and Tester sub agents where the CLI has them.
 fn write_ai_guide(p: &Project) -> Result<(), String> {
@@ -1531,6 +1835,7 @@ impl eframe::App for App {
         self.poll_watcher();
         self.poll_generation();
         self.poll_ai_runs(&ctx);
+        self.poll_jobs(&ctx);
         if let Some(v) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.update = Some(v);
         }
@@ -1561,9 +1866,12 @@ impl eframe::App for App {
             .frame(central)
             .show(ui, |ui| match self.active {
                 Some(i) if self.projects[i].project.is_ok() => {
-                    let engaged = self.ai_engaged(i);
-                    let limit = self.config.settings.auto_run_limit;
-                    ui::board::show(ui, &mut self.projects[i], engaged, limit, &mut actions)
+                    let settings = ui::board::BoardSettings {
+                        engaged: self.ai_engaged(i),
+                        run_limit: self.config.settings.auto_run_limit,
+                        archive_days: self.config.settings.archive_after_days,
+                    };
+                    ui::board::show(ui, &mut self.projects[i], settings, &mut actions)
                 }
                 _ => Self::empty_state(ui, &mut actions),
             })
@@ -1621,6 +1929,56 @@ mod tests {
         let now = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert!(!generation(path.clone(), Some(now)).written());
         assert!(generation(path, Some(std::time::UNIX_EPOCH)).written());
+    }
+
+    #[test]
+    fn failure_notes_append_the_output_in_a_fence_it_cant_close() {
+        let note = with_failure_note("", "cargo test", "boom\n", 1_709_210_096);
+        assert_eq!(
+            note,
+            "Test command `cargo test` failed on 2024-02-29 12:34 UTC:\n\n```\nboom\n```"
+        );
+        let note = with_failure_note("Earlier.\n", "t", "a ```` b", 0);
+        assert!(note.starts_with("Earlier.\n\nTest command"));
+        assert!(note.contains("\n`````\na ```` b\n`````"), "{note}");
+    }
+
+    #[test]
+    fn runs_are_judged_by_where_the_ticket_ended_up() {
+        let d = tempfile::tempdir().unwrap();
+        let names: Vec<String> = crate::project::DEFAULT_COLUMNS.iter().map(|c| c.to_string()).collect();
+        let mut p = Project::create(d.path(), "P", &names).unwrap();
+        for (c, m) in p.meta.columns.iter_mut().zip(crate::project::DEFAULT_AUTO_MOVES) {
+            c.auto_move = m;
+        }
+        let t = p.add_ticket(0, Ticket::default()).unwrap();
+        let run = AiRun {
+            cli: CliWatch::new(p.ghost_path.clone(), "claude"),
+            id: t.id,
+            from: "to_do".into(),
+            started_at: std::time::SystemTime::now(),
+            marker: None,
+        };
+        p.move_ticket(&t.path, 1).unwrap(); // the play button moved it to In Dev
+        assert_eq!(moved(&p, &run), RunResult::Unmoved);
+        let at = |p: &Project| p.find_ticket(t.id).unwrap().1.path.clone();
+        p.move_ticket(&at(&p), 2).unwrap();
+        assert_eq!(moved(&p, &run), RunResult::MovedOn);
+        record_run(&mut p, &run, 252, RunResult::MovedOn).unwrap();
+        let back = p.find_ticket(t.id).unwrap().1;
+        assert_eq!(back.runs.len(), 1);
+        assert_eq!(
+            (back.runs[0].from.as_str(), back.runs[0].to.as_str()),
+            ("To Do", "Ready For Test")
+        );
+        assert_eq!(back.runs[0].seconds, 252);
+
+        let test_run = AiRun {
+            from: "ready_for_test".into(),
+            ..run
+        };
+        p.move_ticket(&at(&p), 0).unwrap();
+        assert_eq!(moved(&p, &test_run), RunResult::SentBack);
     }
 
     #[test]

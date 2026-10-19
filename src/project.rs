@@ -347,7 +347,7 @@ impl Project {
             .enumerate()
             .filter(|(c, col)| auto.contains(&col.folder) && self.auto_target(*c, AutoMove::AiWorking).is_some())
             .flat_map(|(c, _)| self.tickets.get(c).into_iter().flatten().map(move |t| (c, t)))
-            .filter(|(_, t)| !t.at_run_limit(run_limit))
+            .filter(|(_, t)| !t.at_run_limit(run_limit) && self.blockers(t).is_empty())
             .min_by(|(ca, a), (cb, b)| {
                 let ord = match order {
                     AutoOrder::PriorityAsc => a.priority.cmp(&b.priority),
@@ -358,6 +358,25 @@ impl Project {
                 ord.then(cb.cmp(ca)).then(a.id.cmp(&b.id))
             })
             .map(|(c, t)| (c, t.id))
+    }
+
+    /// The last column, where finished tickets go.
+    pub fn last_col(&self) -> usize {
+        self.meta.columns.len().saturating_sub(1)
+    }
+
+    /// The tickets `t` waits for: those in its `blocked_by` that exist and aren't in the last column yet.
+    pub fn blockers(&self, t: &Ticket) -> Vec<u32> {
+        t.blocked_by
+            .iter()
+            .copied()
+            .filter(|&b| self.find_ticket(b).is_some_and(|(c, _)| c != self.last_col()))
+            .collect()
+    }
+
+    /// Is ticket `id` waiting for other tickets?
+    pub fn is_blocked(&self, id: u32) -> bool {
+        self.find_ticket(id).is_some_and(|(_, t)| !self.blockers(t).is_empty())
     }
 
     /// (column, ticket) of ticket `id`.
@@ -550,8 +569,9 @@ Anything else worth keeping, such as why a test failed.
 ```
 
 - `priority` is one of `low`, `medium`, `high` or `highest`.
+- Optional `blocked_by` lists the IDs of tickets that must reach the last column first, for example `blocked_by: ['00012', '00015']`. GhostLane won't start a blocked ticket from its queue or an Auto column.
 - `## Test Scope` and `## Notes` are optional; leave a section out when it is empty.
-- Leave `id` and `run_count` as they are; GhostLane maintains them.
+- Leave `id`, `run_count`, `done_at` and `runs` as they are; GhostLane maintains them.
 - To add a note, append it under `## Notes` (create the section if it is missing) rather than changing the description.
 - Don't edit `{ghost}`; it holds the board's columns and settings.
 "#
@@ -727,6 +747,28 @@ mod tests {
         p.rescan().unwrap();
         assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 3), Some((0, a)));
         assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 4), Some((2, b)));
+    }
+
+    #[test]
+    fn blocked_tickets_wait_until_their_blockers_are_done() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = new_project(d.path());
+        for (c, m) in p.meta.columns.iter_mut().zip(DEFAULT_AUTO_MOVES) {
+            c.auto_move = m;
+        }
+        let first = add(&mut p, 0, "first");
+        let mut second = add(&mut p, 0, "second");
+        second.blocked_by = vec![first.id, 99]; // 99 doesn't exist, so it doesn't block
+        second.priority = ticket::Priority::Highest;
+        second.save().unwrap();
+        p.rescan().unwrap();
+        let auto: HashSet<String> = ["to_do".to_string()].into();
+        assert!(p.is_blocked(second.id));
+        assert_eq!(p.blockers(p.find_ticket(second.id).unwrap().1), [first.id]);
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 0), Some((0, first.id)));
+        p.move_ticket(&first.path, p.last_col()).unwrap();
+        assert!(!p.is_blocked(second.id));
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 0), Some((0, second.id)));
     }
 
     #[test]

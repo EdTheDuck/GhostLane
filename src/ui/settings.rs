@@ -9,6 +9,7 @@ use crate::theme;
 
 const FONT_SIZES: std::ops::RangeInclusive<u8> = 10..=20;
 const RUN_LIMITS: std::ops::RangeInclusive<u32> = 1..=20;
+const ARCHIVE_DAYS: [u32; 6] = [0, 1, 3, 7, 14, 30];
 
 pub struct SettingsForm {
     ai_prompt: String,
@@ -21,6 +22,7 @@ pub struct SettingsForm {
     auto_run_limit: u32,
     notify_idle: bool,
     notify_failed: bool,
+    archive_after_days: u32,
     detected_shell: String,
     installed: Vec<String>,
 }
@@ -43,6 +45,7 @@ impl SettingsForm {
             auto_run_limit: s.auto_run_limit,
             notify_idle: s.notify_idle,
             notify_failed: s.notify_failed,
+            archive_after_days: s.archive_after_days,
             detected_shell: detect_shell(None).0,
             installed: detect_ai_clis(),
         }
@@ -126,6 +129,24 @@ impl SettingsForm {
                     .show_ui(ui, |ui| {
                         for n in std::iter::once(0).chain(RUN_LIMITS) {
                             ui.selectable_value(&mut self.auto_run_limit, n, label(n));
+                        }
+                    });
+                super::pointer(combo.response);
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Archive done tickets").strong()).on_hover_text(
+                    "Hide tickets that have been in the last column this long. Their files stay where they are,                      and the column can still show them.",
+                );
+                let label = |n: u32| match n {
+                    0 => "Never".to_string(),
+                    1 => "After 1 day".to_string(),
+                    n => format!("After {n} days"),
+                };
+                let combo = ComboBox::from_id_salt("archive_after_days")
+                    .selected_text(label(self.archive_after_days))
+                    .show_ui(ui, |ui| {
+                        for n in ARCHIVE_DAYS {
+                            ui.selectable_value(&mut self.archive_after_days, n, label(n));
                         }
                     });
                 super::pointer(combo.response);
@@ -228,6 +249,7 @@ impl SettingsForm {
             auto_run_limit: self.auto_run_limit,
             notify_idle: self.notify_idle,
             notify_failed: self.notify_failed,
+            archive_after_days: self.archive_after_days,
         }
     }
 }
@@ -266,6 +288,7 @@ mod tests {
             auto_run_limit: 0,
             notify_idle: false,
             notify_failed: false,
+            archive_after_days: 0,
         });
         form.reset();
         let s = form.to_settings();
@@ -276,6 +299,7 @@ mod tests {
         assert_eq!(s.auto_order, AutoOrder::PriorityDesc);
         assert_eq!(s.auto_run_limit, 6);
         assert!(s.notify_idle && s.notify_failed);
+        assert_eq!(s.archive_after_days, 7);
         assert_eq!(s.ai_clis, Some(detect_ai_clis()));
     }
 

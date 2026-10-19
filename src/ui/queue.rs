@@ -24,6 +24,10 @@ pub fn show(ui: &mut Ui, queue: &mut Vec<u32>, project: Option<&Project>) {
             ui.horizontal(|ui| {
                 handle.ui(ui, super::drag_handle);
                 ui.label(RichText::new(format_id(*id)).monospace().color(theme::TEXT_MUTED));
+                if project.is_some_and(|p| p.is_blocked(*id)) {
+                    ui.label(RichText::new(icon::LOCK).color(theme::TEXT_MUTED))
+                        .on_hover_text("Waits until the tickets it's blocked by are done");
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if danger_icon_button(ui, icon::X, "Remove from queue").clicked() {
                         remove = Some(state.index);

@@ -6,7 +6,7 @@ use egui_phosphor::regular as icon;
 use super::rich_editor::RichEditor;
 use super::{accent_button, icon_button, priority_icon};
 use crate::theme;
-use crate::ticket::{Priority, Ticket};
+use crate::ticket::{Priority, RunRecord, Ticket, format_id};
 
 fn modal_size(ctx: &egui::Context) -> egui::Vec2 {
     let screen = ctx.content_rect().size();
@@ -30,7 +30,15 @@ pub enum ViewOutcome {
     Edit,
 }
 
-pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Option<ViewOutcome> {
+/// A ticket another one is blocked by, as shown in the view.
+pub struct Dependency {
+    /// Number, title and column.
+    pub label: String,
+    /// Not in the last column yet.
+    pub waiting: bool,
+}
+
+pub fn view(ctx: &egui::Context, t: &Ticket, deps: &[Dependency], cache: &mut CommonMarkCache) -> Option<ViewOutcome> {
     let mut outcome = None;
     let size = modal_size(ctx);
     let modal = super::show_modal(ctx, "view_ticket", |ui| {
@@ -57,6 +65,21 @@ pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Opt
         });
         ui.add_space(4.0);
         ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
+        if !deps.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                let waiting = deps.iter().any(|d| d.waiting);
+                let (glyph, color) = if waiting {
+                    (icon::LOCK, theme::DANGER)
+                } else {
+                    (icon::LOCK_OPEN, theme::TEXT_MUTED)
+                };
+                ui.label(RichText::new(format!("{glyph}  Blocked by")).color(color));
+                for d in deps {
+                    let color = if d.waiting { theme::TEXT } else { theme::TEXT_MUTED };
+                    ui.label(RichText::new(&d.label).color(color));
+                }
+            });
+        }
         ui.separator();
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             // Description always shows; the optional sections only when they have text.
@@ -73,12 +96,69 @@ pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Opt
                 ui.add_space(4.0);
                 markdown(ui, cache, text);
             }
+            if !t.runs.is_empty() {
+                ui.add_space(16.0);
+                ui.label(RichText::new("Run History").size(17.0).strong().color(theme::ACCENT));
+                ui.add_space(4.0);
+                run_history(ui, &t.runs);
+            }
         });
     });
     if modal.should_close() && outcome.is_none() {
         outcome = Some(ViewOutcome::Close);
     }
     outcome
+}
+
+/// Newest run first: when, how long, where the ticket went and how it ended.
+fn run_history(ui: &mut Ui, runs: &[RunRecord]) {
+    egui::Grid::new("run_history")
+        .num_columns(4)
+        .spacing([24.0, 4.0])
+        .show(ui, |ui| {
+            for r in runs.iter().rev() {
+                let when = crate::ticket::readable_utc(&r.started);
+                ui.label(RichText::new(when).monospace().color(theme::TEXT_MUTED));
+                ui.label(duration(r.seconds));
+                ui.label(format!("{} {} {}", r.from, icon::ARROW_RIGHT, r.to));
+                let color = if r.result.failed() {
+                    theme::DANGER
+                } else {
+                    theme::ACCENT
+                };
+                ui.label(RichText::new(r.result.label()).color(color));
+                ui.end_row();
+            }
+        });
+}
+
+/// `45s`, `4m 12s`, `1h 03m`.
+fn duration(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
+        _ => format!("{}h {:02}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+/// "12, 00015" -> [12, 15]. Separated by commas or spaces; a ticket can't wait for itself.
+fn parse_blocked(text: &str, own: u32) -> Result<Vec<u32>, String> {
+    let mut ids = Vec::new();
+    for part in text.split([',', ' ']).map(str::trim).filter(|p| !p.is_empty()) {
+        let id: u32 = part.parse().map_err(|_| format!("\"{part}\" isn't a ticket number"))?;
+        if id == own {
+            return Err("A ticket can't be blocked by itself".into());
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+fn blocked_text(ids: &[u32]) -> String {
+    ids.iter().map(|&id| format_id(id)).collect::<Vec<_>>().join(", ")
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -106,6 +186,8 @@ pub struct TicketForm {
     scope_open: bool,
     notes: RichEditor,
     notes_open: bool,
+    /// Ticket numbers this one waits for, as typed.
+    blocked: String,
     confirm_discard: bool,
     pub error: Option<String>,
 }
@@ -140,6 +222,7 @@ impl TicketForm {
             scope_open: false,
             notes: RichEditor::new(("notes", ticket.id), &ticket.notes),
             notes_open: false,
+            blocked: blocked_text(&ticket.blocked_by),
             original: ticket.clone(),
             ticket,
             confirm_discard: false,
@@ -154,6 +237,7 @@ impl TicketForm {
             || a.title != b.title
             || a.priority != b.priority
             || a.run_count != b.run_count
+            || self.blocked.trim() != blocked_text(&b.blocked_by)
             || self.description.changed()
             || self.test_scope.changed()
             || self.notes.changed()
@@ -202,11 +286,24 @@ impl TicketForm {
                         }
                     });
                 super::pointer(combo.response);
+                ui.add_space(16.0);
+                ui.label("Blocked by");
+                ui.add(
+                    TextEdit::singleline(&mut self.blocked)
+                        .margin(super::INPUT_MARGIN)
+                        .hint_text("e.g. 12, 15")
+                        .desired_width(160.0),
+                )
+                .on_hover_text(
+                    "Numbers of tickets that must reach the last column first. Auto and the queue wait for them; \
+                     ▶ still runs the ticket straight away.",
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add(DragValue::new(&mut t.run_count).range(0..=u32::MAX).speed(0.1));
                     ui.label("Runs");
                 });
             });
+            let blocked = parse_blocked(&self.blocked, t.id);
 
             let footer = 56.0;
             let body_h = (ui.available_height() - footer).max(240.0);
@@ -237,9 +334,11 @@ impl TicketForm {
                     ui.label(RichText::new(err).color(theme::DANGER));
                 } else if self.ticket.title.trim().is_empty() {
                     ui.label(RichText::new("A title is required").color(theme::TEXT_MUTED));
+                } else if let Err(e) = &blocked {
+                    ui.label(RichText::new(e).color(theme::DANGER));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let can_save = !self.ticket.title.trim().is_empty();
+                    let can_save = !self.ticket.title.trim().is_empty() && blocked.is_ok();
                     if ui
                         .add_enabled_ui(can_save, |ui| accent_button(ui, "Save"))
                         .inner
@@ -252,6 +351,7 @@ impl TicketForm {
         });
         // Untouched text keeps its original Markdown byte for byte instead of the editor's normalised form.
         if matches!(outcome, Some(FormOutcome::Save)) {
+            self.ticket.blocked_by = parse_blocked(&self.blocked, self.ticket.id).unwrap_or_default();
             if self.description.changed() {
                 self.ticket.description = self.description.markdown();
             }
@@ -511,6 +611,43 @@ mod tests {
         h.run();
         assert!(h.state().1);
         assert_eq!(h.state().0.ticket.notes, "Ask design");
+    }
+
+    #[test]
+    fn blocked_by_parses_numbers_and_saves() {
+        assert_eq!(parse_blocked(" 15, 00012 15 ", 3), Ok(vec![12, 15]));
+        assert_eq!(parse_blocked("", 3), Ok(vec![]));
+        assert!(parse_blocked("12, abc", 3).is_err());
+        assert!(parse_blocked("3", 3).is_err());
+        assert_eq!(duration(45), "45s");
+        assert_eq!(duration(252), "4m 12s");
+        assert_eq!(duration(3780), "1h 03m");
+
+        let ticket = Ticket {
+            id: 3,
+            title: "T".into(),
+            blocked_by: vec![1],
+            ..Default::default()
+        };
+        let mut form = TicketForm::edit(&ticket);
+        form.tab = Tab::Manual;
+        assert_eq!(form.blocked, "00001");
+        assert!(!form.dirty());
+        form.blocked = "1, 2".into();
+        assert!(form.dirty());
+        let mut h = Harness::new_ui_state(
+            |ui, (form, saved): &mut (TicketForm, bool)| {
+                *saved |= matches!(form.show(ui.ctx()), Some(FormOutcome::Save));
+            },
+            (form, false),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 900.0));
+        h.run_steps(3);
+        h.get_by_label("Save").click();
+        h.run();
+        assert!(h.state().1);
+        assert_eq!(h.state().0.ticket.blocked_by, [1, 2]);
     }
 
     #[test]

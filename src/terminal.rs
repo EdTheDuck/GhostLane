@@ -155,7 +155,8 @@ pub fn ticket_update_prompt(request: &str, path: &Path, id: &str) -> String {
          project files for context if needed, then edit only that file and change nothing else. Keep its format: a YAML \
          front matter block between two lines of three dashes with id, title, priority (one of low, medium, high or \
          highest) and run_count, followed by a '## Description' section, a '## Test Scope' section and, if it has one, a \
-         '## Notes' section. Leave the id and run_count as they are.",
+         '## Notes' section. Leave the id, run_count, blocked_by, done_at and runs as they are unless the change \
+         asks for them.",
         path = path.display()
     )
 }
@@ -171,10 +172,11 @@ pub fn tickets_from_document_prompt(doc: &Path, dir: &Path, tickets: &Path, firs
          named with a five-digit zero-padded id: start at {first}.md and count up by one, skipping any id that already \
          has a file anywhere under {tickets}. Change nothing else. Each file must be Markdown that starts with a YAML \
          front matter block between two lines of three dashes, containing: id: the file's id in single quotes, \
-         title: a short title, priority: one of low, medium, high or highest, and run_count: 0. After the front \
-         matter add a '## Description' section explaining what needs doing and why, then a '## Test Scope' section \
-         listing how to check it is done. Keep each ticket a piece of work small enough to finish in one sitting, \
-         and number them in the order they should be done.",
+         title: a short title, priority: one of low, medium, high or highest, and run_count: 0. When a ticket can only \
+         start once other new tickets are finished, also add blocked_by: a list of their ids in single quotes. After \
+         the front matter add a '## Description' section explaining what needs doing and why, then a '## Test Scope' \
+         section listing how to check it is done. Keep each ticket a piece of work small enough to finish in one \
+         sitting, and number them in the order they should be done.",
         doc = line(doc),
         dir = line(dir),
         tickets = line(tickets),
@@ -300,6 +302,57 @@ pub fn detect_shell(custom: Option<&str>) -> (String, Vec<String>) {
             .unwrap_or_else(|| fallback.into());
         // Login shell so PATH from the user's profile (where CLIs like `claude` live) is loaded.
         (shell, vec!["-l".into()])
+    }
+}
+
+/// Program and arguments that make `shell` run `script` and exit.
+pub fn script_command(shell: &str, script: &str) -> (String, Vec<String>) {
+    let file = shell.rsplit(['/', '\\']).next().unwrap_or(shell).to_lowercase();
+    let flags: &[&str] = match file.strip_suffix(".exe").unwrap_or(&file) {
+        "pwsh" | "powershell" => &["-NoLogo", "-NoProfile", "-Command"],
+        "cmd" => &["/C"],
+        // Login shell, like the terminal, so tools on the user's PATH are found.
+        _ => &["-lc"],
+    };
+    let mut args: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+    args.push(script.to_string());
+    (shell.to_string(), args)
+}
+
+/// Keeps a background process from flashing a console window on Windows.
+pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Runs `script` with `shell` in `cwd` and waits. Returns whether it exited with 0, and the last lines of its
+/// output.
+pub fn run_script(shell: Option<&str>, script: &str, cwd: &Path) -> (bool, String) {
+    const TAIL: usize = 40;
+    let (program, args) = script_command(&detect_shell(shell).0, script);
+    let output = no_window(std::process::Command::new(&program).args(&args).current_dir(cwd))
+        .stdin(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(out) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let lines: Vec<&str> = text.trim_end().lines().collect();
+            let mut tail = lines[lines.len().saturating_sub(TAIL)..].join("\n");
+            if let Some(code) = out.status.code().filter(|_| !out.status.success()) {
+                tail = format!("{tail}\n(exit code {code})").trim_start().to_string();
+            }
+            (out.status.success(), tail)
+        }
+        Err(e) => (false, format!("Couldn't run {program}: {e}")),
     }
 }
 
@@ -596,7 +649,7 @@ mod tests {
         assert!(!p.contains('\n'));
         assert!(p.contains("Raise priority"));
         assert!(p.contains("/p/tickets/done/00003.md"));
-        assert!(p.contains("Leave the id and run_count"));
+        assert!(p.contains("Leave the id, run_count"));
     }
 
     #[test]
@@ -619,6 +672,24 @@ mod tests {
         let found = detect_ai_clis();
         assert!(!found.is_empty());
         assert!(found.iter().all(|id| ai_cli(id).is_some()));
+    }
+
+    #[test]
+    fn scripts_run_through_the_shell() {
+        assert_eq!(
+            script_command(r"C:\Program Files\PowerShell\7\pwsh.exe", "cargo test").1,
+            ["-NoLogo", "-NoProfile", "-Command", "cargo test"]
+        );
+        assert_eq!(script_command("cmd.exe", "x").1, ["/C", "x"]);
+        assert_eq!(script_command("/bin/zsh", "make check").1, ["-lc", "make check"]);
+
+        let d = tempfile::tempdir().unwrap();
+        let (ok, out) = run_script(None, "echo hello", d.path());
+        assert!(ok, "{out}");
+        assert!(out.contains("hello"), "{out}");
+        let (ok, out) = run_script(None, "exit 3", d.path());
+        assert!(!ok);
+        assert!(out.ends_with("(exit code 3)"), "{out}");
     }
 
     #[test]

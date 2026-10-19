@@ -3,6 +3,7 @@
 mod agents;
 mod app;
 mod config;
+mod git;
 mod project;
 mod richtext;
 mod terminal;

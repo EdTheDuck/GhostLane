@@ -19,9 +19,18 @@ const COLUMN_GAP: f32 = 12.0;
 /// Drag payload for a ticket card.
 pub struct DragTicket(pub u32);
 
-/// `engaged`: the AI is busy with or has queued tickets, so play buttons add to the queue instead.
-/// `run_limit`: Auto skips tickets sent to the AI this many times; their cards are flagged.
-pub fn show(ui: &mut Ui, op: &mut OpenProject, engaged: bool, run_limit: u32, actions: &mut Vec<Action>) {
+/// Board-wide settings the columns need.
+#[derive(Clone, Copy)]
+pub struct BoardSettings {
+    /// The AI is busy with or has queued tickets, so play buttons add to the queue instead.
+    pub engaged: bool,
+    /// Auto skips tickets sent to the AI this many times; their cards are flagged.
+    pub run_limit: u32,
+    /// The last column hides tickets that have been there longer than this many days. 0 = never.
+    pub archive_days: u32,
+}
+
+pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions: &mut Vec<Action>) {
     let Ok(project) = &op.project else { return };
     let columns = project.meta.columns.len();
     let width = column_width(ui.available_width(), columns);
@@ -31,7 +40,7 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, engaged: bool, run_limit: u32, ac
             let height = ui.available_height();
             for col in 0..columns {
                 ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
-                    column_ui(ui, op, col, width, engaged, run_limit, actions);
+                    column_ui(ui, op, col, width, settings, actions);
                 });
             }
         });
@@ -45,19 +54,12 @@ fn column_width(available: f32, columns: usize) -> f32 {
     ((available - COLUMN_GAP * (n - 1.0)) / n).floor().max(MIN_COLUMN_WIDTH)
 }
 
-fn column_ui(
-    ui: &mut Ui,
-    op: &mut OpenProject,
-    col: usize,
-    width: f32,
-    engaged: bool,
-    run_limit: u32,
-    actions: &mut Vec<Action>,
-) {
+fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: BoardSettings, actions: &mut Vec<Action>) {
     let OpenProject {
         project: Ok(project),
         search,
         auto,
+        show_archived,
         ..
     } = op
     else {
@@ -141,13 +143,37 @@ fn column_ui(
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // Tickets arrive here because the AI is already on them.
-                let play = (column.auto_move != AutoMove::AiWorking).then_some(if engaged {
+                let play = (column.auto_move != AutoMove::AiWorking).then_some(if s.engaged {
                     (icon::LIST_PLUS, "Add to the AI queue")
                 } else {
                     (icon::PLAY, "Complete task with AI")
                 });
+                // The last column tucks away tickets finished a while ago; a search still finds them.
+                let now = crate::ticket::now_secs();
+                let archived = |t: &Ticket| col == project.last_col() && t.archived(now, s.archive_days);
+                let hidden = tickets.iter().filter(|t| archived(t)).count();
                 for t in tickets.iter().filter(|t| t.matches(query)) {
-                    card(ui, t, play, auto_column && t.at_run_limit(run_limit), actions);
+                    if archived(t) && !*show_archived && query.trim().is_empty() {
+                        continue;
+                    }
+                    let flagged = auto_column && t.at_run_limit(s.run_limit);
+                    card(ui, t, play, flagged, &project.blockers(t), actions);
+                }
+                if hidden > 0 && query.trim().is_empty() {
+                    let label = if *show_archived {
+                        "Hide archived".to_string()
+                    } else {
+                        format!("Show {hidden} archived")
+                    };
+                    ui.vertical_centered(|ui| {
+                        let tip = format!("Tickets in {} for more than {} days", column.name, s.archive_days);
+                        if super::pointer(ui.link(RichText::new(label).color(theme::TEXT_MUTED)))
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            *show_archived = !*show_archived;
+                        }
+                    });
                 }
             });
     }
@@ -205,8 +231,15 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
     }
 }
 
-/// `flagged`: Auto skips the ticket, it has been sent to the AI too many times.
-fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: bool, actions: &mut Vec<Action>) {
+/// `flagged`: Auto skips the ticket, it has been sent to the AI too many times. `blockers`: tickets it waits for.
+fn card(
+    ui: &mut Ui,
+    t: &Ticket,
+    play: Option<(&str, &str)>,
+    flagged: bool,
+    blockers: &[u32],
+    actions: &mut Vec<Action>,
+) {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
     let response = ui
         .scope_builder(builder, |ui| {
@@ -223,7 +256,7 @@ fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: bool, acti
                 .fill(fill)
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(12))
-                .show(ui, |ui| card_contents(ui, t, play, flagged, actions));
+                .show(ui, |ui| card_contents(ui, t, play, flagged, blockers, actions));
         })
         .response;
 
@@ -262,7 +295,14 @@ fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: bool, acti
 }
 
 /// play: glyph and tooltip of the AI button, if the card has one.
-fn card_contents(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: bool, actions: &mut Vec<Action>) {
+fn card_contents(
+    ui: &mut Ui,
+    t: &Ticket,
+    play: Option<(&str, &str)>,
+    flagged: bool,
+    blockers: &[u32],
+    actions: &mut Vec<Action>,
+) {
     const PLAY: f32 = 30.0;
     let full = ui.available_width();
     let left = ui.cursor().left();
@@ -292,6 +332,15 @@ fn card_contents(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: b
                         t.run_count
                     );
                     ui.label(RichText::new(icon::FLAG).color(theme::DANGER))
+                        .on_hover_text(tip);
+                }
+                if !blockers.is_empty() {
+                    let ids: Vec<String> = blockers.iter().map(|&b| crate::ticket::format_id(b)).collect();
+                    let tip = format!(
+                        "Blocked by {}. Auto and the queue wait until they're done; ▶ runs it anyway.",
+                        ids.join(", ")
+                    );
+                    ui.label(RichText::new(icon::LOCK).color(theme::TEXT_MUTED))
                         .on_hover_text(tip);
                 }
             });
@@ -392,7 +441,14 @@ mod tests {
         }
         let op = OpenProject::new(p.ghost_path.clone(), Ok(p));
         let mut h = Harness::new_ui_state(
-            |ui, (op, actions, engaged): &mut State| show(ui, op, *engaged, 3, actions),
+            |ui, (op, actions, engaged): &mut State| {
+                let settings = BoardSettings {
+                    engaged: *engaged,
+                    run_limit: 3,
+                    archive_days: 7,
+                };
+                show(ui, op, settings, actions)
+            },
             (op, Vec::new(), false),
         );
         crate::theme::apply(&h.ctx);
@@ -480,6 +536,47 @@ mod tests {
         h.get_by_label_contains("Reset Run Count").click();
         h.run();
         assert!(h.state().1.iter().any(|a| matches!(a, Action::ResetRunCount(2))));
+    }
+
+    #[test]
+    fn blocked_cards_show_a_lock_until_the_blocker_is_done() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["First", "Second"]);
+        assert_eq!(h.query_all_by_label(icon::LOCK).count(), 0);
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        let mut t = p.find_ticket(2).unwrap().1.clone();
+        t.blocked_by = vec![1];
+        t.save().unwrap();
+        p.rescan().unwrap();
+        h.run();
+        assert_eq!(h.get_all_by_label(icon::LOCK).count(), 1);
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        let first = p.find_ticket(1).unwrap().1.path.clone();
+        p.move_ticket(&first, 1).unwrap();
+        h.run();
+        assert_eq!(h.query_all_by_label(icon::LOCK).count(), 0);
+    }
+
+    #[test]
+    fn old_done_tickets_hide_until_asked_for() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["Old", "New"]);
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        for (id, days_ago) in [(1, 30), (2, 1)] {
+            let mut t = p.find_ticket(id).unwrap().1.clone();
+            t.done_at = Some(crate::ticket::now_secs() - days_ago * 86_400);
+            t.save().unwrap();
+            p.move_ticket(&t.path, 1).unwrap();
+        }
+        h.run();
+        assert!(h.query_by_label("Old").is_none());
+        assert!(h.query_by_label("New").is_some());
+        h.get_by_label("Show 1 archived").click();
+        h.run();
+        assert!(h.query_by_label("Old").is_some());
+        h.get_by_label("Hide archived").click();
+        h.run();
+        assert!(h.query_by_label("Old").is_none());
     }
 
     #[test]

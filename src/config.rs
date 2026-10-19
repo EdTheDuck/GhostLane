@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::project::AutoOrder;
 use crate::ticket::write_atomic;
@@ -28,6 +29,8 @@ pub struct Settings {
     pub notify_idle: bool,
     /// Ask for the user's attention when a ticket comes back to an earlier column.
     pub notify_failed: bool,
+    /// Hide tickets that have been in the last column longer than this many days. 0 = never.
+    pub archive_after_days: u32,
 }
 
 impl Default for Settings {
@@ -42,8 +45,22 @@ impl Default for Settings {
             auto_run_limit: 6,
             notify_idle: true,
             notify_failed: true,
+            archive_after_days: 7,
         }
     }
+}
+
+/// Per-project settings that run things on this computer. Kept in the app config rather than the `.ghost`
+/// file, so a cloned repo never commits, pushes or runs a command by itself.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectSettings {
+    /// Commit everything when a ticket reaches the last column.
+    pub commit: bool,
+    /// Push after each of those commits.
+    pub push: bool,
+    /// Runs when the AI finishes a ticket in the last column; the ticket only stays there if it exits 0.
+    pub test_command: String,
 }
 
 impl Settings {
@@ -64,6 +81,8 @@ pub struct AppConfig {
     pub terminal_collapsed: bool,
     pub queue_open: bool,
     pub settings: Settings,
+    /// Keyed by .ghost path.
+    pub projects: HashMap<PathBuf, ProjectSettings>,
 }
 
 /// `<config_dir>/GhostLane`.
@@ -88,6 +107,11 @@ impl AppConfig {
         cfg
     }
 
+    /// Settings of the project with .ghost `ghost`; defaults when it has none.
+    pub fn project(&self, ghost: &Path) -> ProjectSettings {
+        self.projects.get(ghost).cloned().unwrap_or_default()
+    }
+
     pub fn save(&self) -> io::Result<()> {
         let path = Self::path().ok_or_else(|| io::Error::other("no config directory"))?;
         let yaml = serde_yaml_ng::to_string(self).map_err(io::Error::other)?;
@@ -98,6 +122,7 @@ impl AppConfig {
     pub fn prune_missing(&mut self) -> bool {
         let before = self.clone();
         self.open_projects.retain(|p| p.is_file());
+        self.projects.retain(|p, _| p.is_file());
         if self
             .active_project
             .as_ref()
@@ -119,12 +144,20 @@ mod tests {
         let real = d.path().join("a.ghost");
         fs::write(&real, "name: A\n").unwrap();
         let gone = d.path().join("gone.ghost");
+        let commit = ProjectSettings {
+            commit: true,
+            ..Default::default()
+        };
         let mut cfg = AppConfig {
             open_projects: vec![gone.clone(), real.clone()],
-            active_project: Some(gone),
+            active_project: Some(gone.clone()),
+            projects: HashMap::from([(gone.clone(), commit.clone()), (real.clone(), commit.clone())]),
             ..Default::default()
         };
         assert!(cfg.prune_missing());
+        assert_eq!(cfg.project(&real), commit);
+        assert_eq!(cfg.project(&gone), ProjectSettings::default());
+        assert_eq!(cfg.projects.len(), 1);
         assert_eq!(cfg.open_projects, std::slice::from_ref(&real));
         assert_eq!(cfg.active_project, Some(real));
         assert!(!cfg.prune_missing());

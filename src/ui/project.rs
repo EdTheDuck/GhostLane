@@ -6,6 +6,7 @@ use egui_dnd::{DragDropItem, dnd};
 use egui_phosphor::regular as icon;
 
 use super::{accent_button, icon_button};
+use crate::config::ProjectSettings;
 use crate::project::{
     AutoMove, ColumnEdit, DEFAULT_AUTO_MOVES, DEFAULT_COLUMNS, DEFAULT_PROMPTS, Project, find_ghost_file, folder_name,
     validate_columns,
@@ -48,6 +49,8 @@ pub struct ProjectForm {
     cli_options: Vec<String>,
     /// Play button prompt from Settings; columns that keep it follow later changes there.
     default_prompt: String,
+    /// Commit, push and test command; kept on this computer, not in the .ghost file.
+    settings: ProjectSettings,
     pub error: Option<String>,
 }
 
@@ -58,12 +61,14 @@ pub enum ProjectOutcome {
         name: String,
         columns: Vec<ColumnEdit>,
         ai_cli: String,
+        settings: ProjectSettings,
     },
     Save {
         name: String,
         edits: Vec<ColumnEdit>,
         targets: HashMap<String, usize>,
         ai_cli: String,
+        settings: ProjectSettings,
     },
     OpenExisting(PathBuf),
 }
@@ -96,11 +101,12 @@ impl ProjectForm {
             ai_cli: clis[0].clone(),
             cli_options: clis,
             default_prompt: prompt.to_string(),
+            settings: ProjectSettings::default(),
             error: None,
         }
     }
 
-    pub fn edit(p: &Project, mut clis: Vec<String>, prompt: &str) -> Self {
+    pub fn edit(p: &Project, mut clis: Vec<String>, prompt: &str, settings: ProjectSettings) -> Self {
         let ai_cli = p.meta.ai_cli.clone().unwrap_or_else(|| clis[0].clone());
         // Keep the project's current choice selectable even if it was unticked in Settings.
         if !clis.contains(&ai_cli) {
@@ -131,6 +137,7 @@ impl ProjectForm {
             ai_cli,
             cli_options: clis,
             default_prompt: prompt.to_string(),
+            settings,
             error: None,
         }
     }
@@ -212,6 +219,8 @@ impl ProjectForm {
             }
             self.columns_ui(ui);
             self.removed_ui(ui);
+            ui.add_space(8.0);
+            settings_ui(ui, &mut self.settings);
 
             ui.add_space(12.0);
             let valid = self.validation();
@@ -407,6 +416,7 @@ impl ProjectForm {
                 name,
                 columns: edits,
                 ai_cli: self.ai_cli.clone(),
+                settings: self.submitted_settings(),
             };
         }
         let targets = self
@@ -422,8 +432,50 @@ impl ProjectForm {
             edits,
             targets,
             ai_cli: self.ai_cli.clone(),
+            settings: self.submitted_settings(),
         }
     }
+
+    fn submitted_settings(&self) -> ProjectSettings {
+        let s = &self.settings;
+        ProjectSettings {
+            commit: s.commit,
+            // Only offered while committing is on.
+            push: s.commit && s.push,
+            test_command: s.test_command.trim().to_string(),
+        }
+    }
+}
+
+/// Commit, push and test command for the project.
+fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings) {
+    ui.label("Settings");
+    super::pointer(ui.checkbox(&mut s.commit, "Commit when ticket is done")).on_hover_text(
+        "When a ticket reaches the last column, commit everything in the project's git repository with the          ticket's number and title as the message.",
+    );
+    if s.commit {
+        ui.horizontal(|ui| {
+            ui.add_space(26.0);
+            super::pointer(ui.checkbox(&mut s.push, "Push when commit is made"));
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label("Test command");
+        ui.add(
+            TextEdit::singleline(&mut s.test_command)
+                .margin(super::INPUT_MARGIN)
+                .hint_text("Optional, e.g. cargo test")
+                .desired_width(f32::INFINITY),
+        )
+        .on_hover_text(
+            "Runs in the project folder when the AI finishes a ticket in the last column. The ticket only stays              there if the command succeeds; otherwise it goes back to the first column with the output in its notes.",
+        );
+    });
+    ui.label(
+        RichText::new("These settings stay on this computer.")
+            .small()
+            .color(theme::TEXT_MUTED),
+    );
 }
 
 /// Dropdown between two rows: what moves tickets from the row above into `row`.
@@ -541,6 +593,35 @@ mod tests {
         // Defaults: In Dev and In Test take tickets on AI Working, so 3 of 5 columns keep the icon.
         let h = harness();
         assert_eq!(h.get_all_by_label(icon::TERMINAL_WINDOW).count(), 3);
+    }
+
+    #[test]
+    fn push_only_shows_and_saves_with_commit() {
+        let mut h = harness();
+        assert!(h.query_by_label("Push when commit is made").is_none());
+        h.get_by_label("Commit when ticket is done").click();
+        h.run();
+        h.get_by_label("Push when commit is made").click();
+        h.run();
+        let s = &h.state().0.settings;
+        assert!(s.commit && s.push);
+        h.get_by_label("Commit when ticket is done").click();
+        h.run();
+        assert!(h.query_by_label("Push when commit is made").is_none());
+        let form = &mut h.state_mut().0;
+        form.location = Some(PathBuf::from("/p"));
+        form.settings.test_command = "  cargo test ".into();
+        let ProjectOutcome::Create { settings, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        assert_eq!(
+            settings,
+            ProjectSettings {
+                commit: false,
+                push: false,
+                test_command: "cargo test".into()
+            }
+        );
     }
 
     #[test]

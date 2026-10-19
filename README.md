@@ -98,8 +98,10 @@ Every ticket has:
 - an optional **test scope**, so you and your AI agree on what "done" means
 - optional **notes** for anything else worth keeping with the ticket
 - a **run count** showing how many times the ticket has been sent to AI
+- an optional **Blocked by** list of tickets that have to be finished first
+- a **run history**: every time the AI worked on it, how long it took, where the ticket went and how it ended
 
-Click a card to read it with the Markdown fully rendered. Right-click it to **Edit**, **Duplicate** or **Delete**. Deleted tickets go to your Recycle Bin or Trash, so you can get them back.
+Click a card to read it with the Markdown fully rendered, including its run history. Right-click it to **Edit**, **Duplicate** or **Delete**. Deleted tickets go to your Recycle Bin or Trash, so you can get them back.
 
 ### Boards shaped to your workflow
 
@@ -121,6 +123,20 @@ New projects come set up as **To Do →** *AI Working* **→ In Dev →** *AI Co
 
 With Claude Code and OpenAI Codex, GhostLane knows exactly when the AI has finished: it starts them with a small completion hook, so a ticket waits patiently while the CLI asks you for permission. Other CLIs count as finished once the terminal goes quiet, so if one stops to ask for permission, approve it promptly or the ticket may move on early. Nothing is written into your project for this; the hook lives in GhostLane's own settings folder.
 
+### Work in the right order
+
+Some tickets can't start until others are finished. Type their numbers into a ticket's **Blocked by** field (or let your AI fill it in when it writes tickets from a spec) and the card shows a 🔒 until every one of them reaches the last column. Auto and the queue skip a blocked ticket and come back to it once it's free, so ticket 4 never starts before ticket 3 is done. Need it now anyway? ▶ still runs it straight away.
+
+### Done means done
+
+The **Settings** section of the project dialog decides what happens when a ticket reaches the last column:
+
+- **Commit when ticket is done** commits everything in the project's git repository, with the ticket's number and title as the message (`00012: Add a logout button`). Every ticket becomes one tidy, revertable commit.
+- **Push when commit is made** (shown once committing is on) pushes each of those commits straight away.
+- **Test command**, such as `cargo test` or `npm test`, runs in the project folder whenever the AI finishes a ticket in the last column. The ticket only stays there if the command passes. If it fails, the ticket goes back to the first column with the command's output in its notes, so the next run knows exactly what broke. A hard check on top of the AI tester's judgement.
+
+These settings stay on your computer instead of in the project file, so opening someone else's repo never commits, pushes or runs a command by itself.
+
 ### Your AI knows the board
 
 Whenever you create or save a project, GhostLane writes a short guide to your columns, their folders and the ticket format into the instructions file your AI CLI reads: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, Cursor and opencode, `GEMINI.md` for Gemini CLI, `.github/copilot-instructions.md` for Copilot and `CONVENTIONS.md` for Aider. The guide sits in its own marked block, so anything else you keep in that file stays as it is.
@@ -140,6 +156,8 @@ Each column header shows a live ticket count and three quick tools:
 - ⇅ **Sort** orders tickets by ID, priority or title, ascending or descending. GhostLane remembers your choice for each column.
 - ➕ **Add** creates a new ticket directly in that column.
 
+The last column stays short: tickets that have been done for a while (a week by default) tuck away behind a **Show archived** link at the bottom. Their files stay right where they are, and a search still finds them.
+
 ### Projects that switch in a click
 
 Open as many projects as you like and switch between them from the dropdown in the title bar. Each project keeps its own board, its own columns and its own terminal session. GhostLane remembers which projects you had open, and if a project's files have been moved or deleted, it drops it from the list on launch.
@@ -152,6 +170,7 @@ Click the ⚙ cog to choose:
 - the **Default AI command** the ▶ button sends for columns that don't have their own, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
 - the **Auto order** your Auto columns work through tickets in: by priority or by number, ascending or descending
 - the **Auto run limit**: how many times a ticket can be sent to the AI before Auto skips it
+- **Archive done tickets**: how long a ticket stays in view in the last column before it's tucked away
 - **notifications**: whether GhostLane gets your attention when the AI runs out of work, and when a ticket fails
 - which **shell** to use (detected automatically by default)
 - the **terminal font size**
@@ -194,6 +213,8 @@ id: 00001
 title: Login page
 priority: high
 run_count: 2
+blocked_by:
+- '00002'
 ---
 
 ## Description
