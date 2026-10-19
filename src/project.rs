@@ -609,6 +609,55 @@ fn replace_guide(text: &str, guide: &str) -> String {
     }
 }
 
+/// Days the stats chart covers.
+pub const STATS_DAYS: usize = 14;
+
+/// How a project's tickets have been going, from their run histories.
+#[derive(Debug, Default, PartialEq)]
+pub struct Stats {
+    /// Tickets in the last column by the UTC day they got there, oldest first; the last entry is today.
+    pub done_per_day: [u32; STATS_DAYS],
+    pub runs: usize,
+    pub avg_run_secs: Option<u64>,
+    /// (done without ever coming back or failing the test command, done tickets the AI worked on).
+    pub first_try: (usize, usize),
+    /// (id, title, run count) of the tickets sent to the AI most often, more than once, most first.
+    pub most_retried: Vec<(u32, String, u32)>,
+}
+
+impl Project {
+    pub fn stats(&self, now: u64) -> Stats {
+        let mut s = Stats::default();
+        let today = now / 86_400;
+        let all = || self.tickets.iter().flatten();
+        let runs: Vec<&ticket::RunRecord> = all().flat_map(|t| &t.runs).collect();
+        s.runs = runs.len();
+        s.avg_run_secs = (!runs.is_empty()).then(|| runs.iter().map(|r| r.seconds).sum::<u64>() / runs.len() as u64);
+        for t in self.tickets.get(self.last_col()).into_iter().flatten() {
+            if let Some(ago) = t.done_at.and_then(|d| today.checked_sub(d / 86_400))
+                && (ago as usize) < STATS_DAYS
+            {
+                s.done_per_day[STATS_DAYS - 1 - ago as usize] += 1;
+            }
+            if !t.runs.is_empty() {
+                s.first_try.1 += 1;
+                let bounced = |r: &ticket::RunRecord| {
+                    matches!(r.result, ticket::RunResult::SentBack | ticket::RunResult::TestsFailed)
+                };
+                s.first_try.0 += usize::from(!t.runs.iter().any(bounced));
+            }
+        }
+        let mut retried: Vec<&Ticket> = all().filter(|t| t.run_count > 1).collect();
+        retried.sort_by(|a, b| b.run_count.cmp(&a.run_count).then(a.id.cmp(&b.id)));
+        s.most_retried = retried
+            .iter()
+            .take(5)
+            .map(|t| (t.id, t.title.clone(), t.run_count))
+            .collect();
+        s
+    }
+}
+
 pub fn find_ghost_file(dir: &Path) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?
@@ -866,5 +915,58 @@ mod tests {
         assert!(!p.tickets_dir().join("c").exists());
         assert!(!a.path.exists()); // a's file now lives under folder b
         assert!(p.tickets_dir().join("b").join(a.path.file_name().unwrap()).exists());
+    }
+
+    #[test]
+    fn stats_from_run_histories() {
+        use crate::ticket::{RunRecord, RunResult};
+        let d = tempfile::tempdir().unwrap();
+        let mut p = Project::create(d.path(), "P", &s(&["To Do", "Done"])).unwrap();
+        let run = |seconds, result| RunRecord {
+            started: String::new(),
+            seconds,
+            from: "To Do".into(),
+            to: "Done".into(),
+            result,
+            base: None,
+        };
+        let day = 86_400;
+        let now = 100 * day + 3600;
+        let mk = |title: &str, run_count, done_at, runs: Vec<RunRecord>| Ticket {
+            title: title.into(),
+            run_count,
+            done_at,
+            runs,
+            ..Default::default()
+        };
+        for (col, t) in [
+            (1, mk("Clean", 1, Some(100 * day), vec![run(60, RunResult::MovedOn)])),
+            (
+                1,
+                mk(
+                    "Bounced",
+                    3,
+                    Some(99 * day + 5),
+                    vec![run(100, RunResult::SentBack), run(20, RunResult::MovedOn)],
+                ),
+            ),
+            (1, mk("Old", 0, Some(50 * day), vec![])),
+            (0, mk("Stuck", 4, None, vec![run(0, RunResult::Unmoved)])),
+        ] {
+            p.add_ticket(col, t).unwrap();
+        }
+        let st = p.stats(now);
+        assert_eq!(st.done_per_day[STATS_DAYS - 1], 1);
+        assert_eq!(st.done_per_day[STATS_DAYS - 2], 1);
+        assert_eq!(st.done_per_day.iter().sum::<u32>(), 2); // "Old" is outside the window
+        assert_eq!((st.runs, st.avg_run_secs), (4, Some(45)));
+        assert_eq!(st.first_try, (1, 2));
+        assert_eq!(
+            st.most_retried,
+            [(4, "Stuck".to_string(), 4), (2, "Bounced".to_string(), 3)]
+        );
+        let empty = tempfile::tempdir().unwrap();
+        let st = Project::create(empty.path(), "E", &s(&["A"])).unwrap().stats(now);
+        assert_eq!(st, Stats::default());
     }
 }

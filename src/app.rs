@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use egui::{Align, Align2, Area, CornerRadius, Frame, Id, Layout, Margin, Order, Popup, RichText, Ui, vec2};
+use egui::{
+    Align, Align2, Area, CornerRadius, Frame, Id, Key, KeyboardShortcut, Layout, Margin, Modifiers, Order, Popup,
+    RichText, Ui, vec2,
+};
 use egui_commonmark::CommonMarkCache;
 use egui_phosphor::regular as icon;
 use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
@@ -13,11 +16,12 @@ use crate::config::AppConfig;
 use crate::project::{AutoMove, Project, Sort};
 use crate::terminal::{self, Terminals};
 use crate::theme;
-use crate::ticket::{RunRecord, RunResult, Ticket, format_id};
+use crate::ticket::{Priority, RunRecord, RunResult, Ticket, format_id};
 use crate::ui::import::{ImportForm, ImportOutcome};
 use crate::ui::project::{ProjectForm, ProjectOutcome};
+use crate::ui::quick_open::{QuickOpen, QuickOutcome};
 use crate::ui::settings::{SettingsForm, SettingsOutcome};
-use crate::ui::ticket::{self as ticket_ui, FormMode, FormOutcome, TicketForm, ViewOutcome};
+use crate::ui::ticket::{self as ticket_ui, FormMode, FormOutcome, TicketForm, TicketView, ViewOutcome};
 use crate::ui::{self, accent_button, icon_button};
 
 pub struct OpenProject {
@@ -33,6 +37,10 @@ pub struct OpenProject {
     pub paused: bool,
     /// The last column shows its archived tickets too.
     pub show_archived: bool,
+    /// Cards picked with Ctrl or Shift click, for acting on several at once.
+    pub selected: HashSet<u32>,
+    /// The card last clicked; Shift-click selects from here.
+    pub anchor: Option<u32>,
 }
 
 impl OpenProject {
@@ -45,6 +53,8 @@ impl OpenProject {
             auto: HashSet::new(),
             paused: false,
             show_archived: false,
+            selected: HashSet::new(),
+            anchor: None,
         }
     }
 
@@ -69,22 +79,38 @@ pub enum Action {
     EditProject,
     ImportDocument,
     OpenSettings,
-    MoveTicket { id: u32, to_col: usize },
-    SetSort { col: usize, sort: Sort },
+    MoveTickets {
+        ids: Vec<u32>,
+        to_col: usize,
+    },
+    SetSort {
+        col: usize,
+        sort: Sort,
+    },
     ViewTicket(u32),
     EditTicket(u32),
     NewTicket(usize),
     DuplicateTicket(u32),
-    AskDelete(u32),
+    AskDelete(Vec<u32>),
     RunAi(u32),
+    /// Run the first now and queue the rest, like pressing ▶ on each in turn.
+    QueueTickets(Vec<u32>),
+    SetPriority {
+        ids: Vec<u32>,
+        priority: Priority,
+    },
     ResetRunCount(u32),
+    QuickOpen,
+    ShowStats,
 }
 
 pub enum Modal {
     Project(ProjectForm),
-    ViewTicket(u32),
+    ViewTicket(TicketView),
     EditTicket(Box<TicketForm>),
-    ConfirmDelete(u32),
+    ConfirmDelete(Vec<u32>),
+    QuickOpen(QuickOpen),
+    Stats,
     Settings(SettingsForm),
     Import(ImportForm),
     /// A short notice with an OK button.
@@ -162,6 +188,8 @@ struct AiRun {
     /// Folder of the column the ticket was in when it started; ending up left of it means it failed.
     from: String,
     started_at: std::time::SystemTime,
+    /// The git commit checked out when it started.
+    base: Option<String>,
     /// The CLI's completion hook touches this when it finishes. `None` = the CLI has no hook, so a quiet
     /// terminal counts as finished.
     marker: Option<PathBuf>,
@@ -192,9 +220,33 @@ enum Job {
         output: String,
     },
     GitFailed(String),
+    /// Reverting ticket `id`'s commit in project `ghost` finished.
+    Reverted {
+        ghost: PathBuf,
+        id: u32,
+        result: Result<(), String>,
+    },
 }
 
+/// One thing Ctrl+Z puts back.
+enum UndoStep {
+    /// Ticket `id` was moved out of the column with this folder.
+    Move { ghost: PathBuf, id: u32, folder: String },
+    /// A ticket file was sent to the trash; it is written back from what it held.
+    Delete {
+        ghost: PathBuf,
+        path: PathBuf,
+        contents: String,
+    },
+}
+
+/// Undo steps kept; older ones are dropped.
+const MAX_UNDO: usize = 50;
+
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
+
+const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
+const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
 
 pub struct App {
     pub config: AppConfig,
@@ -217,6 +269,8 @@ pub struct App {
     ai_runs: Vec<AiRun>,
     /// Finished runs whose test command is still going. Their project starts nothing new meanwhile.
     checks: Vec<Check>,
+    /// Card moves and deletes, newest last; each entry is undone in one go.
+    undo: Vec<Vec<UndoStep>>,
     jobs_tx: Sender<Job>,
     jobs_rx: Receiver<Job>,
     toasts: Vec<(String, Instant)>,
@@ -265,6 +319,7 @@ impl App {
             ai_request: None,
             ai_runs: Vec::new(),
             checks: Vec::new(),
+            undo: Vec::new(),
             jobs_tx,
             jobs_rx,
             toasts: Vec::new(),
@@ -312,6 +367,109 @@ impl App {
     /// (column, ticket) of a ticket in the active project.
     pub fn find_ticket(&self, id: u32) -> Option<(usize, &Ticket)> {
         self.active_project()?.find_ticket(id)
+    }
+
+    /// The open project with .ghost `ghost`.
+    fn project_mut(&mut self, ghost: &Path) -> Option<&mut Project> {
+        self.projects
+            .iter_mut()
+            .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == ghost))
+    }
+
+    /// Opens ticket `id`'s view, with the commit it was done in when it's in the last column.
+    fn open_ticket(&mut self, id: u32) {
+        let commit = self.active_project().and_then(|p| {
+            let (col, t) = p.find_ticket(id)?;
+            let done_at = t.done_at.filter(|_| col == p.last_col())?;
+            crate::git::ticket_commit(&p.root, &t.id_str(), done_at)
+        });
+        self.modal = Some(Modal::ViewTicket(TicketView::new(id, commit)));
+    }
+
+    fn push_undo(&mut self, steps: Vec<UndoStep>) {
+        if steps.is_empty() {
+            return;
+        }
+        self.undo.push(steps);
+        let extra = self.undo.len().saturating_sub(MAX_UNDO);
+        self.undo.drain(..extra);
+    }
+
+    /// Ctrl+Z: puts back the last card move or delete.
+    fn undo(&mut self) {
+        let Some(steps) = self.undo.pop() else { return };
+        let errors: Vec<String> = steps
+            .into_iter()
+            .rev()
+            .filter_map(|step| undo_step(&mut self.projects, step).err())
+            .collect();
+        for e in errors {
+            self.toast(e);
+        }
+    }
+
+    /// Ctrl+K finds a ticket and Ctrl+Z undoes the last card move or delete (Cmd on macOS), unless something else
+    /// has the keyboard: a dialog, a text box or the terminal.
+    fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let free = self.modal.is_none() && !self.terminal_focused && ctx.memory(|m| m.focused().is_none());
+        if !free || self.active_project().is_none() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&FIND)) {
+            actions.push(Action::QuickOpen);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
+            self.undo();
+        }
+    }
+
+    /// Sends `tickets` to the trash, remembering what they held so Ctrl+Z can bring them back.
+    fn delete_tickets(&mut self, tickets: &[Ticket]) {
+        let Some(ghost) = self.active_project().map(|p| p.ghost_path.clone()) else {
+            return;
+        };
+        let mut undo = Vec::new();
+        for t in tickets {
+            let contents = std::fs::read_to_string(&t.path);
+            match trash::delete(&t.path) {
+                Ok(()) => undo.extend(contents.ok().map(|contents| UndoStep::Delete {
+                    ghost: ghost.clone(),
+                    path: t.path.clone(),
+                    contents,
+                })),
+                Err(e) => self.toast(format!("Couldn't delete {}: {e}", t.id_str())),
+            }
+        }
+        self.push_undo(undo);
+        self.reload_active();
+    }
+
+    /// Review found a problem: the note goes into the ticket's notes and it goes back to the first column.
+    fn reject(&mut self, id: u32, note: &str) {
+        let Some(mut t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
+            return;
+        };
+        let when = crate::ticket::readable_utc(&crate::ticket::utc_timestamp(crate::ticket::now_secs()));
+        t.notes = append_note(&t.notes, &format!("Rejected in review on {when}:\n\n{}", note.trim()));
+        let Some(p) = self.active_project_mut() else { return };
+        if let Err(e) = t.save().and_then(|()| p.move_ticket(&t.path, 0)) {
+            self.toast(format!("Couldn't send {} back: {e}", t.id_str()));
+        }
+    }
+
+    /// Undoes `commit`, the one ticket `id` was done in, on a background thread: commit hooks can take a while.
+    fn revert(&mut self, id: u32, commit: String, ctx: &egui::Context) {
+        let Some((p, (_, t))) = self.active_project().and_then(|p| Some((p, p.find_ticket(id)?))) else {
+            return;
+        };
+        let message = format!("Revert \"{}: {}\"", t.id_str(), t.title.replace(['\n', '\r'], " "));
+        let (root, ghost) = (p.root.clone(), p.ghost_path.clone());
+        let (tx, ctx) = (self.jobs_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let result = crate::git::revert(&root, &commit, &message);
+            let _ = tx.send(Job::Reverted { ghost, id, result });
+            ctx.request_repaint();
+        });
     }
 
     fn save_config(&mut self) {
@@ -421,19 +579,34 @@ impl App {
         match action {
             Action::SwitchProject(i) => self.switch_to(i, ctx),
             Action::OpenProjectDialog => self.open_project_dialog(ctx),
-            Action::MoveTicket { id, to_col } => {
-                let Some((from, t)) = self.find_ticket(id) else { return };
-                if from == to_col {
-                    return;
+            Action::MoveTickets { ids, to_col } => {
+                let mut undo = Vec::new();
+                for id in ids {
+                    let Some((from, t)) = self.find_ticket(id) else {
+                        continue;
+                    };
+                    if from == to_col {
+                        continue;
+                    }
+                    let path = t.path.clone();
+                    let p = self.active_project_mut().expect("ticket found in active project");
+                    let (ghost, done) = (p.ghost_path.clone(), to_col == p.last_col());
+                    let folder = p.meta.columns[from].folder.clone();
+                    match p.move_ticket(&path, to_col) {
+                        Ok(()) => {
+                            undo.push(UndoStep::Move {
+                                ghost: ghost.clone(),
+                                id,
+                                folder,
+                            });
+                            if done {
+                                self.ticket_done(&ghost, id, ctx);
+                            }
+                        }
+                        Err(e) => self.toast(format!("Couldn't move {}: {e}", format_id(id))),
+                    }
                 }
-                let path = t.path.clone();
-                let p = self.active_project_mut().expect("ticket found in active project");
-                let (ghost, done) = (p.ghost_path.clone(), to_col == p.last_col());
-                match p.move_ticket(&path, to_col) {
-                    Ok(()) if done => self.ticket_done(&ghost, id, ctx),
-                    Ok(()) => {}
-                    Err(e) => self.toast(format!("Couldn't move {}: {e}", format_id(id))),
-                }
+                self.push_undo(undo);
             }
             Action::SetSort { col, sort } => {
                 if let Some(Err(e)) = self.active_project_mut().map(|p| p.set_sort(col, sort)) {
@@ -454,7 +627,7 @@ impl App {
                 }
             }
             Action::ImportDocument => self.modal = Some(Modal::Import(ImportForm::default())),
-            Action::ViewTicket(id) => self.modal = Some(Modal::ViewTicket(id)),
+            Action::ViewTicket(id) => self.open_ticket(id),
             Action::EditTicket(id) => {
                 if let Some((_, t)) = self.find_ticket(id) {
                     self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(t))));
@@ -484,8 +657,35 @@ impl App {
                 };
                 self.modal = Some(Modal::EditTicket(Box::new(TicketForm::create(col, copy))));
             }
-            Action::AskDelete(id) => self.modal = Some(Modal::ConfirmDelete(id)),
+            Action::AskDelete(ids) if ids.is_empty() => {}
+            Action::AskDelete(ids) => self.modal = Some(Modal::ConfirmDelete(ids)),
             Action::RunAi(id) => self.play(id, ctx),
+            Action::QueueTickets(ids) => {
+                for id in ids {
+                    // Columns the AI fills by itself have no ▶.
+                    let filled_by_ai = self.active_project().is_some_and(|p| {
+                        p.find_ticket(id)
+                            .is_some_and(|(c, _)| p.meta.columns[c].auto_move == AutoMove::AiWorking)
+                    });
+                    if !filled_by_ai {
+                        self.play(id, ctx);
+                    }
+                }
+            }
+            Action::SetPriority { ids, priority } => {
+                for id in ids {
+                    let Some(mut t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
+                        continue;
+                    };
+                    t.priority = priority;
+                    if let Err(e) = t.save() {
+                        self.toast(format!("Couldn't update {}: {e}", t.id_str()));
+                    }
+                }
+                self.reload_active();
+            }
+            Action::QuickOpen => self.modal = Some(Modal::QuickOpen(QuickOpen::default())),
+            Action::ShowStats => self.modal = Some(Modal::Stats),
             Action::ResetRunCount(id) => {
                 let Some(mut t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
                     return;
@@ -684,6 +884,8 @@ impl App {
             }
         };
         let started_at = std::time::SystemTime::now();
+        // Takes milliseconds; outside a repository there is just nothing to show later.
+        let base = crate::git::head(&root);
         let marker = match self.send_to_cli(&key, &root, cli, &prompt, ctx) {
             Ok(marker) => marker,
             Err(e) => {
@@ -715,6 +917,7 @@ impl App {
             from,
             started_at,
             marker,
+            base,
         });
         true
     }
@@ -884,6 +1087,25 @@ impl App {
         while let Ok(job) = self.jobs_rx.try_recv() {
             match job {
                 Job::GitFailed(e) => self.toast(e),
+                Job::Reverted { id, result: Err(e), .. } => {
+                    self.toast(format!("Couldn't revert {}: {e}", format_id(id)))
+                }
+                Job::Reverted {
+                    ghost,
+                    id,
+                    result: Ok(()),
+                } => {
+                    // Its work is undone, so it starts over.
+                    let Some(p) = self.project_mut(&ghost) else { continue };
+                    let _ = p.rescan();
+                    let Some(mut t) = p.find_ticket(id).map(|(_, t)| t.clone()) else {
+                        continue;
+                    };
+                    t.done_at = None;
+                    if let Err(e) = t.save().and_then(|()| p.move_ticket(&t.path, 0)) {
+                        self.toast(format!("Reverted {}, but couldn't move it back: {e}", t.id_str()));
+                    }
+                }
                 Job::Checked {
                     ghost,
                     id,
@@ -1102,7 +1324,7 @@ impl App {
             }
             None => {
                 if let Some(id) = done.reopen {
-                    self.modal = Some(Modal::ViewTicket(id));
+                    self.open_ticket(id);
                 }
             }
         }
@@ -1322,17 +1544,64 @@ impl App {
                     self.project_outcome(outcome, ctx);
                 }
             }
-            Some(Modal::ViewTicket(id)) => {
-                let id = *id;
-                let Some(t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
+            Some(Modal::ViewTicket(view)) => {
+                let id = view.id;
+                let (Some(p), Some((col, t))) = (self.active_project(), self.find_ticket(id)) else {
                     self.modal = None;
                     return;
                 };
+                let (t, last, root) = (t.clone(), p.last_col(), p.root.clone());
+                let last_name = p.meta.columns[last].name.clone();
                 let deps = self.dependencies(&t);
-                match ticket_ui::view(ctx, &t, &deps, &mut self.md_cache) {
+                let Some(Modal::ViewTicket(view)) = &mut self.modal else {
+                    return;
+                };
+                if view.wants_changes() {
+                    view.changes = Some(load_changes(&root, view.commit.as_deref(), &t));
+                }
+                match ticket_ui::view(ctx, view, &t, &deps, (col == last, &last_name), &mut self.md_cache) {
                     Some(ViewOutcome::Close) => self.modal = None,
                     Some(ViewOutcome::Edit) => self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(&t)))),
+                    Some(ViewOutcome::Approve) => {
+                        self.modal = None;
+                        self.apply(
+                            Action::MoveTickets {
+                                ids: vec![id],
+                                to_col: last,
+                            },
+                            ctx,
+                        );
+                    }
+                    Some(ViewOutcome::Reject(note)) => {
+                        self.modal = None;
+                        self.reject(id, &note);
+                    }
+                    Some(ViewOutcome::Revert(commit)) => {
+                        self.modal = None;
+                        self.revert(id, commit, ctx);
+                    }
                     None => {}
+                }
+            }
+            Some(Modal::QuickOpen(q)) => {
+                let Some(p) = self.active.and_then(|i| self.projects[i].project.as_ref().ok()) else {
+                    self.modal = None;
+                    return;
+                };
+                match q.show(ctx, p) {
+                    Some(QuickOutcome::Open(id)) => self.open_ticket(id),
+                    Some(QuickOutcome::Close) => self.modal = None,
+                    None => {}
+                }
+            }
+            Some(Modal::Stats) => {
+                let Some(p) = self.active_project() else {
+                    self.modal = None;
+                    return;
+                };
+                let now = crate::ticket::now_secs();
+                if ui::stats::show(ctx, &p.meta.name, &p.stats(now), now / 86_400) {
+                    self.modal = None;
                 }
             }
             Some(Modal::EditTicket(form)) => match form.show(ctx) {
@@ -1383,20 +1652,24 @@ impl App {
                 Some(SettingsOutcome::Cancel) => self.modal = None,
                 None => {}
             },
-            Some(Modal::ConfirmDelete(id)) => {
-                let id = *id;
-                let Some(t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
-                    self.modal = None;
-                    return;
+            Some(Modal::ConfirmDelete(ids)) => {
+                let ids = ids.clone();
+                let tickets: Vec<Ticket> = ids
+                    .iter()
+                    .filter_map(|&id| self.find_ticket(id).map(|(_, t)| t.clone()))
+                    .collect();
+                let msg = match tickets.as_slice() {
+                    [] => {
+                        self.modal = None;
+                        return;
+                    }
+                    [t] => format!("Delete ticket {} – {}?", t.id_str(), t.title),
+                    many => format!("Delete {} tickets?", many.len()),
                 };
-                let msg = format!("Delete ticket {} – {}?", t.id_str(), t.title);
                 match ticket_ui::confirm(ctx, "delete", &msg, "Cancel", "Delete") {
                     Some(true) => {
                         self.modal = None;
-                        match trash::delete(&t.path) {
-                            Ok(()) => self.reload_active(),
-                            Err(e) => self.toast(format!("Couldn't delete {}: {e}", t.id_str())),
-                        }
+                        self.delete_tickets(&tickets);
                     }
                     Some(false) => self.modal = None,
                     None => {}
@@ -1447,7 +1720,7 @@ impl App {
             }
         };
         match (result, mode) {
-            (Ok(id), FormMode::Edit) => self.modal = Some(Modal::ViewTicket(id)),
+            (Ok(id), FormMode::Edit) => self.open_ticket(id),
             (Ok(_), FormMode::Create { .. }) => self.modal = None,
             (Err(e), _) => {
                 if let Some(Modal::EditTicket(form)) = &mut self.modal {
@@ -1576,10 +1849,17 @@ impl App {
                     {
                         actions.push(Action::EditProject);
                     }
-                    if self.active_project().is_some()
-                        && icon_button(ui, icon::UPLOAD_SIMPLE, "Generate tickets from a document").clicked()
-                    {
-                        actions.push(Action::ImportDocument);
+                    if self.active_project().is_some() {
+                        if icon_button(ui, icon::UPLOAD_SIMPLE, "Generate tickets from a document").clicked() {
+                            actions.push(Action::ImportDocument);
+                        }
+                        let find = format!("Find a ticket ({})", ui.ctx().format_shortcut(&FIND));
+                        if icon_button(ui, icon::MAGNIFYING_GLASS, &find).clicked() {
+                            actions.push(Action::QuickOpen);
+                        }
+                        if icon_button(ui, icon::CHART_BAR, "Project stats").clicked() {
+                            actions.push(Action::ShowStats);
+                        }
                     }
                     left_end = ui.min_rect().right();
                     let right_group = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1763,6 +2043,7 @@ fn record_run(p: &mut Project, run: &AiRun, seconds: u64, result: RunResult) -> 
         from,
         to: p.meta.columns[col].name.clone(),
         result,
+        base: run.base.clone(),
     });
     t.save()
         .map_err(|e| format!("Couldn't save the run history of {}: {e}", t.id_str()))?;
@@ -1793,9 +2074,57 @@ fn with_failure_note(notes: &str, command: &str, output: &str, when: u64) -> Str
         "Test command `{command}` failed on {when}:\n\n{fence}\n{}\n{fence}",
         output.trim_end()
     );
+    append_note(notes, &note)
+}
+
+/// Puts back one card move or delete. Steps for projects that have been closed since are skipped.
+fn undo_step(projects: &mut [OpenProject], step: UndoStep) -> Result<(), String> {
+    let ghost = match &step {
+        UndoStep::Move { ghost, .. } | UndoStep::Delete { ghost, .. } => ghost.clone(),
+    };
+    let Some(p) = projects
+        .iter_mut()
+        .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == ghost))
+    else {
+        return Ok(());
+    };
+    match step {
+        UndoStep::Move { id, folder, .. } => {
+            let col = p.meta.columns.iter().position(|c| c.folder == folder);
+            let result = match (col, p.find_ticket(id).map(|(_, t)| t.path.clone())) {
+                (Some(col), Some(path)) => p.move_ticket(&path, col).map_err(|e| e.to_string()),
+                (None, _) => Err("its column is gone".to_string()),
+                (_, None) => Err("it's gone".to_string()),
+            };
+            result.map_err(|e| format!("Couldn't move {} back: {e}", format_id(id)))
+        }
+        UndoStep::Delete { path, contents, .. } => {
+            let result = if path.exists() {
+                Err(std::io::Error::other("a file with its name is back already"))
+            } else {
+                crate::ticket::write_atomic(&path, &contents).and_then(|()| p.rescan())
+            };
+            result.map_err(|e| format!("Couldn't restore {}: {e}", path.display()))
+        }
+    }
+}
+
+/// `notes` with `note` added as a paragraph of its own.
+fn append_note(notes: &str, note: &str) -> String {
     match notes.trim_end() {
-        "" => note,
+        "" => note.to_string(),
         notes => format!("{notes}\n\n{note}"),
+    }
+}
+
+/// What ticket `t` changed: its commit when it has one, otherwise everything since its latest run started.
+fn load_changes(root: &Path, commit: Option<&str>, t: &Ticket) -> Result<crate::git::Changes, String> {
+    match (commit, t.base()) {
+        (Some(c), _) => crate::git::commit_changes(root, c),
+        (None, Some(base)) => crate::git::changes_since(root, base),
+        (None, None) => Err(
+            "No changes recorded yet. They show here once the AI has worked on this ticket in a git repository.".into(),
+        ),
     }
 }
 
@@ -1840,6 +2169,7 @@ impl eframe::App for App {
             self.update = Some(v);
         }
         let mut actions = Vec::new();
+        self.shortcuts(&ctx, &mut actions);
 
         let inset = ui::chrome::maximized_overflow(&ctx);
         if inset > 0.0 {
@@ -1958,6 +2288,7 @@ mod tests {
             from: "to_do".into(),
             started_at: std::time::SystemTime::now(),
             marker: None,
+            base: None,
         };
         p.move_ticket(&t.path, 1).unwrap(); // the play button moved it to In Dev
         assert_eq!(moved(&p, &run), RunResult::Unmoved);
@@ -1979,6 +2310,43 @@ mod tests {
         };
         p.move_ticket(&at(&p), 0).unwrap();
         assert_eq!(moved(&p, &test_run), RunResult::SentBack);
+    }
+
+    #[test]
+    fn undo_puts_moved_and_deleted_tickets_back() {
+        let d = tempfile::tempdir().unwrap();
+        let names: Vec<String> = crate::project::DEFAULT_COLUMNS.iter().map(|c| c.to_string()).collect();
+        let mut p = Project::create(d.path(), "P", &names).unwrap();
+        let t = p.add_ticket(0, Ticket::default()).unwrap();
+        let ghost = p.ghost_path.clone();
+        p.move_ticket(&t.path, 2).unwrap();
+        let mut projects = vec![OpenProject::new(ghost.clone(), Ok(p))];
+        let col = |projects: &[OpenProject]| projects[0].project.as_ref().unwrap().find_ticket(t.id).map(|(c, _)| c);
+        let back = UndoStep::Move {
+            ghost: ghost.clone(),
+            id: t.id,
+            folder: "to_do".into(),
+        };
+        undo_step(&mut projects, back).unwrap();
+        assert_eq!(col(&projects), Some(0));
+
+        let contents = std::fs::read_to_string(&t.path).unwrap();
+        std::fs::remove_file(&t.path).unwrap();
+        projects[0].project.as_mut().unwrap().rescan().unwrap();
+        assert_eq!(col(&projects), None);
+        let restore = || UndoStep::Delete {
+            ghost: ghost.clone(),
+            path: t.path.clone(),
+            contents: contents.clone(),
+        };
+        undo_step(&mut projects, restore()).unwrap();
+        assert_eq!(col(&projects), Some(0));
+        // Never overwrites a file that is there again.
+        assert!(
+            undo_step(&mut projects, restore())
+                .unwrap_err()
+                .contains("back already")
+        );
     }
 
     #[test]

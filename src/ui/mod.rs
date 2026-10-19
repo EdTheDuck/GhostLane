@@ -4,8 +4,10 @@ pub mod generating;
 pub mod import;
 pub mod project;
 pub mod queue;
+pub mod quick_open;
 pub mod rich_editor;
 pub mod settings;
+pub mod stats;
 pub mod ticket;
 
 use egui::{Button, Color32, Response, RichText, Ui};

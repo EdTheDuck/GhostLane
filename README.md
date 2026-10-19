@@ -137,6 +137,24 @@ The **Settings** section of the project dialog decides what happens when a ticke
 
 These settings stay on your computer instead of in the project file, so opening someone else's repo never commits, pushes or runs a command by itself.
 
+### See exactly what the AI changed
+
+Open a ticket and switch to its **Changes** tab to read the diff of everything the AI changed for it, new files included. GhostLane notes the commit each run starts from, so the diff is there even before anything is committed. Ticket files stay out of it, so you only see the real work.
+
+Happy with it? **Approve** moves the ticket to the last column (and commits it, if the project commits on done). Not quite? Type what needs fixing and press **Reject**: your note goes into the ticket and it goes back to the first column for another pass. Add a Review column before Done and nothing slips through without you looking.
+
+Once a ticket is done and committed, its run history shows the commit, and **Revert Commit** on the Changes tab undoes that ticket's work with a new commit. The ticket goes back to the first column, ready to try again. Your board itself is never rolled back.
+
+### Work on many tickets at once
+
+Ctrl-click cards (Cmd-click on macOS) to pick several, or Shift-click to pick a run of them in a column. A bar above the board lets you send them all to the AI (the first starts now, the rest queue up), move them to another column, change their priority or delete them. Dragging one selected card brings the rest along. Esc clears the selection.
+
+Moved or deleted something by mistake? **Ctrl+Z** puts it back.
+
+### See how it's going
+
+The chart icon in the title bar opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, and which tickets needed the most runs.
+
 ### Your AI knows the board
 
 Whenever you create or save a project, GhostLane writes a short guide to your columns, their folders and the ticket format into the instructions file your AI CLI reads: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, Cursor and opencode, `GEMINI.md` for Gemini CLI, `.github/copilot-instructions.md` for Copilot and `CONVENTIONS.md` for Aider. The guide sits in its own marked block, so anything else you keep in that file stays as it is.
@@ -155,6 +173,8 @@ Each column header shows a live ticket count and three quick tools:
 - 🔍 **Search** filters the column as you type, matching on ID, title, description, test scope and notes.
 - ⇅ **Sort** orders tickets by ID, priority or title, ascending or descending. GhostLane remembers your choice for each column.
 - ➕ **Add** creates a new ticket directly in that column.
+
+Looking for one ticket? Press **Ctrl+K** (Cmd+K on macOS) or the magnifying glass in the title bar, type a number or a few words, and jump straight to it from any column.
 
 The last column stays short: tickets that have been done for a while (a week by default) tuck away behind a **Show archived** link at the bottom. Their files stay right where they are, and a search still finds them.
 

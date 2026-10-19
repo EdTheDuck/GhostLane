@@ -28,6 +28,48 @@ fn markdown(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
 pub enum ViewOutcome {
     Close,
     Edit,
+    /// Move the ticket to the last column.
+    Approve,
+    /// Send the ticket back to the first column with this note.
+    Reject(String),
+    /// Revert this commit of the ticket.
+    Revert(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ViewTab {
+    Details,
+    Changes,
+}
+
+/// An open ticket view.
+pub struct TicketView {
+    pub id: u32,
+    tab: ViewTab,
+    /// The commit made when the ticket was done, if there is one.
+    pub commit: Option<String>,
+    /// What the ticket changed, loaded by the app when the Changes tab first shows. Err: why there's nothing.
+    pub changes: Option<Result<crate::git::Changes, String>>,
+    reject_note: String,
+    confirm_revert: bool,
+}
+
+impl TicketView {
+    pub fn new(id: u32, commit: Option<String>) -> Self {
+        TicketView {
+            id,
+            tab: ViewTab::Details,
+            commit,
+            changes: None,
+            reject_note: String::new(),
+            confirm_revert: false,
+        }
+    }
+
+    /// The Changes tab is showing but nothing is loaded yet.
+    pub fn wants_changes(&self) -> bool {
+        self.tab == ViewTab::Changes && self.changes.is_none()
+    }
 }
 
 /// A ticket another one is blocked by, as shown in the view.
@@ -38,7 +80,15 @@ pub struct Dependency {
     pub waiting: bool,
 }
 
-pub fn view(ctx: &egui::Context, t: &Ticket, deps: &[Dependency], cache: &mut CommonMarkCache) -> Option<ViewOutcome> {
+/// `done`: the ticket is in the last column (`last` is that column's name).
+pub fn view(
+    ctx: &egui::Context,
+    state: &mut TicketView,
+    t: &Ticket,
+    deps: &[Dependency],
+    (done, last): (bool, &str),
+    cache: &mut CommonMarkCache,
+) -> Option<ViewOutcome> {
     let mut outcome = None;
     let size = modal_size(ctx);
     let modal = super::show_modal(ctx, "view_ticket", |ui| {
@@ -80,7 +130,20 @@ pub fn view(ctx: &egui::Context, t: &Ticket, deps: &[Dependency], cache: &mut Co
                 }
             });
         }
-        ui.separator();
+        let before = state.tab;
+        tabs(
+            ui,
+            &mut state.tab,
+            &[(ViewTab::Details, "Details"), (ViewTab::Changes, "Changes")],
+        );
+        if state.tab != before {
+            // The app loads the changes on the next frame.
+            ui.ctx().request_repaint();
+        }
+        if state.tab == ViewTab::Changes {
+            changes_tab(ui, state, done, last, &mut outcome);
+            return;
+        }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             // Description always shows; the optional sections only when they have text.
             let sections = [("Test Scope", &t.test_scope), ("Notes", &t.notes)];
@@ -96,18 +159,128 @@ pub fn view(ctx: &egui::Context, t: &Ticket, deps: &[Dependency], cache: &mut Co
                 ui.add_space(4.0);
                 markdown(ui, cache, text);
             }
-            if !t.runs.is_empty() {
+            if !t.runs.is_empty() || state.commit.is_some() {
                 ui.add_space(16.0);
                 ui.label(RichText::new("Run History").size(17.0).strong().color(theme::ACCENT));
                 ui.add_space(4.0);
+                if let Some(commit) = &state.commit {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icon::GIT_COMMIT).color(theme::ACCENT));
+                        ui.label("Committed as");
+                        ui.label(RichText::new(commit).monospace());
+                        ui.label(RichText::new("· review or revert it on the Changes tab").color(theme::TEXT_MUTED));
+                    });
+                }
                 run_history(ui, &t.runs);
             }
         });
     });
-    if modal.should_close() && outcome.is_none() {
+    if state.confirm_revert {
+        let commit = state.commit.clone().unwrap_or_default();
+        let msg = format!(
+            "Revert commit {commit}? A new commit undoes its changes; the ticket goes back to the first column."
+        );
+        match confirm(ctx, "revert", &msg, "Cancel", "Revert") {
+            Some(true) => outcome = Some(ViewOutcome::Revert(commit)),
+            Some(false) => state.confirm_revert = false,
+            None => {}
+        }
+    } else if modal.should_close() && outcome.is_none() {
         outcome = Some(ViewOutcome::Close);
     }
     outcome
+}
+
+/// What the ticket changed, with buttons to pass it, send it back or undo its commit.
+fn changes_tab(ui: &mut Ui, state: &mut TicketView, done: bool, last: &str, outcome: &mut Option<ViewOutcome>) {
+    let heading = match &state.changes {
+        Some(Ok(c)) => match &c.commit {
+            Some(commit) => format!("{}  Commit {commit}", icon::GIT_COMMIT),
+            None => format!(
+                "{}  Changed since the last run started (not committed yet)",
+                icon::GIT_DIFF
+            ),
+        },
+        _ => format!("{}  Changes", icon::GIT_DIFF),
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(heading).strong());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if !done {
+                let approve = accent_button(ui, &format!("{}  Approve", icon::CHECK))
+                    .on_hover_text(format!("Move the ticket to {last}"));
+                if approve.clicked() {
+                    *outcome = Some(ViewOutcome::Approve);
+                }
+            } else if state.commit.is_some()
+                && ui
+                    .button(RichText::new(format!("{}  Revert Commit", icon::ARROW_U_UP_LEFT)).color(theme::DANGER))
+                    .on_hover_text("Undo this ticket's changes with a new commit")
+                    .clicked()
+            {
+                state.confirm_revert = true;
+            }
+        });
+    });
+    if !done {
+        ui.horizontal(|ui| {
+            let note = state.reject_note.trim().to_string();
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let reject = egui::Button::new(RichText::new(format!("{}  Reject", icon::ARROW_BEND_UP_LEFT)));
+                if ui
+                    .add_enabled(!note.is_empty(), reject)
+                    .on_hover_text("Add the note to the ticket and send it back to the first column")
+                    .clicked()
+                {
+                    *outcome = Some(ViewOutcome::Reject(note));
+                }
+                ui.add(
+                    TextEdit::singleline(&mut state.reject_note)
+                        .margin(super::INPUT_MARGIN)
+                        .hint_text("What needs fixing? Sent back with the ticket when you reject it")
+                        .desired_width(f32::INFINITY),
+                );
+            });
+        });
+    }
+    ui.separator();
+    match &state.changes {
+        None => {
+            ui.label(RichText::new("Loading…").color(theme::TEXT_MUTED));
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(e).color(theme::TEXT_MUTED));
+        }
+        Some(Ok(c)) if c.diff.trim().is_empty() => {
+            ui.label(RichText::new("Nothing changed outside the board.").color(theme::TEXT_MUTED));
+        }
+        Some(Ok(c)) => diff_view(ui, &c.diff),
+    }
+}
+
+/// A unified diff, coloured by line. Only the rows on screen are laid out, so big diffs stay quick.
+fn diff_view(ui: &mut Ui, diff: &str) {
+    let lines: Vec<&str> = diff.lines().collect();
+    let font = egui::FontId::monospace(13.0);
+    let row = ui.fonts_mut(|f| f.row_height(&font));
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ScrollArea::both()
+        .auto_shrink(false)
+        .show_rows(ui, row, lines.len(), |ui, range| {
+            for line in &lines[range] {
+                let color = match line.as_bytes().first() {
+                    _ if line.starts_with("+++") || line.starts_with("---") => theme::TEXT,
+                    Some(b'+') => theme::ACCENT,
+                    Some(b'-') => theme::DANGER,
+                    Some(b'@') => theme::TEXT_MUTED,
+                    Some(b' ') => theme::TEXT,
+                    _ if line.starts_with("diff ") => theme::TEXT,
+                    _ => theme::TEXT_MUTED,
+                };
+                let text = RichText::new(*line).font(font.clone()).color(color);
+                ui.add(egui::Label::new(text).extend());
+            }
+        });
 }
 
 /// Newest run first: when, how long, where the ticket went and how it ended.
@@ -133,7 +306,7 @@ fn run_history(ui: &mut Ui, runs: &[RunRecord]) {
 }
 
 /// `45s`, `4m 12s`, `1h 03m`.
-fn duration(secs: u64) -> String {
+pub fn duration(secs: u64) -> String {
     match secs {
         0..60 => format!("{secs}s"),
         60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
@@ -256,7 +429,7 @@ impl TicketForm {
                 FormMode::Create { .. } => "New Ticket",
             };
             close = super::modal_header(ui, &format!("{heading} - {}", self.ticket.id_str()), "Close");
-            tabs(ui, &mut self.tab);
+            tabs(ui, &mut self.tab, &[(Tab::Ai, "AI Assisted"), (Tab::Manual, "Manual")]);
             ui.add_space(4.0);
             if self.tab == Tab::Ai {
                 self.ai_body(ui, &mut outcome);
@@ -442,10 +615,10 @@ fn optional_section(ui: &mut Ui, label: &str, open: &mut bool, editor: &mut Rich
 }
 
 /// Underlined tab strip.
-fn tabs(ui: &mut Ui, current: &mut Tab) {
+fn tabs<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, items: &[(T, &str)]) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 24.0;
-        for (tab, label) in [(Tab::Ai, "AI Assisted"), (Tab::Manual, "Manual")] {
+        for &(tab, label) in items {
             let selected = *current == tab;
             let color = if selected { theme::ACCENT } else { theme::TEXT_MUTED };
             let text = RichText::new(label).size(15.0).color(color);
@@ -465,7 +638,7 @@ fn tabs(ui: &mut Ui, current: &mut Tab) {
 }
 
 /// Priority icon in its colour followed by the label, for the dropdown and its options.
-fn priority_text(p: Priority) -> LayoutJob {
+pub fn priority_text(p: Priority) -> LayoutJob {
     let mut job = LayoutJob::default();
     let font = egui::FontId::proportional(14.0);
     job.append(
@@ -495,7 +668,7 @@ pub fn message(ctx: &egui::Context, title: &str, body: &str) -> bool {
 /// Small yes/no modal. Returns Some(true) on confirm, Some(false) on cancel.
 pub fn confirm(ctx: &egui::Context, id: &str, message: &str, cancel: &str, ok: &str) -> Option<bool> {
     let mut result = None;
-    let danger = ok == "Delete" || ok == "Discard";
+    let danger = matches!(ok, "Delete" | "Discard" | "Revert");
     let modal = super::show_modal(ctx, ("confirm", id), |ui| {
         ui.set_width(360.0);
         ui.label(RichText::new(message).size(16.0));
@@ -664,6 +837,80 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(edit.tab, Tab::Ai);
+    }
+
+    type ViewState = (TicketView, Ticket, bool, Vec<String>);
+
+    /// A ticket view; `done` = in the last column. Outcomes are collected as text.
+    fn view_harness(view: TicketView, done: bool) -> Harness<'static, ViewState> {
+        let ticket = Ticket {
+            id: 5,
+            title: "Login".into(),
+            ..Default::default()
+        };
+        let mut h = Harness::new_ui_state(
+            |ui, (view_state, t, done, out): &mut ViewState| {
+                let mut cache = CommonMarkCache::default();
+                match super::view(ui.ctx(), view_state, t, &[], (*done, "Done"), &mut cache) {
+                    Some(ViewOutcome::Approve) => out.push("approve".into()),
+                    Some(ViewOutcome::Reject(note)) => out.push(format!("reject {note}")),
+                    Some(ViewOutcome::Revert(c)) => out.push(format!("revert {c}")),
+                    _ => {}
+                }
+            },
+            (view, ticket, done, Vec::new()),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 800.0));
+        h.run_steps(3);
+        h
+    }
+
+    #[test]
+    fn changes_tab_shows_the_diff_to_approve_or_reject() {
+        let mut h = view_harness(TicketView::new(5, None), false);
+        h.get_by_label("Changes").click();
+        h.run();
+        assert!(h.state().0.wants_changes());
+        h.state_mut().0.changes = Some(Ok(crate::git::Changes {
+            commit: None,
+            diff: "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-old line\n+new line".into(),
+        }));
+        h.run();
+        assert!(h.query_by_label("+new line").is_some());
+        assert!(h.query_by_label_contains("Revert").is_none());
+        h.get_by_label_contains("Approve").click();
+        h.run();
+        assert_eq!(h.state().3, ["approve"]);
+        // Reject needs a note to send back.
+        h.get_by_label_contains("Reject").click();
+        h.run();
+        assert_eq!(h.state().3.len(), 1);
+        h.state_mut().0.reject_note = "  Handle empty passwords ".into();
+        h.run();
+        h.get_by_label_contains("Reject").click();
+        h.run();
+        assert_eq!(h.state().3[1], "reject Handle empty passwords");
+    }
+
+    #[test]
+    fn done_tickets_with_a_commit_can_be_reverted() {
+        let mut h = view_harness(TicketView::new(5, Some("abc1234".into())), true);
+        assert!(h.query_by_label("abc1234").is_some(), "commit shows in the run history");
+        h.get_by_label("Changes").click();
+        h.run();
+        h.state_mut().0.changes = Some(Ok(crate::git::Changes {
+            commit: Some("abc1234".into()),
+            diff: String::new(),
+        }));
+        h.run();
+        assert!(h.query_by_label_contains("Approve").is_none());
+        assert!(h.query_by_label("Nothing changed outside the board.").is_some());
+        h.get_by_label_contains("Revert Commit").click();
+        h.run();
+        h.get_by_label("Revert").click();
+        h.run();
+        assert_eq!(h.state().3, ["revert abc1234"]);
     }
 
     #[test]

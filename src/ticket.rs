@@ -81,6 +81,9 @@ pub struct RunRecord {
     pub from: String,
     pub to: String,
     pub result: RunResult,
+    /// The git commit checked out when the run started, so the ticket's changes can be shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 /// Runs kept per ticket; older ones are dropped.
@@ -316,6 +319,13 @@ impl Ticket {
         self.runs.drain(..extra);
     }
 
+    /// The commit the latest run started from. Work isn't committed until a ticket is done, so everything the
+    /// ticket changed so far is in the diff from there.
+    // ponytail: that diff also holds whatever else changed in the repo meanwhile; worktrees per run would fix it.
+    pub fn base(&self) -> Option<&str> {
+        self.runs.iter().rev().find_map(|r| r.base.as_deref())
+    }
+
     /// Has the ticket been in the last column for more than `days` days? 0 = never archived.
     pub fn archived(&self, now: u64, days: u32) -> bool {
         let since = self.done_at.or(self.modified);
@@ -454,6 +464,7 @@ mod tests {
                 from: "To Do".into(),
                 to: "Ready For Test".into(),
                 result: RunResult::MovedOn,
+                base: Some("3f2a9c1e".into()),
             }],
             malformed: false,
             modified: None,
@@ -496,6 +507,7 @@ mod tests {
                 from: "A".into(),
                 to: "B".into(),
                 result: RunResult::Unmoved,
+                base: None,
             });
         }
         assert_eq!(t.runs.len(), MAX_RUNS);

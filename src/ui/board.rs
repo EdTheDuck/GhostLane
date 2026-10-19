@@ -9,7 +9,7 @@ use egui_phosphor::regular as icon;
 
 use super::{icon_button, priority_icon};
 use crate::app::{Action, OpenProject};
-use crate::project::{AutoMove, Sort, SortBy, SortDir};
+use crate::project::{AutoMove, Project, Sort, SortBy, SortDir};
 use crate::theme;
 use crate::ticket::Ticket;
 
@@ -32,6 +32,16 @@ pub struct BoardSettings {
 
 pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions: &mut Vec<Action>) {
     let Ok(project) = &op.project else { return };
+    op.selected.retain(|&id| project.find_ticket(id).is_some());
+    if !op.selected.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.memory(|m| m.focused().is_none())
+    {
+        op.selected.clear();
+    }
+    if !op.selected.is_empty() {
+        selection_bar(ui, op, actions);
+        ui.add_space(8.0);
+    }
+    let Ok(project) = &op.project else { return };
     let columns = project.meta.columns.len();
     let width = column_width(ui.available_width(), columns);
     ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
@@ -47,6 +57,65 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions:
     });
 }
 
+/// The selected tickets in board order: columns left to right, each top to bottom.
+fn selection(p: &Project, selected: &HashSet<u32>) -> Vec<u32> {
+    p.tickets
+        .iter()
+        .flatten()
+        .filter(|t| selected.contains(&t.id))
+        .map(|t| t.id)
+        .collect()
+}
+
+/// What to do with all the selected tickets at once.
+fn selection_bar(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
+    let Ok(project) = &op.project else { return };
+    let ids = selection(project, &op.selected);
+    let mut clear = false;
+    ui.horizontal(|ui| {
+        let n = ids.len();
+        ui.label(RichText::new(format!("{n} selected")).strong());
+        ui.add_space(8.0);
+        if ui
+            .button(format!("{}  Send to AI", icon::PLAY))
+            .on_hover_text("Run the first now and queue the rest, in board order")
+            .clicked()
+        {
+            actions.push(Action::QueueTickets(ids.clone()));
+        }
+        ui.menu_button(format!("{}  Move to", icon::ARROW_RIGHT), |ui| {
+            for (col, c) in project.meta.columns.iter().enumerate() {
+                if ui.button(&c.name).clicked() {
+                    actions.push(Action::MoveTickets {
+                        ids: ids.clone(),
+                        to_col: col,
+                    });
+                }
+            }
+        });
+        ui.menu_button(format!("{}  Priority", icon::CARET_UP), |ui| {
+            for p in crate::ticket::Priority::ALL {
+                if ui.button(super::ticket::priority_text(p)).clicked() {
+                    actions.push(Action::SetPriority {
+                        ids: ids.clone(),
+                        priority: p,
+                    });
+                }
+            }
+        });
+        if ui
+            .button(RichText::new(format!("{}  Delete", icon::TRASH)).color(theme::DANGER))
+            .clicked()
+        {
+            actions.push(Action::AskDelete(ids.clone()));
+        }
+        clear = icon_button(ui, icon::X, "Clear the selection (Esc)").clicked();
+    });
+    if clear {
+        op.selected.clear();
+    }
+}
+
 /// Columns share the board width equally, but never shrink below `MIN_COLUMN_WIDTH`
 /// (the board scrolls sideways instead).
 fn column_width(available: f32, columns: usize) -> f32 {
@@ -60,6 +129,8 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: Board
         search,
         auto,
         show_archived,
+        selected,
+        anchor,
         ..
     } = op
     else {
@@ -152,12 +223,18 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: Board
                 let now = crate::ticket::now_secs();
                 let archived = |t: &Ticket| col == project.last_col() && t.archived(now, s.archive_days);
                 let hidden = tickets.iter().filter(|t| archived(t)).count();
-                for t in tickets.iter().filter(|t| t.matches(query)) {
-                    if archived(t) && !*show_archived && query.trim().is_empty() {
-                        continue;
-                    }
+                let visible: Vec<&Ticket> = tickets
+                    .iter()
+                    .filter(|t| t.matches(query))
+                    .filter(|t| !archived(t) || *show_archived || !query.trim().is_empty())
+                    .collect();
+                for t in &visible {
                     let flagged = auto_column && t.at_run_limit(s.run_limit);
-                    card(ui, t, play, flagged, &project.blockers(t), actions);
+                    let picked = selected.contains(&t.id);
+                    let dragging = if picked { selected.len() } else { 1 };
+                    if card(ui, t, play, flagged, &project.blockers(t), (picked, dragging), actions) {
+                        click(ui, t.id, &visible, selected, anchor, actions);
+                    }
                 }
                 if hidden > 0 && query.trim().is_empty() {
                     let label = if *show_archived {
@@ -185,12 +262,43 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: Board
         }
     }
     if let Some(payload) = response.dnd_release_payload::<DragTicket>() {
-        actions.push(Action::MoveTicket {
-            id: payload.0,
-            to_col: col,
-        });
+        // Dragging one of the selected cards takes the whole selection along.
+        let ids = if selected.contains(&payload.0) {
+            selection(project, selected)
+        } else {
+            vec![payload.0]
+        };
+        actions.push(Action::MoveTickets { ids, to_col: col });
     }
     prepared.paint(ui);
+}
+
+/// Ctrl (Cmd on macOS) click adds a card to the selection or takes it out, Shift-click selects the cards between it
+/// and the last one clicked in the column, and a plain click opens the ticket.
+fn click(
+    ui: &Ui,
+    id: u32,
+    visible: &[&Ticket],
+    selected: &mut HashSet<u32>,
+    anchor: &mut Option<u32>,
+    actions: &mut Vec<Action>,
+) {
+    let m = ui.input(|i| i.modifiers);
+    let pos = |id: u32| visible.iter().position(|t| t.id == id);
+    if m.shift
+        && let (Some(a), Some(b)) = (anchor.and_then(pos), pos(id))
+    {
+        selected.extend(visible[a.min(b)..=a.max(b)].iter().map(|t| t.id));
+    } else if m.command || m.shift {
+        if !selected.remove(&id) {
+            selected.insert(id);
+        }
+        *anchor = Some(id);
+    } else {
+        selected.clear();
+        *anchor = Some(id);
+        actions.push(Action::ViewTicket(id));
+    }
 }
 
 /// "Auto" switch: while on, the AI works through this column's tickets by itself whenever its queue is empty.
@@ -232,14 +340,16 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
 }
 
 /// `flagged`: Auto skips the ticket, it has been sent to the AI too many times. `blockers`: tickets it waits for.
+/// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along. True when clicked.
 fn card(
     ui: &mut Ui,
     t: &Ticket,
     play: Option<(&str, &str)>,
     flagged: bool,
     blockers: &[u32],
+    (selected, dragging): (bool, usize),
     actions: &mut Vec<Action>,
-) {
+) -> bool {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
     let response = ui
         .scope_builder(builder, |ui| {
@@ -252,11 +362,17 @@ fn card(
             };
             let alpha = if r.dragged() { 0.4 } else { 1.0 };
             ui.set_opacity(alpha);
-            Frame::new()
+            let rect = Frame::new()
                 .fill(fill)
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(12))
-                .show(ui, |ui| card_contents(ui, t, play, flagged, blockers, actions));
+                .show(ui, |ui| card_contents(ui, t, play, flagged, blockers, actions))
+                .response
+                .rect;
+            if selected {
+                let stroke = Stroke::new(2.0, theme::ACCENT);
+                ui.painter().rect_stroke(rect, 6, stroke, egui::StrokeKind::Inside);
+            }
         })
         .response;
 
@@ -265,12 +381,9 @@ fn card(
     }
     if response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        drag_preview(ui, t);
+        drag_preview(ui, t, dragging);
     }
     let response = super::pointer(response);
-    if response.clicked() {
-        actions.push(Action::ViewTicket(t.id));
-    }
     response.context_menu(|ui| {
         if ui.button(format!("{}  Edit Ticket", icon::PENCIL_SIMPLE)).clicked() {
             actions.push(Action::EditTicket(t.id));
@@ -289,9 +402,10 @@ fn card(
             .button(RichText::new(format!("{}  Delete Ticket", icon::TRASH)).color(theme::DANGER))
             .clicked()
         {
-            actions.push(Action::AskDelete(t.id));
+            actions.push(Action::AskDelete(vec![t.id]));
         }
     });
+    response.clicked()
 }
 
 /// play: glyph and tooltip of the AI button, if the card has one.
@@ -378,7 +492,8 @@ fn title_job(ui: &Ui, title: &str, width: f32) -> LayoutJob {
     job
 }
 
-fn drag_preview(ui: &Ui, t: &Ticket) {
+/// `count`: cards being dragged, this one included.
+fn drag_preview(ui: &Ui, t: &Ticket, count: usize) {
     let Some(pos) = ui.ctx().pointer_interact_pos() else {
         return;
     };
@@ -397,6 +512,9 @@ fn drag_preview(ui: &Ui, t: &Ticket) {
                         ui.label(priority_icon(t.priority));
                         ui.label(RichText::new(t.id_str()).monospace().color(theme::TEXT_MUTED));
                         ui.label(&t.title);
+                        if count > 1 {
+                            ui.label(RichText::new(format!("+{} more", count - 1)).color(theme::ACCENT));
+                        }
                     });
                 });
         });
@@ -580,6 +698,70 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_and_shift_click_select_cards_for_bulk_actions() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["One", "Two", "Three", "Four"]);
+        h.get_by_label("One").click_modifiers(egui::Modifiers::COMMAND);
+        h.run();
+        h.get_by_label("Three").click_modifiers(egui::Modifiers::SHIFT);
+        h.run();
+        assert_eq!(h.state().0.selected, HashSet::from([1, 2, 3]));
+        assert!(h.state().1.is_empty(), "selecting opens nothing");
+        h.get_by_label("3 selected");
+        h.get_by_label_contains("Send to AI").click();
+        h.run();
+        assert!(
+            h.state()
+                .1
+                .iter()
+                .any(|a| matches!(a, Action::QueueTickets(ids) if ids == &[1, 2, 3]))
+        );
+        h.get_by_label_contains("Delete").click();
+        h.run();
+        assert!(
+            h.state()
+                .1
+                .iter()
+                .any(|a| matches!(a, Action::AskDelete(ids) if ids == &[1, 2, 3]))
+        );
+        // Ctrl-click again takes a card out; a plain click opens one and drops the selection.
+        h.get_by_label("Two").click_modifiers(egui::Modifiers::COMMAND);
+        h.run();
+        assert_eq!(h.state().0.selected, HashSet::from([1, 3]));
+        h.get_by_label("Four").click();
+        h.run();
+        assert!(h.state().0.selected.is_empty());
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::ViewTicket(4))));
+        assert!(h.query_by_label_contains("selected").is_none());
+    }
+
+    #[test]
+    fn dragging_a_selected_card_moves_the_whole_selection() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["One", "Two", "Three"]);
+        h.state_mut().0.selected = HashSet::from([1, 3]);
+        h.run();
+        let from = h.get_by_label("Three").rect().center();
+        let done = h.get_by_label("Done").rect().center();
+        let to = egui::pos2(done.x, from.y + 120.0);
+        h.hover_at(from);
+        h.drag_at(from);
+        h.run();
+        for i in 1..=10 {
+            h.hover_at(from + (to - from) * (i as f32 / 10.0));
+            h.run();
+        }
+        h.drop_at(to);
+        h.run();
+        assert!(
+            h.state()
+                .1
+                .iter()
+                .any(|a| matches!(a, Action::MoveTickets { ids, to_col: 1 } if ids == &[1, 3]))
+        );
+    }
+
+    #[test]
     fn add_button_creates_in_column() {
         let d = tempfile::tempdir().unwrap();
         let mut h = harness(d.path());
@@ -608,7 +790,7 @@ mod tests {
             h.state()
                 .1
                 .iter()
-                .any(|a| matches!(a, Action::MoveTicket { id: 1, to_col: 1 }))
+                .any(|a| matches!(a, Action::MoveTickets { ids, to_col: 1 } if ids == &[1]))
         );
     }
 
