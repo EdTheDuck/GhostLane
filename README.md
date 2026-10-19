@@ -252,19 +252,6 @@ Bold text uses [Ubuntu Bold](https://design.ubuntu.com/font) under the Ubuntu Fo
 
 ---
 
-## Code signing policy
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-- Committers and reviewers: [EdTheDuck](https://github.com/EdTheDuck)
-- Approvers: [EdTheDuck](https://github.com/EdTheDuck)
-
-Signed Windows installers are built from this repository by GitHub Actions and attached to the [releases](https://github.com/EdTheDuck/GhostLane/releases).
-
-**Privacy:** GhostLane does not send any information to other networked systems unless you ask it to, with one exception: when *Check for updates* is on (Settings), it asks GitHub for the latest release version at startup. Turn it off to stop that request.
-
----
-
 ## License
 
 [MIT](LICENSE)
