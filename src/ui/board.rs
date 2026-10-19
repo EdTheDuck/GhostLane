@@ -656,13 +656,17 @@ fn card(
                 .show(ui, |ui| card_contents(ui, t, play, marks, actions))
                 .response
                 .rect;
+            // Rings go inside the card: outside it, the column's scroll area clips them at the top and sides.
+            let mut ring = rect;
             if selected {
                 let stroke = Stroke::new(2.0, theme::ACCENT);
-                ui.painter().rect_stroke(rect, 6, stroke, egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(ring, 6, stroke, egui::StrokeKind::Inside);
+                ring = ring.shrink(2.0);
             }
             if cursor {
                 let stroke = Stroke::new(2.0, theme::TEXT);
-                ui.painter().rect_stroke(rect, 6, stroke, egui::StrokeKind::Outside);
+                let radius = if selected { 4 } else { 6 };
+                ui.painter().rect_stroke(ring, radius, stroke, egui::StrokeKind::Inside);
             }
         })
         .response;
@@ -1197,6 +1201,29 @@ mod tests {
         h.state_mut().0.project.as_mut().unwrap().meta.columns[0].wip_limit = Some(1);
         h.run();
         assert!(h.query_by_label("(2/1)").is_some());
+    }
+
+    #[test]
+    fn the_top_cards_cursor_ring_is_not_clipped() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["One", "Two"]);
+        h.get_by_label("One").click();
+        h.run();
+        assert_eq!(h.state().0.cursor, Some(1));
+        let ring = h
+            .output()
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.stroke.color == theme::TEXT && r.stroke.width == 2.0 => {
+                    Some((c.clip_rect, r.rect, r.stroke_kind))
+                }
+                _ => None,
+            })
+            .expect("cursor ring drawn");
+        let (clip, rect, kind) = ring;
+        assert_eq!(kind, egui::StrokeKind::Inside);
+        assert!(clip.contains_rect(rect), "ring {rect:?} clipped by {clip:?}");
     }
 
     #[test]
