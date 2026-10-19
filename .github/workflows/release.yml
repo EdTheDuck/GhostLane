@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   package:
@@ -29,6 +30,27 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev libfuse2
       - run: cargo install cargo-packager --locked
       - run: cargo packager --release --formats ${{ matrix.formats }}
+      # Windows installer is signed by SignPath once SIGNPATH_ORGANIZATION_ID is set; until then it ships unsigned.
+      - name: Upload unsigned installer
+        id: unsigned
+        if: runner.os == 'Windows' && vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer
+          path: dist/*-setup.exe
+      - name: Sign installer
+        if: steps.unsigned.outcome == 'success'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ghostlane
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+      - if: steps.unsigned.outcome == 'success'
+        run: Move-Item signed/* dist -Force
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

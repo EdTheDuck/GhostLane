@@ -2,6 +2,7 @@
 name = "ghostlane"
 version = "0.3.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 directories = "6.0.0"
