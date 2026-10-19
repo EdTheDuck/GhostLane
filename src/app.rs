@@ -648,6 +648,33 @@ impl App {
         self.switch_to(i, ctx);
     }
 
+    /// Closes the active project and forgets it, stopping its AI first. `files`: also sends its .ghost file and
+    /// tickets folder to the trash; nothing else in its folder is touched.
+    fn delete_project(&mut self, files: bool, ctx: &egui::Context) {
+        let Some(i) = self.active else { return };
+        if self.ai_running(i) {
+            self.stop_ai(i);
+        }
+        let op = self.projects.remove(i);
+        self.watcher = None;
+        let ghost = op.project.as_ref().map_or(op.path.clone(), |p| p.ghost_path.clone());
+        self.terminals.restart(&ghost);
+        self.config.projects.remove(&ghost);
+        if files && let Ok(p) = &op.project {
+            for path in [p.ghost_path.clone(), p.tickets_dir()] {
+                if path.exists()
+                    && let Err(e) = trash::delete(&path)
+                {
+                    self.toast(format!("Couldn't delete {}: {e}", path.display()));
+                }
+            }
+        }
+        self.active = self.projects.iter().position(|p| p.project.is_ok());
+        self.save_config();
+        self.reload_active();
+        self.watch_active(ctx);
+    }
+
     fn open_project_dialog(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("GhostLane project", &["ghost"])
@@ -1928,6 +1955,10 @@ impl App {
             ProjectOutcome::Cancel => self.modal = None,
             // The dialog stays open.
             ProjectOutcome::Export(format) => self.export(format),
+            ProjectOutcome::Delete { files } => {
+                self.modal = None;
+                self.delete_project(files, ctx);
+            }
             ProjectOutcome::ShowFolder(dir) => {
                 if let Err(e) = terminal::open_folder(&dir) {
                     self.toast(format!("Couldn't open {}: {e}", dir.display()));

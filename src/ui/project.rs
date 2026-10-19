@@ -54,6 +54,10 @@ pub struct ProjectForm {
     default_prompt: String,
     /// Commit, push and test command; kept on this computer, not in the .ghost file.
     settings: ProjectSettings,
+    /// The project's .ghost file, when editing.
+    ghost: Option<PathBuf>,
+    /// Asking how to delete the project.
+    confirm_delete: bool,
     pub error: Option<String>,
 }
 
@@ -78,6 +82,10 @@ pub enum ProjectOutcome {
     Export(ExportFormat),
     /// Open this folder in the system's file manager; the dialog stays open.
     ShowFolder(PathBuf),
+    /// Close the project and forget it. `files`: also send its .ghost file and tickets folder to the trash.
+    Delete {
+        files: bool,
+    },
 }
 
 impl ProjectForm {
@@ -110,6 +118,8 @@ impl ProjectForm {
             cli_options: clis,
             default_prompt: prompt.to_string(),
             settings: ProjectSettings::default(),
+            ghost: None,
+            confirm_delete: false,
             error: None,
         }
     }
@@ -147,6 +157,8 @@ impl ProjectForm {
             cli_options: clis,
             default_prompt: prompt.to_string(),
             settings,
+            ghost: Some(p.ghost_path.clone()),
+            confirm_delete: false,
             error: None,
         }
     }
@@ -264,18 +276,29 @@ impl ProjectForm {
                 ui.label(RichText::new(hint).color(theme::TEXT_MUTED));
             }
             ui.separator();
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if self.editing { "Save" } else { "Create" };
-                if ui
-                    .add_enabled_ui(valid.is_ok(), |ui| accent_button(ui, label))
-                    .inner
-                    .clicked()
-                {
-                    outcome = Some(self.submit());
+            ui.horizontal(|ui| {
+                if self.editing && super::danger_button(ui, "Delete").clicked() {
+                    self.confirm_delete = true;
                 }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if self.editing { "Save" } else { "Create" };
+                    if ui
+                        .add_enabled_ui(valid.is_ok(), |ui| accent_button(ui, label))
+                        .inner
+                        .clicked()
+                    {
+                        outcome = Some(self.submit());
+                    }
+                });
             });
         });
-        if modal.should_close() && outcome.is_none() {
+        if self.confirm_delete {
+            match delete_choice(ctx, &self.name, self.ghost.as_deref()) {
+                Some(Some(files)) => outcome = Some(ProjectOutcome::Delete { files }),
+                Some(None) => self.confirm_delete = false,
+                None => {}
+            }
+        } else if modal.should_close() && outcome.is_none() {
             outcome = Some(ProjectOutcome::Cancel);
         }
         outcome
@@ -490,6 +513,43 @@ impl ProjectForm {
     }
 }
 
+/// Asks whether deleting the project should leave its files or trash them too. `Some(Some(files))` once chosen,
+/// `Some(None)` when cancelled.
+fn delete_choice(ctx: &egui::Context, name: &str, ghost: Option<&std::path::Path>) -> Option<Option<bool>> {
+    let mut choice = None;
+    let file = ghost
+        .and_then(|g| g.file_name())
+        .map_or("the .ghost file".to_string(), |f| f.to_string_lossy().into_owned());
+    let trash = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+    let modal = super::show_modal(ctx, "delete_project", |ui| {
+        ui.set_width(460.0);
+        ui.label(RichText::new(format!("Delete {}?", name.trim())).size(18.0).strong());
+        ui.label("Remove from GhostLane closes the project and leaves all its files where they are.");
+        ui.label(format!(
+            "Delete Files also moves {file} and the tickets folder to the {trash}. Everything else in the project \
+             folder stays."
+        ));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                choice = Some(None);
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if super::danger_button(ui, "Delete Files").clicked() {
+                    choice = Some(Some(true));
+                }
+                if ui.button("Remove from GhostLane").clicked() {
+                    choice = Some(Some(false));
+                }
+            });
+        });
+    });
+    if modal.should_close() && choice.is_none() {
+        choice = Some(None);
+    }
+    choice
+}
+
 /// Commit, push and test command for the project.
 fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings) {
     ui.label("Settings");
@@ -619,6 +679,60 @@ mod tests {
         h.get_by_label_contains("Board as Markdown report").click();
         h.run();
         assert_eq!(h.state().1, Some("markdown"));
+    }
+
+    #[test]
+    fn delete_offers_keeping_or_trashing_the_files() {
+        let h = harness();
+        assert!(
+            h.query_by_label("Delete").is_none(),
+            "nothing to delete for a new project"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let p = Project::create(d.path(), "P", &["To Do".into()]).unwrap();
+        let form = ProjectForm::edit(&p, vec!["claude".into()], "Do", ProjectSettings::default());
+        let mut h = Harness::new_ui_state(
+            |ui, (form, out): &mut (ProjectForm, Vec<String>)| match form.show(ui.ctx()) {
+                Some(ProjectOutcome::Delete { files }) => out.push(format!("delete files={files}")),
+                Some(ProjectOutcome::Cancel) => out.push("cancel".into()),
+                _ => {}
+            },
+            (form, Vec::new()),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(egui::vec2(900.0, 1000.0));
+        h.run_steps(3);
+        // Bottom left, on the row with Save.
+        let delete = h.get_by_label("Delete").rect();
+        let save = h.get_by_label("Save").rect();
+        assert!(delete.right() < save.left() && (delete.center().y - save.center().y).abs() < 2.0);
+        let name = h.get_by_label("Name").rect();
+        assert!((delete.left() - name.left()).abs() < 2.0, "lines up with the left edge");
+        // Red outline and text; filled red with dark text on hover.
+        let text = |h: &Harness<'static, (ProjectForm, Vec<String>)>| {
+            h.output().shapes.iter().find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Delete" => t.override_text_color,
+                _ => None,
+            })
+        };
+        assert_eq!(text(&h), Some(theme::DANGER));
+        h.get_by_label("Delete").hover();
+        h.run();
+        assert_eq!(text(&h), Some(theme::ACCENT_TEXT));
+
+        h.get_by_label("Delete").click();
+        h.run();
+        assert!(h.query_by_label_contains("p.ghost and the tickets folder").is_some());
+        h.get_by_label("Cancel").click();
+        h.run();
+        assert!(h.state().1.is_empty(), "cancelling keeps the dialog open");
+        h.get_by_label("Delete").click();
+        h.run();
+        h.get_by_label("Remove from GhostLane").click();
+        h.run();
+        h.get_by_label("Delete Files").click();
+        h.run();
+        assert_eq!(h.state().1, ["delete files=false", "delete files=true"]);
     }
 
     #[test]

@@ -162,6 +162,38 @@ fn paint_glyph(
     }
 }
 
+/// Red-outlined button with red text for destructive actions; on hover it fills red and the text turns dark.
+pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let size = (galley.size() + ui.spacing().button_padding * 2.0).max(egui::vec2(0.0, ui.spacing().interact_size.y));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, galley.text()));
+    if ui.is_rect_visible(rect) {
+        let (fill, text) = if response.hovered() {
+            (theme::DANGER, theme::ACCENT_TEXT)
+        } else {
+            (Color32::TRANSPARENT, theme::DANGER)
+        };
+        let radius = ui.visuals().widgets.inactive.corner_radius;
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            radius,
+            fill,
+            egui::Stroke::new(1.0, theme::DANGER),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, text);
+    }
+    pointer(response)
+}
+
 pub fn accent_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(Button::new(RichText::new(text).color(theme::ACCENT_TEXT).strong()).fill(theme::ACCENT))
 }

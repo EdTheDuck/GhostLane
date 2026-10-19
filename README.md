@@ -106,7 +106,7 @@ Click a card to read it with the Markdown fully rendered, including its run hist
 
 ### Boards shaped to your workflow
 
-New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that: drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. This is also where you pick the project's AI CLI, and where the terminal icon on each column opens that column's ▶ command.
+New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that: drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. Done with a project? **Delete** at the bottom left either just removes it from GhostLane, leaving every file in place, or also moves its `.ghost` file and `tickets/` folder to the Recycle Bin or Trash; nothing else in the folder is touched. This is also where you pick the project's AI CLI, and where the terminal icon on each column opens that column's ▶ command.
 
 ![Editing a project's columns and AI CLI](docs/screenshots/project.png)
 
