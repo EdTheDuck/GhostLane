@@ -181,29 +181,68 @@ fn dependency_arrows(ui: &Ui, p: &Project, id: u32, cards: &[(u32, egui::Rect, b
     }
 }
 
-/// A curved arrow from card `a` to card `b`: side to side between columns, round the right edge within one.
+/// An arrow from card `a` to card `b`: a curve side to side between columns, a bracket round the right edge within
+/// one.
 fn arrow(painter: &egui::Painter, a: egui::Rect, b: egui::Rect, color: egui::Color32) {
-    let reach = ((a.center().x - b.center().x).abs() / 2.0).max(40.0);
-    let (start, end, out, back) = if (a.center().x - b.center().x).abs() < 1.0 {
-        (a.right_center(), b.right_center(), reach, reach)
-    } else if a.center().x < b.center().x {
-        (a.right_center(), b.left_center(), reach, -reach)
+    let (line, head) = connector(a, b);
+    painter.add(egui::Shape::line(line, Stroke::new(2.0, color)));
+    painter.add(egui::Shape::convex_polygon(head.to_vec(), color, Stroke::NONE));
+}
+
+/// The line of an arrow from card `a` to card `b`, and its head. The line stops where the head starts and arrives
+/// level with it, so the two always line up.
+fn connector(a: egui::Rect, b: egui::Rect) -> (Vec<egui::Pos2>, [egui::Pos2; 3]) {
+    const HEAD: f32 = 9.0;
+    let same_column = (a.center().x - b.center().x).abs() < 1.0;
+    let (start, end, dir) = if same_column || a.center().x > b.center().x {
+        let start = if same_column { a.right_center() } else { a.left_center() };
+        (start, b.right_center(), vec2(-1.0, 0.0))
     } else {
-        (a.left_center(), b.right_center(), -reach, reach)
+        (a.right_center(), b.left_center(), vec2(1.0, 0.0))
     };
-    let stroke = Stroke::new(2.0, color);
-    let points = [start, start + vec2(out, 0.0), end + vec2(back, 0.0), end];
-    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-        points,
+    let base = end - dir * HEAD;
+    let side = dir.rot90() * 5.0;
+    let head = [end, base + side, base - side];
+    if same_column {
+        // Out to the right, down (or up) the gap beside the column, and back in.
+        let x = start.x.max(base.x) + 20.0;
+        let corners = [start, egui::pos2(x, start.y), egui::pos2(x, base.y), base];
+        return (rounded(&corners, 8.0), head);
+    }
+    // A short straight run into the head, so the bend never shows under it.
+    let lead = base - dir * 8.0;
+    let reach = ((lead.x - start.x).abs() / 2.0).max(30.0);
+    let curve = egui::epaint::CubicBezierShape::from_points_stroke(
+        [start, start + dir * reach, lead - dir * reach, lead],
         false,
         egui::Color32::TRANSPARENT,
-        stroke,
-    ));
-    // The curve arrives travelling away from its last control point.
-    let dir = vec2(-back.signum(), 0.0);
-    let side = dir.rot90() * 5.0;
-    let head = vec![end, end - dir * 9.0 + side, end - dir * 9.0 - side];
-    painter.add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
+        Stroke::NONE,
+    );
+    let mut line = curve.flatten(Some(0.5));
+    line.push(base);
+    (line, head)
+}
+
+/// The polyline through `points` with its corners rounded to `radius` (less where the sides are short).
+fn rounded(points: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
+    let mut out = vec![points[0]];
+    for w in points.windows(3) {
+        let (prev, corner, next) = (w[0], w[1], w[2]);
+        let r = radius
+            .min((corner - prev).length() / 2.0)
+            .min((next - corner).length() / 2.0);
+        let from = corner + (prev - corner).normalized() * r;
+        let to = corner + (next - corner).normalized() * r;
+        for i in 0..=6 {
+            let t = i as f32 / 6.0;
+            // Quadratic Bézier with the corner as its control point.
+            let p =
+                from.to_vec2() * (1.0 - t) * (1.0 - t) + corner.to_vec2() * 2.0 * t * (1.0 - t) + to.to_vec2() * t * t;
+            out.push(p.to_pos2());
+        }
+    }
+    out.extend(points.last());
+    out
 }
 
 /// The selected tickets in board order: columns left to right, each top to bottom.
@@ -1110,6 +1149,36 @@ mod tests {
         h.get_by_label("ui").hover();
         h.run();
         assert_eq!(color(&h), Some(theme::ACCENT));
+    }
+
+    #[test]
+    fn arrow_lines_meet_their_heads_level() {
+        let card = |x: f32, y: f32| egui::Rect::from_min_size(egui::pos2(x, y), vec2(280.0, 60.0));
+        for (a, b) in [
+            (card(0.0, 0.0), card(0.0, 400.0)),   // far down the same column
+            (card(0.0, 400.0), card(0.0, 0.0)),   // up the same column
+            (card(0.0, 0.0), card(0.0, 70.0)),    // right below
+            (card(0.0, 300.0), card(600.0, 0.0)), // a column to the right
+            (card(600.0, 0.0), card(0.0, 300.0)), // a column to the left
+        ] {
+            let (line, [tip, l, r]) = connector(a, b);
+            let base = egui::pos2((l.x + r.x) / 2.0, (l.y + r.y) / 2.0);
+            let (last, before) = (line[line.len() - 1], line[line.len() - 2]);
+            assert!(
+                (last - base).length() < 0.01,
+                "line ends at the head: {last:?} {base:?}"
+            );
+            assert!((last.y - before.y).abs() < 0.5, "arrives level: {before:?} -> {last:?}");
+            assert!((tip.y - base.y).abs() < 0.01 && (tip - base).length() > 8.0);
+            assert!(
+                tip == b.left_center() || tip == b.right_center(),
+                "points at b's side: {tip:?}"
+            );
+            assert!(
+                line[0] == a.left_center() || line[0] == a.right_center(),
+                "leaves a's side"
+            );
+        }
     }
 
     /// The colour a pill's text is painted in.
