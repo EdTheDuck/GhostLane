@@ -49,9 +49,31 @@ name = "GhostLane Project"
 description = "GhostLane Project"
 mime-type = "application/x-ghostlane"
 
-# Teaches Linux desktops that *.ghost files are GhostLane projects.
+# Teaches Linux desktops that *.ghost files are GhostLane projects, shown with the greyscale ghost.
 [package.metadata.packager.deb.files]
 "packaging/ghostlane-mime.xml" = "usr/share/mime/packages/ghostlane.xml"
+"assets/icons/file/32x32.png" = "usr/share/icons/hicolor/32x32/mimetypes/application-x-ghostlane.png"
+"assets/icons/file/64x64.png" = "usr/share/icons/hicolor/64x64/mimetypes/application-x-ghostlane.png"
+"assets/icons/file/128x128.png" = "usr/share/icons/hicolor/128x128/mimetypes/application-x-ghostlane.png"
+"assets/icons/file/256x256.png" = "usr/share/icons/hicolor/256x256/mimetypes/application-x-ghostlane.png"
+"assets/icons/file/512x512.png" = "usr/share/icons/hicolor/512x512/mimetypes/application-x-ghostlane.png"
 
 [package.metadata.packager.nsis]
 installer-icon = "assets/icons/ghostlane.ico"
+# The packager associates files with the exe's first icon, the app's own. This replaces its macro (it is inserted
+# before the install section that uses it) so .ghost files get the greyscale ghost, icon index 1 (see build.rs).
+preinstall-section = '''
+!macroundef APP_ASSOCIATE
+!macro APP_ASSOCIATE EXT FILECLASS DESCRIPTION ICON COMMANDTEXT COMMAND
+  ReadRegStr $R0 SHELL_CONTEXT "Software\Classes\.${EXT}" ""
+  WriteRegStr SHELL_CONTEXT "Software\Classes\.${EXT}" "${FILECLASS}_backup" "$R0"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\.${EXT}" "" "${FILECLASS}"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\${FILECLASS}" "" `${DESCRIPTION}`
+  WriteRegStr SHELL_CONTEXT "Software\Classes\${FILECLASS}\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,1"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\${FILECLASS}\shell" "" "open"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\${FILECLASS}\shell\open" "" `${COMMANDTEXT}`
+  WriteRegStr SHELL_CONTEXT "Software\Classes\${FILECLASS}\shell\open\command" "" `${COMMAND}`
+  ; Explorer only redraws file icons when told associations changed.
+  System::Call "shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)"
+!macroend
+'''
