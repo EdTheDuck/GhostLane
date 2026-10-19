@@ -384,13 +384,18 @@ fn parse_blocked(text: &str, own: u32) -> Result<Vec<u32>, String> {
     Ok(ids)
 }
 
-/// (id, title) of the `tickets` matching `query` by number or title words, leaving out `own` and those in `taken`.
-fn blocker_options<'a>(tickets: &'a [(u32, String)], own: u32, query: &str, taken: &[u32]) -> Vec<&'a (u32, String)> {
+/// The `tickets` matching `query` by number or title words, leaving out `own` and those in `taken`.
+fn blocker_options<'a>(
+    tickets: &'a [(u32, Priority, String)],
+    own: u32,
+    query: &str,
+    taken: &[u32],
+) -> Vec<&'a (u32, Priority, String)> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     tickets
         .iter()
-        .filter(|(id, _)| *id != own && !taken.contains(id))
-        .filter(|(id, title)| {
+        .filter(|(id, _, _)| *id != own && !taken.contains(id))
+        .filter(|(id, _, title)| {
             let text = format!("{} {id} {}", format_id(*id), title.to_lowercase());
             words.iter().all(|w| text.contains(w))
         })
@@ -399,8 +404,8 @@ fn blocker_options<'a>(tickets: &'a [(u32, String)], own: u32, query: &str, take
 
 /// The tickets matching what is being typed after the last comma of `blocked`; clicking one puts its number there.
 /// True when one was picked.
-fn blocker_list(ui: &mut Ui, own: u32, tickets: &[(u32, String)], blocked: &mut String) -> bool {
-    ui.set_width(ui.available_width());
+fn blocker_list(ui: &mut Ui, own: u32, tickets: &[(u32, Priority, String)], blocked: &mut String) -> bool {
+    ui.set_width(BLOCKER_LIST_WIDTH);
     let (head, typing) = match blocked.rfind(',') {
         Some(i) => blocked.split_at(i + 1),
         None => ("", blocked.as_str()),
@@ -427,11 +432,8 @@ fn blocker_list(ui: &mut Ui, own: u32, tickets: &[(u32, String)], blocked: &mut 
         .max_height(180.0)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (id, title) in options {
-                let row = egui::Button::new(format!("{}  {}", format_id(*id), title.replace(['\n', '\r'], " ")))
-                    .frame(false)
-                    .truncate();
-                if ui.add_sized(vec2(ui.available_width(), 28.0), row).clicked() {
+            for (id, priority, title) in options {
+                if ticket_row(ui, *id, *priority, title).clicked() {
                     picked = Some(*id);
                 }
             }
@@ -442,6 +444,37 @@ fn blocker_list(ui: &mut Ui, own: u32, tickets: &[(u32, String)], blocked: &mut 
         head => format!("{head}, {}, ", format_id(id)),
     };
     true
+}
+
+const BLOCKER_LIST_WIDTH: f32 = 440.0;
+
+/// A row of the Blocked by dropdown: priority icon, number and title, left aligned on one line.
+fn ticket_row(ui: &mut Ui, id: u32, priority: Priority, title: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), egui::Sense::click());
+    let title = title.replace(['\n', '\r'], " ");
+    let label = format!("{}  {title}", format_id(id));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 4, theme::CARD_HOVER);
+        }
+        let font = egui::FontId::proportional(14.0);
+        let mut job = LayoutJob::default();
+        let icon = super::priority_icon(priority);
+        job.append(
+            icon.text(),
+            0.0,
+            TextFormat::simple(font.clone(), super::priority_color(priority)),
+        );
+        let id_font = egui::FontId::monospace(13.0);
+        job.append(&format_id(id), 10.0, TextFormat::simple(id_font, theme::TEXT_MUTED));
+        job.append(&title, 10.0, TextFormat::simple(font, theme::TEXT));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 16.0);
+        let galley = ui.painter().layout_job(job);
+        let pos = egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(pos, galley, theme::TEXT);
+    }
+    super::pointer(response)
 }
 
 fn blocked_text(ids: &[u32]) -> String {
@@ -481,8 +514,8 @@ pub struct TicketForm {
     blocked_list: Option<egui::Rect>,
     /// Give the Blocked by field the keyboard back after a ticket was picked from the list.
     blocked_refocus: bool,
-    /// (id, title) of the project's tickets, offered in the Blocked by dropdown.
-    pub tickets: Vec<(u32, String)>,
+    /// The project's tickets, offered in the Blocked by dropdown.
+    pub tickets: Vec<(u32, Priority, String)>,
     /// Comma-separated labels, as typed.
     labels: String,
     confirm_discard: bool,
@@ -591,6 +624,7 @@ impl TicketForm {
                 super::pointer(combo.response);
                 ui.add_space(16.0);
                 ui.label("Blocked by");
+                let own = t.id;
                 let field = ui
                     .add(
                         TextEdit::singleline(&mut self.blocked)
@@ -619,6 +653,26 @@ impl TicketForm {
                     let on_list = self.blocked_list.zip(pointer).is_some_and(|(r, p)| r.contains(p));
                     self.blocked_open &= on_list;
                 }
+                // Drops down over the form rather than pushing it down.
+                self.blocked_list = None;
+                if self.blocked_open {
+                    let shown = egui::Area::new(field.id.with("blocker_list"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(field.rect.left_bottom() + vec2(0.0, 4.0))
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::new()
+                                .fill(theme::CARD)
+                                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                                .corner_radius(6)
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| blocker_list(ui, own, &self.tickets, &mut self.blocked))
+                                .inner
+                        });
+                    // Drawn and hit-tested right above the modal it belongs to.
+                    ui.ctx().set_sublayer(ui.layer_id(), shown.response.layer_id);
+                    self.blocked_list = Some(shown.response.rect);
+                    self.blocked_refocus = shown.inner;
+                }
                 ui.add_space(16.0);
                 ui.label("Labels");
                 ui.add(
@@ -633,17 +687,6 @@ impl TicketForm {
                     ui.label("Runs");
                 });
             });
-            self.blocked_list = None;
-            if self.blocked_open {
-                let (own, tickets) = (self.ticket.id, &self.tickets);
-                let shown = egui::Frame::new()
-                    .fill(theme::CARD)
-                    .corner_radius(6)
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| blocker_list(ui, own, tickets, &mut self.blocked));
-                self.blocked_list = Some(shown.response.rect);
-                self.blocked_refocus = shown.inner;
-            }
             let t = &mut self.ticket;
             let blocked = parse_blocked(&self.blocked, t.id);
 
@@ -998,15 +1041,15 @@ mod tests {
     #[test]
     fn blocked_by_picker_searches_and_appends() {
         let tickets = vec![
-            (1, "Login page".to_string()),
-            (2, "Logout button".to_string()),
-            (3, "Signup".to_string()),
-            (12, "Account table".to_string()),
+            (1, Priority::High, "Login page".to_string()),
+            (2, Priority::Low, "Logout button".to_string()),
+            (3, Priority::Medium, "Signup".to_string()),
+            (12, Priority::Highest, "Account table".to_string()),
         ];
         let ids = |q: &str, taken: &[u32]| {
             blocker_options(&tickets, 3, q, taken)
                 .iter()
-                .map(|(id, _)| *id)
+                .map(|(id, _, _)| *id)
                 .collect::<Vec<_>>()
         };
         assert_eq!(ids("", &[]), [1, 2, 12]); // never itself
@@ -1029,8 +1072,20 @@ mod tests {
         h.run_steps(3);
         // Real pointer clicks: the field loses the keyboard on press, and the list must survive that.
         let field = h.get_by_label("Blocked by").rect().right_center() + vec2(60.0, 0.0);
+        let labels_before = h.get_by_label("Labels").rect();
         pointer_click(&mut h, field);
         assert!(h.query_by_label("00002  Logout button").is_some(), "the list shows");
+        assert_eq!(h.get_by_label("Labels").rect(), labels_before, "the form stays put");
+        let description = h.get_by_label("Description").rect();
+        let row = h.get_by_label("00002  Logout button").rect();
+        assert!(
+            row.top() > field.y && row.top() < description.bottom() + 100.0,
+            "it drops over the form: row {row:?}, description {description:?}"
+        );
+        // Left aligned: the number starts at the row's left edge, wherever the title ends.
+        let logout = h.get_by_label("00002  Logout button").rect();
+        let account = h.get_by_label("00012  Account table").rect();
+        assert_eq!(logout.left(), account.left());
         assert!(h.query_by_label("00001  Login page").is_none(), "already listed");
         h.event(egui::Event::Text(", acc".into()));
         h.run();

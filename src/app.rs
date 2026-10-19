@@ -452,8 +452,13 @@ impl App {
     /// The ticket form as a modal, offering the active project's tickets for Blocked by.
     fn ticket_form(&self, mut form: TicketForm) -> Modal {
         if let Some(p) = self.active_project() {
-            form.tickets = p.tickets.iter().flatten().map(|t| (t.id, t.title.clone())).collect();
-            form.tickets.sort_by_key(|(id, _)| *id);
+            form.tickets = p
+                .tickets
+                .iter()
+                .flatten()
+                .map(|t| (t.id, t.priority, t.title.clone()))
+                .collect();
+            form.tickets.sort_by_key(|(id, _, _)| *id);
         }
         Modal::EditTicket(Box::new(form))
     }
