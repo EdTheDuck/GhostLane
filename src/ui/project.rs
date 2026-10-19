@@ -6,6 +6,7 @@ use egui_dnd::{DragDropItem, dnd};
 use egui_phosphor::regular as icon;
 
 use super::{accent_button, icon_button};
+use crate::app::ExportFormat;
 use crate::config::ProjectSettings;
 use crate::project::{
     AutoMove, ColumnEdit, DEFAULT_AUTO_MOVES, DEFAULT_COLUMNS, DEFAULT_PROMPTS, Project, find_ghost_file, folder_name,
@@ -73,6 +74,8 @@ pub enum ProjectOutcome {
         settings: ProjectSettings,
     },
     OpenExisting(PathBuf),
+    /// Save the board to a file; the dialog stays open.
+    Export(ExportFormat),
 }
 
 impl ProjectForm {
@@ -226,6 +229,21 @@ impl ProjectForm {
             self.removed_ui(ui);
             ui.add_space(8.0);
             settings_ui(ui, &mut self.settings);
+            if self.editing {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Export");
+                    if ui.button(format!("{}  Tickets as CSV…", icon::TABLE)).clicked() {
+                        outcome = Some(ProjectOutcome::Export(ExportFormat::Csv));
+                    }
+                    if ui
+                        .button(format!("{}  Board as Markdown report…", icon::FILE_TEXT))
+                        .clicked()
+                    {
+                        outcome = Some(ProjectOutcome::Export(ExportFormat::Markdown));
+                    }
+                });
+            }
 
             ui.add_space(12.0);
             let valid = self.validation();
@@ -567,6 +585,29 @@ mod tests {
         h.get_by_label(icon::X).click();
         h.run();
         assert_eq!(h.state().1, Some(true));
+    }
+
+    #[test]
+    fn export_is_offered_when_editing_only() {
+        let h = harness();
+        assert!(h.query_by_label_contains("Tickets as CSV").is_none());
+        let d = tempfile::tempdir().unwrap();
+        let p = Project::create(d.path(), "P", &["To Do".into()]).unwrap();
+        let form = ProjectForm::edit(&p, vec!["claude".into()], "Do", ProjectSettings::default());
+        let mut h = Harness::new_ui_state(
+            |ui, (form, out): &mut (ProjectForm, Option<&'static str>)| {
+                if let Some(ProjectOutcome::Export(ExportFormat::Markdown)) = form.show(ui.ctx()) {
+                    *out = Some("markdown");
+                }
+            },
+            (form, None),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(egui::vec2(900.0, 1000.0));
+        h.run_steps(3);
+        h.get_by_label_contains("Board as Markdown report").click();
+        h.run();
+        assert_eq!(h.state().1, Some("markdown"));
     }
 
     #[test]

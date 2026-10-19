@@ -164,7 +164,7 @@ The chart icon in the title bar opens the project's stats: tickets done each day
 
 ### Take the board with you
 
-The export icon in the title bar saves the board as a **CSV file** of every ticket (number, title, column, priority, labels, runs, blockers and when it was done) for a spreadsheet, or as a **Markdown report** grouped by column, handy as a status update or a starting point for release notes.
+The **Export** buttons in the project dialog (the pencil next to the project name) save the board as a **CSV file** of every ticket (number, title, column, priority, labels, runs, blockers and when it was done) for a spreadsheet, or as a **Markdown report** grouped by column, handy as a status update or a starting point for release notes.
 
 ### Your AI knows the board
 

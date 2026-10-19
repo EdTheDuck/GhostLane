@@ -1900,6 +1900,8 @@ impl App {
     fn project_outcome(&mut self, outcome: ProjectOutcome, ctx: &egui::Context) {
         match outcome {
             ProjectOutcome::Cancel => self.modal = None,
+            // The dialog stays open.
+            ProjectOutcome::Export(format) => self.export(format),
             ProjectOutcome::OpenExisting(path) => {
                 self.modal = None;
                 self.open_path(path, ctx);
@@ -2025,18 +2027,6 @@ impl App {
                         if icon_button(ui, icon::MAGNIFYING_GLASS, &find).clicked() {
                             actions.push(Action::QuickOpen);
                         }
-                        if icon_button(ui, icon::CHART_BAR, "Project stats").clicked() {
-                            actions.push(Action::ShowStats);
-                        }
-                        let export = icon_button(ui, icon::EXPORT, "Export the board");
-                        Popup::menu(&export).show(|ui| {
-                            if ui.button(format!("{}  Tickets as CSV…", icon::TABLE)).clicked() {
-                                actions.push(Action::Export(ExportFormat::Csv));
-                            }
-                            if ui.button(format!("{}  Board as Markdown report…", icon::FILE_TEXT)).clicked() {
-                                actions.push(Action::Export(ExportFormat::Markdown));
-                            }
-                        });
                         let filtering = self.active.is_some_and(|i| self.projects[i].filter_open);
                         let idle = if filtering { theme::ACCENT } else { theme::TEXT };
                         if ui::glyph_button(ui, icon::FUNNEL, idle, theme::ACCENT, false)
@@ -2056,6 +2046,11 @@ impl App {
                         }
                         if icon_button(ui, icon::GEAR, "Settings").clicked() {
                             actions.push(Action::OpenSettings);
+                        }
+                        if self.active_project().is_some()
+                            && icon_button(ui, icon::CHART_BAR, "Project stats").clicked()
+                        {
+                            actions.push(Action::ShowStats);
                         }
                         ui.add_space(8.0);
                         if accent_button(ui, &format!("{}  New Project", icon::PLUS)).clicked() {
