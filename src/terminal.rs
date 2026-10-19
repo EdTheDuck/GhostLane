@@ -352,25 +352,29 @@ impl Terminals {
         }
     }
 
-    /// When the live session for `key` last printed output.
-    pub fn last_output(&self, key: &Path) -> Option<Instant> {
-        self.sessions
-            .get(key)
-            .filter(|(_, s)| !s.exited)
-            .and_then(|(_, s)| s.last_output)
-    }
-
-    /// Process id of the live shell for `key`.
-    pub fn shell_pid(&self, key: &Path) -> Option<u32> {
-        self.sessions
-            .get(key)
-            .filter(|(_, s)| !s.exited)
-            .map(|(_, s)| s.shell_pid())
+    /// The session for `key`, if its shell is still alive.
+    fn live(&self, key: &Path) -> Option<&Session> {
+        self.sessions.get(key).map(|(_, s)| s).filter(|s| !s.exited)
     }
 
     /// The session for `key`, if its shell is still alive.
     pub fn live_mut(&mut self, key: &Path) -> Option<&mut Session> {
         self.sessions.get_mut(key).map(|(_, s)| s).filter(|s| !s.exited)
+    }
+
+    /// When the live session for `key` last printed output.
+    pub fn last_output(&self, key: &Path) -> Option<Instant> {
+        self.live(key)?.last_output
+    }
+
+    /// Process id of the live shell for `key`.
+    pub fn shell_pid(&self, key: &Path) -> Option<u32> {
+        self.live(key).map(Session::shell_pid)
+    }
+
+    /// Is `program` running in the live shell for `key`?
+    pub fn runs(&self, key: &Path, program: &str) -> bool {
+        self.shell_pid(key).is_some_and(|pid| runs_program(pid, program))
     }
 
     /// Is there a session for `key`, alive or not?
@@ -380,7 +384,7 @@ impl Terminals {
 
     /// Is there a session for `key` whose shell is still alive?
     pub fn is_live(&self, key: &Path) -> bool {
-        self.sessions.get(key).is_some_and(|(_, s)| !s.exited)
+        self.live(key).is_some()
     }
 
     /// The session for `key`, starting one in `cwd` if needed. A new session runs `startup` first.

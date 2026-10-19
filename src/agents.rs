@@ -184,9 +184,6 @@ pub fn write_agents(p: &Project, cli: &str) -> io::Result<Vec<PathBuf>> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
         write_atomic(&path, &text)?;
     }
     Ok(skipped)

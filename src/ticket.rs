@@ -169,7 +169,11 @@ impl Ticket {
     }
 }
 
+/// Writes `contents` to a temp file beside `path`, then renames it over `path`. Creates missing folders.
 pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);

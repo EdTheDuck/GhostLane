@@ -1,7 +1,7 @@
 use egui::{Align, ComboBox, Layout, RichText, TextEdit};
 use egui_phosphor::regular as icon;
 
-use super::{accent_button, icon_button};
+use super::{accent_button, switch_row};
 use crate::config::Settings;
 use crate::project::AutoOrder;
 use crate::terminal::{AI_CLIS, detect_ai_clis, detect_shell};
@@ -61,14 +61,9 @@ impl SettingsForm {
         let mut outcome = None;
         let modal = super::show_modal(ctx, "settings_modal", |ui| {
             ui.set_width(560.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Settings").size(20.0).strong());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icon::X, "Close without saving").clicked() {
-                        outcome = Some(SettingsOutcome::Cancel);
-                    }
-                });
-            });
+            if super::modal_header(ui, "Settings", "Close without saving") {
+                outcome = Some(SettingsOutcome::Cancel);
+            }
             ui.add_space(6.0);
 
             ui.label(RichText::new("AI CLIs").strong());
@@ -83,12 +78,7 @@ impl SettingsForm {
                 .show(ui, |ui| {
                     for (n, (cli, on)) in AI_CLIS.iter().zip(&mut self.clis).enumerate() {
                         ui.horizontal(|ui| {
-                            super::toggle(ui, on);
-                            // The name toggles too, like a checkbox label.
-                            let name = ui.add(egui::Label::new(cli.name).sense(egui::Sense::click()));
-                            if super::pointer(name).clicked() {
-                                *on = !*on;
-                            }
+                            switch_row(ui, on, cli.name);
                             if self.installed.iter().any(|id| id == cli.id) {
                                 ui.label(RichText::new("installed").small().color(theme::ACCENT));
                             }
@@ -123,7 +113,8 @@ impl SettingsForm {
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Auto run limit").strong()).on_hover_text(
-                    "Auto skips a ticket once it has been sent to the AI this many times, so a ticket that keeps                      failing its tests doesn't loop forever. You can still run it with ▶.",
+                    "Auto skips a ticket once it has been sent to the AI this many times, so a ticket that keeps \
+                     failing its tests doesn't loop forever. You can still run it with ▶.",
                 );
                 let label = |n: u32| match n {
                     0 => "No limit".to_string(),
@@ -239,17 +230,6 @@ impl SettingsForm {
             notify_failed: self.notify_failed,
         }
     }
-}
-
-/// A switch with a label that toggles it too, like a checkbox label.
-fn switch_row(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText>) {
-    ui.horizontal(|ui| {
-        super::toggle(ui, on);
-        let label = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
-        if super::pointer(label).clicked() {
-            *on = !*on;
-        }
-    });
 }
 
 #[cfg(test)]

@@ -559,9 +559,6 @@ Anything else worth keeping, such as why a test failed.
         if updated == existing {
             return Ok(());
         }
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
         write_atomic(&path, &updated)
     }
 }

@@ -172,14 +172,7 @@ fn auto_toggle(ui: &mut Ui, auto: &mut HashSet<String>, folder: &str) {
     const TIP: &str = "Work on this column's tickets automatically when the queue is empty";
     let mut on = auto.contains(folder);
     ui.add_space(6.0);
-    // Right to left: the label lands to the right of the switch. Like a checkbox label, it toggles too.
-    let label = ui
-        .add(egui::Label::new("Auto").sense(Sense::click()))
-        .on_hover_text(TIP);
-    if super::pointer(label).clicked() {
-        on = !on;
-    }
-    super::toggle(ui, &mut on).on_hover_text(TIP);
+    super::switch_row(ui, &mut on, "Auto").on_hover_text(TIP);
     if on {
         auto.insert(folder.to_string());
     } else {
@@ -294,10 +287,12 @@ fn card_contents(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, flagged: b
                 }
                 if flagged {
                     let tip = format!(
-                        "Sent to the AI {} times, so Auto skips it. Press ▶ to run it anyway, or right-click to reset                          its run count.",
+                        "Sent to the AI {} times, so Auto skips it. Press ▶ to run it anyway, or right-click to reset \
+                         its run count.",
                         t.run_count
                     );
-                    ui.label(RichText::new(icon::FLAG).color(theme::DANGER)).on_hover_text(tip);
+                    ui.label(RichText::new(icon::FLAG).color(theme::DANGER))
+                        .on_hover_text(tip);
                 }
             });
             ui.label(title_job(ui, &t.title, width));
@@ -364,7 +359,6 @@ mod tests {
     use crate::project::Project;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
-    use std::collections::HashMap;
 
     /// The project, actions pushed, and whether the AI is engaged.
     type State = (OpenProject, Vec<Action>, bool);
@@ -396,14 +390,7 @@ mod tests {
             };
             p.add_ticket(1, t).unwrap();
         }
-        let op = OpenProject {
-            path: p.ghost_path.clone(),
-            project: Ok(p),
-            search: HashMap::new(),
-            queue: Vec::new(),
-            auto: HashSet::new(),
-            paused: false,
-        };
+        let op = OpenProject::new(p.ghost_path.clone(), Ok(p));
         let mut h = Harness::new_ui_state(
             |ui, (op, actions, engaged): &mut State| show(ui, op, *engaged, 3, actions),
             (op, Vec::new(), false),

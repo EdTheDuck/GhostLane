@@ -90,9 +90,6 @@ impl AppConfig {
 
     pub fn save(&self) -> io::Result<()> {
         let path = Self::path().ok_or_else(|| io::Error::other("no config directory"))?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
         let yaml = serde_yaml_ng::to_string(self).map_err(io::Error::other)?;
         write_atomic(&path, &yaml)
     }

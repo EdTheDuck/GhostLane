@@ -59,20 +59,19 @@ pub fn view(ctx: &egui::Context, t: &Ticket, cache: &mut CommonMarkCache) -> Opt
         ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
         ui.separator();
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            ui.label(RichText::new("Description").size(17.0).strong().color(theme::ACCENT));
-            ui.add_space(4.0);
-            markdown(ui, cache, &t.description);
-            if !t.test_scope.trim().is_empty() {
-                ui.add_space(16.0);
-                ui.label(RichText::new("Test Scope").size(17.0).strong().color(theme::ACCENT));
+            // Description always shows; the optional sections only when they have text.
+            let sections = [("Test Scope", &t.test_scope), ("Notes", &t.notes)];
+            let shown = sections.into_iter().filter(|(_, text)| !text.trim().is_empty());
+            for (i, (heading, text)) in std::iter::once(("Description", &t.description))
+                .chain(shown)
+                .enumerate()
+            {
+                if i > 0 {
+                    ui.add_space(16.0);
+                }
+                ui.label(RichText::new(heading).size(17.0).strong().color(theme::ACCENT));
                 ui.add_space(4.0);
-                markdown(ui, cache, &t.test_scope);
-            }
-            if !t.notes.trim().is_empty() {
-                ui.add_space(16.0);
-                ui.label(RichText::new("Notes").size(17.0).strong().color(theme::ACCENT));
-                ui.add_space(4.0);
-                markdown(ui, cache, &t.notes);
+                markdown(ui, cache, text);
             }
         });
     });
@@ -129,7 +128,6 @@ impl TicketForm {
     }
 
     fn new(mode: FormMode, ticket: Ticket) -> Self {
-        // New tickets start on AI Assisted; edits and pre-filled duplicates go straight to the form.
         // Open on AI Assisted, except duplicates, which arrive pre-filled for manual tweaks.
         let duplicate = matches!(mode, FormMode::Create { .. }) && !ticket.title.is_empty();
         let tab = if duplicate { Tab::Manual } else { Tab::Ai };
@@ -173,18 +171,7 @@ impl TicketForm {
                 FormMode::Edit => "Edit Ticket",
                 FormMode::Create { .. } => "New Ticket",
             };
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!("{heading} - {}", self.ticket.id_str()))
-                        .size(20.0)
-                        .strong(),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icon::X, "Close").clicked() {
-                        close = true;
-                    }
-                });
-            });
+            close = super::modal_header(ui, &format!("{heading} - {}", self.ticket.id_str()), "Close");
             tabs(ui, &mut self.tab);
             ui.add_space(4.0);
             if self.tab == Tab::Ai {

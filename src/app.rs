@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -28,22 +28,26 @@ pub struct OpenProject {
     /// Tickets to hand to the AI once it finishes the current one, in order.
     pub queue: Vec<u32>,
     /// Folders of the columns set to Auto. Kept in memory only, so a cloned repo never starts the AI by itself.
-    pub auto: std::collections::HashSet<String>,
+    pub auto: HashSet<String>,
     /// Start nothing new from the queue or Auto columns; the ticket the AI is on still finishes.
     pub paused: bool,
 }
 
 impl OpenProject {
-    fn load(path: PathBuf) -> Self {
-        let project = Project::load(&path).map_err(|e| e.to_string());
+    pub fn new(path: PathBuf, project: Result<Project, String>) -> Self {
         OpenProject {
             path,
             project,
             search: HashMap::new(),
             queue: Vec::new(),
-            auto: std::collections::HashSet::new(),
+            auto: HashSet::new(),
             paused: false,
         }
+    }
+
+    fn load(path: PathBuf) -> Self {
+        let project = Project::load(&path).map_err(|e| e.to_string());
+        Self::new(path, project)
     }
 
     pub fn name(&self) -> String {
@@ -87,13 +91,40 @@ pub enum Modal {
     },
 }
 
-/// A ticket the AI CLI is writing; GhostLane waits for its file to appear.
-pub struct Generation {
+/// The AI CLI that work was handed to, in the terminal of the project with .ghost `ghost`.
+struct CliWatch {
     ghost: PathBuf,
-    path: PathBuf,
     program: &'static str,
     started: Instant,
     next_alive_check: Instant,
+}
+
+impl CliWatch {
+    fn new(ghost: PathBuf, program: &'static str) -> Self {
+        let now = Instant::now();
+        CliWatch {
+            ghost,
+            program,
+            started: now,
+            // Give a freshly started CLI time to appear before checking it is alive.
+            next_alive_check: now + Duration::from_secs(8),
+        }
+    }
+
+    /// Has the CLI quit? Looked up every couple of seconds; false in between.
+    fn gone(&mut self, terminals: &Terminals, now: Instant) -> bool {
+        if now < self.next_alive_check {
+            return false;
+        }
+        self.next_alive_check = now + Duration::from_secs(2);
+        !terminals.runs(&self.ghost, self.program)
+    }
+}
+
+/// A ticket the AI CLI is writing; GhostLane waits for its file to appear.
+pub struct Generation {
+    cli: CliWatch,
+    path: PathBuf,
     /// When the file first appeared (or changed); it counts as written once it has been there a moment.
     seen: Option<Instant>,
     /// For updates: the file's modified time before the AI started. `None` = waiting for a new file.
@@ -123,17 +154,14 @@ impl Generation {
 
 /// A ticket the play button handed to the AI CLI.
 struct AiRun {
-    ghost: PathBuf,
+    cli: CliWatch,
     id: u32,
     /// Folder of the column the ticket was in when it started; ending up left of it means it failed.
     from: String,
-    started: Instant,
     started_at: std::time::SystemTime,
     /// The CLI's completion hook touches this when it finishes. `None` = the CLI has no hook, so a quiet
     /// terminal counts as finished.
     marker: Option<PathBuf>,
-    program: &'static str,
-    next_alive_check: Instant,
 }
 
 /// How a run ended.
@@ -328,20 +356,15 @@ impl App {
     pub fn add_project(&mut self, project: Project, ctx: &egui::Context) {
         let path = project.ghost_path.clone();
         let i = match self.projects.iter().position(|p| p.path == path) {
-            Some(i) => i,
+            Some(i) => {
+                self.projects[i].project = Ok(project);
+                i
+            }
             None => {
-                self.projects.push(OpenProject {
-                    path,
-                    project: Err(String::new()),
-                    search: HashMap::new(),
-                    queue: Vec::new(),
-                    auto: std::collections::HashSet::new(),
-                    paused: false,
-                });
+                self.projects.push(OpenProject::new(path, Ok(project)));
                 self.projects.len() - 1
             }
         };
-        self.projects[i].project = Ok(project);
         self.switch_to(i, ctx);
     }
 
@@ -464,8 +487,7 @@ impl App {
             settings: dir.join(format!("{name}.json")),
         };
         let json = terminal::claude_hook_settings(&hook)?;
-        let written = std::fs::create_dir_all(&dir).and_then(|()| crate::ticket::write_atomic(&hook.settings, &json));
-        if let Err(e) = written {
+        if let Err(e) = crate::ticket::write_atomic(&hook.settings, &json) {
             eprintln!("couldn't write {}: {e}", hook.settings.display());
             return None;
         }
@@ -547,7 +569,7 @@ impl App {
     /// Is project `i`'s AI on a ticket from the play button?
     fn ai_running(&self, i: usize) -> bool {
         let ghost = self.projects[i].project.as_ref().map(|p| &p.ghost_path);
-        self.ai_runs.iter().any(|r| ghost.is_ok_and(|g| *g == r.ghost))
+        self.ai_runs.iter().any(|r| ghost.is_ok_and(|g| *g == r.cli.ghost))
     }
 
     /// Stop button: interrupts the AI's current ticket, leaving it where it is, and pauses the queue.
@@ -555,7 +577,7 @@ impl App {
         self.projects[i].paused = true;
         let Ok(p) = &self.projects[i].project else { return };
         let key = p.ghost_path.clone();
-        self.ai_runs.retain(|r| r.ghost != key);
+        self.ai_runs.retain(|r| r.cli.ghost != key);
         let Ok(cli) = self.project_cli(p) else { return };
         if let Some(session) = self.terminals.live_mut(&key) {
             session.interrupt(cli.interrupt);
@@ -622,17 +644,12 @@ impl App {
         for e in errors {
             self.toast(e);
         }
-        let now = Instant::now();
         self.ai_runs.push(AiRun {
-            ghost: key,
+            cli: CliWatch::new(key, cli.program),
             id,
             from,
-            started: now,
             started_at,
             marker,
-            program: cli.program,
-            // Give a freshly started CLI time to appear before checking it is alive.
-            next_alive_check: now + Duration::from_secs(8),
         });
         true
     }
@@ -641,22 +658,14 @@ impl App {
     /// goes quiet.
     fn run_end(&self, run: &mut AiRun, now: Instant) -> Option<RunEnd> {
         let Some(marker) = &run.marker else {
-            let output = self.terminals.last_output(&run.ghost);
-            return (!ai_activity(Some(run.started), output, None, now).0).then_some(RunEnd::Finished);
+            let output = self.terminals.last_output(&run.cli.ghost);
+            return (!ai_activity(Some(run.cli.started), output, None, now).0).then_some(RunEnd::Finished);
         };
         let modified = std::fs::metadata(marker).and_then(|m| m.modified());
         if modified.is_ok_and(|m| m > run.started_at) {
             return Some(RunEnd::Finished);
         }
-        if now < run.next_alive_check {
-            return None;
-        }
-        run.next_alive_check = now + Duration::from_secs(2);
-        let alive = self
-            .terminals
-            .shell_pid(&run.ghost)
-            .is_some_and(|pid| terminal::runs_program(pid, run.program));
-        (!alive).then_some(RunEnd::CliGone)
+        run.cli.gone(&self.terminals, now).then_some(RunEnd::CliGone)
     }
 
     /// Once a project's AI CLI has finished a ticket, moves it into the next column if that column takes
@@ -682,7 +691,7 @@ impl App {
             let Some(p) = self
                 .projects
                 .iter_mut()
-                .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == run.ghost))
+                .find_map(|op| op.project.as_mut().ok().filter(|p| p.ghost_path == run.cli.ghost))
             else {
                 continue;
             };
@@ -724,7 +733,7 @@ impl App {
         let idle = self.generating.is_none()
             && ended
                 .iter()
-                .any(|(run, _)| !self.ai_runs.iter().any(|r| r.ghost == run.ghost));
+                .any(|(run, _)| !self.ai_runs.iter().any(|r| r.cli.ghost == run.cli.ghost));
         if attention || (idle && settings.notify_idle) {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
@@ -772,50 +781,48 @@ impl App {
     /// Asks the AI CLI to write a new ticket into column `col` and waits for it.
     fn start_generation(&mut self, col: usize, request: &str, ctx: &egui::Context) -> Result<(), String> {
         let p = self.active_project().ok_or("No project is open")?;
-        let cli = self.project_cli(p)?;
         let col = col.min(p.meta.columns.len().saturating_sub(1));
         let id = crate::ticket::format_id(p.meta.next_ticket_id);
         let path = p.column_dir(col).join(format!("{id}.md"));
-        let (key, root) = (p.ghost_path.clone(), p.root.clone());
         let prompt = terminal::ticket_request_prompt(request, &path, &id);
-        self.send_to_cli(&key, &root, cli, &prompt, ctx)?;
-        let now = Instant::now();
-        self.generating = Some(Generation {
-            ghost: key,
-            path,
-            program: cli.program,
-            started: now,
-            // Give a freshly started CLI time to appear before checking it is alive.
-            next_alive_check: now + Duration::from_secs(8),
-            seen: None,
-            baseline: None,
-            reopen: None,
-        });
-        Ok(())
+        self.start_writing(path, &prompt, None, ctx)
     }
 
     /// Asks the AI CLI to change ticket `id` in place and waits for its file to change.
     fn start_update(&mut self, id: u32, request: &str, ctx: &egui::Context) -> Result<(), String> {
-        let p = self.active_project().ok_or("No project is open")?;
-        let cli = self.project_cli(p)?;
         let (_, ticket) = self.find_ticket(id).ok_or("This ticket no longer exists on disk")?;
         let path = ticket.path.clone();
-        let baseline = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .map_err(|e| e.to_string())?;
-        let (key, root) = (p.ghost_path.clone(), p.root.clone());
         let prompt = terminal::ticket_update_prompt(request, &path, &crate::ticket::format_id(id));
-        self.send_to_cli(&key, &root, cli, &prompt, ctx)?;
-        let now = Instant::now();
+        self.start_writing(path, &prompt, Some(id), ctx)
+    }
+
+    /// Sends `prompt` to the active project's AI CLI and waits for it to write the ticket at `path`.
+    /// `update`: the ticket being changed in place, shown again once it lands.
+    fn start_writing(
+        &mut self,
+        path: PathBuf,
+        prompt: &str,
+        update: Option<u32>,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let p = self.active_project().ok_or("No project is open")?;
+        let cli = self.project_cli(p)?;
+        let baseline = match update {
+            Some(_) => Some(
+                std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .map_err(|e| e.to_string())?,
+            ),
+            None => None,
+        };
+        let (key, root) = (p.ghost_path.clone(), p.root.clone());
+        self.send_to_cli(&key, &root, cli, prompt, ctx)?;
         self.generating = Some(Generation {
-            ghost: key,
+            cli: CliWatch::new(key, cli.program),
             path,
-            program: cli.program,
-            started: now,
-            next_alive_check: now + Duration::from_secs(8),
             seen: None,
-            baseline: Some(baseline),
-            reopen: Some(id),
+            baseline,
+            reopen: update,
         });
         Ok(())
     }
@@ -867,17 +874,9 @@ impl App {
                 )),
                 Err(e) => Some(format!("Couldn't read the generated ticket: {e}")),
             }
-        } else if g.started.elapsed() > TIMEOUT {
+        } else if g.cli.started.elapsed() > TIMEOUT {
             Some("The AI didn't finish the ticket within 15 minutes.".to_string())
-        } else if now >= g.next_alive_check {
-            g.next_alive_check = now + Duration::from_secs(2);
-            let alive = self
-                .terminals
-                .shell_pid(&g.ghost)
-                .is_some_and(|pid| terminal::runs_program(pid, g.program));
-            if alive {
-                return;
-            }
+        } else if g.cli.gone(&self.terminals, now) {
             Some("The AI CLI stopped before it finished the ticket. Check the terminal for what happened.".to_string())
         } else {
             return;
@@ -945,9 +944,7 @@ impl App {
                 };
                 if icon_button(ui, glyph, tip).clicked() {
                     self.config.terminal_collapsed = !collapsed;
-                    if let Err(e) = self.config.save() {
-                        eprintln!("couldn't save settings: {e}");
-                    }
+                    self.save_config();
                 }
                 ui.label(RichText::new(format!("{}  Terminal", icon::TERMINAL_WINDOW)).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -959,9 +956,7 @@ impl App {
                         .clicked()
                     {
                         self.config.queue_open = !queue_open;
-                        if let Err(e) = self.config.save() {
-                            eprintln!("couldn't save settings: {e}");
-                        }
+                        self.save_config();
                     }
                     let Some(i) = self.active else { return };
                     let running = self.ai_running(i);
@@ -1310,10 +1305,7 @@ impl App {
                 .active_project()
                 .and_then(|p| self.project_cli(p).ok())
                 .map(|c| c.program);
-            self.cli_running = match (self.terminals.shell_pid(&key), program) {
-                (Some(pid), Some(program)) => terminal::runs_program(pid, program),
-                _ => false,
-            };
+            self.cli_running = program.is_some_and(|program| self.terminals.runs(&key, program));
         }
         self.cli_running
     }
@@ -1546,29 +1538,19 @@ impl eframe::App for App {
 
         let inset = ui::chrome::maximized_overflow(&ctx);
         if inset > 0.0 {
-            let pad = Frame::new().fill(theme::PANEL);
-            egui::Panel::top("max_inset_top")
-                .exact_size(inset)
-                .frame(pad)
-                .show_separator_line(false)
-                .show(ui, |_| {});
-            egui::Panel::bottom("max_inset_bottom")
-                .exact_size(inset)
-                .frame(pad)
-                .show_separator_line(false)
-                .show(ui, |_| {});
-            egui::Panel::left("max_inset_left")
-                .exact_size(inset)
-                .resizable(false)
-                .frame(pad)
-                .show_separator_line(false)
-                .show(ui, |_| {});
-            egui::Panel::right("max_inset_right")
-                .exact_size(inset)
-                .resizable(false)
-                .frame(pad)
-                .show_separator_line(false)
-                .show(ui, |_| {});
+            for panel in [
+                egui::Panel::top("max_inset_top"),
+                egui::Panel::bottom("max_inset_bottom"),
+                egui::Panel::left("max_inset_left"),
+                egui::Panel::right("max_inset_right"),
+            ] {
+                panel
+                    .exact_size(inset)
+                    .resizable(false)
+                    .frame(Frame::new().fill(theme::PANEL))
+                    .show_separator_line(false)
+                    .show(ui, |_| {});
+            }
         }
         let busy = self.ai_busy();
         self.top_bar(ui, &mut actions, busy);
@@ -1613,13 +1595,9 @@ mod tests {
     use super::*;
 
     fn generation(path: PathBuf, baseline: Option<std::time::SystemTime>) -> Generation {
-        let now = Instant::now();
         Generation {
-            ghost: PathBuf::new(),
+            cli: CliWatch::new(PathBuf::new(), "claude"),
             path,
-            program: "claude",
-            started: now,
-            next_alive_check: now,
             seen: None,
             baseline,
             reopen: None,

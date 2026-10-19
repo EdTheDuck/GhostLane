@@ -155,14 +155,9 @@ impl ProjectForm {
         let modal = super::show_modal(ctx, "project_modal", |ui| {
             ui.set_width(540.0);
             let title = if self.editing { "Edit Project" } else { "New Project" };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(title).size(20.0).strong());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icon::X, "Close").clicked() {
-                        outcome = Some(ProjectOutcome::Cancel);
-                    }
-                });
-            });
+            if super::modal_header(ui, title, "Close") {
+                outcome = Some(ProjectOutcome::Cancel);
+            }
             ui.add_space(6.0);
 
             ui.label("Name");
@@ -286,13 +281,7 @@ impl ProjectForm {
             // Same rule as the board: tickets that arrive on "AI Working" get no play button.
             let has_play = state.index == 0 || row.auto_move != AutoMove::AiWorking;
             ui.horizontal(|ui| {
-                handle.ui(ui, |ui| {
-                    ui.label(
-                        RichText::new(icon::DOTS_SIX_VERTICAL)
-                            .size(18.0)
-                            .color(theme::TEXT_MUTED),
-                    );
-                });
+                handle.ui(ui, super::drag_handle);
                 ui.add(
                     TextEdit::singleline(&mut row.name)
                         .margin(super::INPUT_MARGIN)

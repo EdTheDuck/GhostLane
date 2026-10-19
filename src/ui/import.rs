@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Stroke};
 use egui_phosphor::regular as icon;
 
-use super::{accent_button, icon_button};
+use super::accent_button;
 use crate::theme;
 
 pub enum ImportOutcome {
@@ -54,14 +54,9 @@ impl ImportForm {
         }
         let modal = super::show_modal(ctx, "import_document", |ui| {
             ui.set_width(520.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Tickets from a Document").size(20.0).strong());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icon::X, "Close").clicked() {
-                        outcome = Some(ImportOutcome::Close);
-                    }
-                });
-            });
+            if super::modal_header(ui, "Tickets from a Document", "Close") {
+                outcome = Some(ImportOutcome::Close);
+            }
             ui.label(
                 RichText::new(
                     "Choose a technical spec, design document or project plan. Your AI reads it and writes a \

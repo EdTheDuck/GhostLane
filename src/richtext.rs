@@ -45,6 +45,16 @@ pub enum Flag {
     Code,
 }
 
+impl Style {
+    pub fn flag_mut(&mut self, flag: Flag) -> &mut bool {
+        match flag {
+            Flag::Bold => &mut self.bold,
+            Flag::Italic => &mut self.italic,
+            Flag::Code => &mut self.code,
+        }
+    }
+}
+
 impl Block {
     pub fn new(kind: Kind) -> Self {
         Block {
@@ -91,19 +101,10 @@ impl Block {
 
     /// Turns `flag` on for chars `range`, or off if every char there already has it.
     pub fn toggle(&mut self, range: std::ops::Range<usize>, flag: Flag) {
-        let get = |s: &Style| match flag {
-            Flag::Bold => s.bold,
-            Flag::Italic => s.italic,
-            Flag::Code => s.code,
-        };
         let range = range.start.min(self.styles.len())..range.end.min(self.styles.len());
-        let on = !self.styles[range.clone()].iter().all(get);
+        let on = !self.styles[range.clone()].iter_mut().all(|s| *s.flag_mut(flag));
         for s in &mut self.styles[range] {
-            match flag {
-                Flag::Bold => s.bold = on,
-                Flag::Italic => s.italic = on,
-                Flag::Code => s.code = on,
-            }
+            *s.flag_mut(flag) = on;
         }
     }
 

@@ -322,11 +322,8 @@ impl RichEditor {
                 .clone()
                 .or_else(|| start.checked_sub(1).and_then(|p| block.styles.get(p).cloned()))
                 .unwrap_or_default();
-            match flag {
-                Flag::Bold => s.bold = !s.bold,
-                Flag::Italic => s.italic = !s.italic,
-                Flag::Code => s.code = !s.code,
-            }
+            let f = s.flag_mut(flag);
+            *f = !*f;
             self.pending = Some(s);
         }
         self.focus = Some((i, sel));

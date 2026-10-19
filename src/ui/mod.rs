@@ -36,6 +36,41 @@ pub fn show_modal<R>(
     })
 }
 
+/// Modal title with an X on the right. True when the X is clicked.
+pub fn modal_header(ui: &mut Ui, title: &str, close_tip: &str) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(20.0).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            icon_button(ui, icon::X, close_tip).clicked()
+        })
+        .inner
+    })
+    .inner
+}
+
+/// A switch with a label that toggles it too, like a checkbox label.
+/// Returns the switch and label together, for a shared tooltip.
+pub fn switch_row(ui: &mut Ui, on: &mut bool, text: impl Into<egui::WidgetText>) -> Response {
+    ui.horizontal(|ui| {
+        let switch = toggle(ui, on);
+        let label = pointer(ui.add(egui::Label::new(text).sense(egui::Sense::click())));
+        if label.clicked() {
+            *on = !*on;
+        }
+        switch.union(label)
+    })
+    .inner
+}
+
+/// Drag handle for reorderable rows.
+pub fn drag_handle(ui: &mut Ui) {
+    ui.label(
+        RichText::new(icon::DOTS_SIX_VERTICAL)
+            .size(18.0)
+            .color(theme::TEXT_MUTED),
+    );
+}
+
 /// On/off switch. Track turns the accent colour when on; the knob slides across.
 pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(egui::vec2(36.0, 20.0), egui::Sense::click());

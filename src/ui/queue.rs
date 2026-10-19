@@ -22,13 +22,7 @@ pub fn show(ui: &mut Ui, queue: &mut Vec<u32>, project: Option<&Project>) {
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         dnd(ui, "ai_queue").show_vec(queue, |ui, id, handle, state| {
             ui.horizontal(|ui| {
-                handle.ui(ui, |ui| {
-                    ui.label(
-                        RichText::new(icon::DOTS_SIX_VERTICAL)
-                            .size(18.0)
-                            .color(theme::TEXT_MUTED),
-                    );
-                });
+                handle.ui(ui, super::drag_handle);
                 ui.label(RichText::new(format_id(*id)).monospace().color(theme::TEXT_MUTED));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if danger_icon_button(ui, icon::X, "Remove from queue").clicked() {
