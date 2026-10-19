@@ -143,14 +143,22 @@ pub fn priority_color(p: Priority) -> Color32 {
     }
 }
 
-/// A ticket label as a small rounded tag.
+/// A ticket label as a pill. Laid out on one line and sized to its text, so it never wraps or gets clipped.
 pub fn label_chip(ui: &mut Ui, label: &str) -> Response {
-    egui::Frame::new()
-        .fill(theme::BORDER)
-        .corner_radius(4)
-        .inner_margin(egui::Margin::symmetric(6, 1))
-        .show(ui, |ui| ui.label(RichText::new(label).small().color(theme::TEXT)))
-        .response
+    const PAD: egui::Vec2 = egui::vec2(10.0, 4.0);
+    let galley = egui::WidgetText::from(RichText::new(label).small().color(theme::TEXT)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Small,
+    );
+    let (rect, response) = ui.allocate_exact_size(galley.size() + PAD * 2.0, egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, rect.height() / 2.0, theme::BORDER);
+        ui.painter().galley(rect.min + PAD, galley, theme::TEXT);
+    }
+    response
 }
 
 pub fn priority_icon(p: Priority) -> RichText {

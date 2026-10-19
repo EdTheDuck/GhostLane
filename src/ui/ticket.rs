@@ -127,7 +127,7 @@ pub fn view(
         ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
         if !t.labels.is_empty() {
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 for l in &t.labels {
                     super::label_chip(ui, l);
                 }

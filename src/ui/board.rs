@@ -706,7 +706,7 @@ fn card_contents(
             ui.label(title_job(ui, &t.title, width));
             if !t.labels.is_empty() {
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                     for l in &t.labels {
                         super::label_chip(ui, l);
                     }
