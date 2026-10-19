@@ -193,7 +193,7 @@ The last column stays short: tickets that have been done for a while (a week by 
 
 ### Projects that switch in a click
 
-Open as many projects as you like and switch between them from the dropdown in the title bar. Each project keeps its own board, its own columns and its own terminal session. GhostLane remembers which projects you had open, and if a project's files have been moved or deleted, it drops it from the list on launch.
+Open as many projects as you like and switch between them from the dropdown in the title bar. Double-click a `.ghost` file in Explorer, Finder or your file manager to open it in GhostLane; if GhostLane is already running, the project opens in that window. Each project keeps its own board, its own columns and its own terminal session. GhostLane remembers which projects you had open, and if a project's files have been moved or deleted, it drops it from the list on launch.
 
 ### Your settings
 

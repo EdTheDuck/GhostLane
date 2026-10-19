@@ -42,5 +42,16 @@ before-packaging-command = "cargo build --release"
 binaries-dir = "target/release"
 out-dir = "dist"
 
+# Double-clicking a .ghost file opens it in GhostLane.
+[[package.metadata.packager.file-associations]]
+extensions = ["ghost"]
+name = "GhostLane Project"
+description = "GhostLane Project"
+mime-type = "application/x-ghostlane"
+
+# Teaches Linux desktops that *.ghost files are GhostLane projects.
+[package.metadata.packager.deb.files]
+"packaging/ghostlane-mime.xml" = "usr/share/mime/packages/ghostlane.xml"
+
 [package.metadata.packager.nsis]
 installer-icon = "assets/icons/ghostlane.ico"

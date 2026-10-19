@@ -304,13 +304,16 @@ pub struct App {
     /// Newer release found by the startup check, shown as a top bar button.
     update: Option<String>,
     update_rx: Option<Receiver<String>>,
+    /// .ghost files handed over by later launches (see `instance`).
+    handed_rx: Option<Receiver<PathBuf>>,
     watcher: Option<Watcher>,
     watch_tx: Sender<DebounceEventResult>,
     watch_rx: Receiver<DebounceEventResult>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// `open`: a .ghost file GhostLane was started with, opened and added to the projects.
+    pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
         let ctx = &cc.egui_ctx;
         egui_extras::install_image_loaders(ctx);
         theme::apply(ctx);
@@ -352,6 +355,7 @@ impl App {
             toasts: Vec::new(),
             update: None,
             update_rx: None,
+            handed_rx: None,
             watcher: None,
             watch_tx,
             watch_rx,
@@ -363,6 +367,15 @@ impl App {
             }
         }
         app.watch_active(ctx);
+        if let Some(path) = open {
+            app.open_path(path, ctx);
+        }
+        let (tx, rx) = mpsc::channel();
+        let wake = ctx.clone();
+        match crate::instance::listen(tx, move || wake.request_repaint()) {
+            Ok(()) => app.handed_rx = Some(rx),
+            Err(e) => eprintln!("can't take .ghost files from other launches: {e}"),
+        }
         if app.config.settings.check_for_updates {
             let (tx, rx) = mpsc::channel();
             let ctx = ctx.clone();
@@ -2413,6 +2426,15 @@ impl eframe::App for App {
         self.poll_jobs(&ctx);
         if let Some(v) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.update = Some(v);
+        }
+        let handed: Vec<PathBuf> = self
+            .handed_rx
+            .as_ref()
+            .map_or_else(Vec::new, |rx| rx.try_iter().collect());
+        for path in handed {
+            self.open_path(path, &ctx);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         let mut actions = Vec::new();
         self.shortcuts(&ctx, &mut actions);

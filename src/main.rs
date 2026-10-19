@@ -4,6 +4,7 @@ mod agents;
 mod app;
 mod config;
 mod git;
+mod instance;
 mod project;
 mod richtext;
 mod terminal;
@@ -131,6 +132,11 @@ fn main() -> eframe::Result {
         let _ = std::fs::write(marker, terminal::marker_contents(nanos, input.as_deref()));
         return Ok(());
     }
+    // A double-clicked .ghost file: hand it to the GhostLane already running, if there is one.
+    let open = instance::ghost_arg(&args);
+    if open.as_deref().is_some_and(instance::forward) {
+        return Ok(());
+    }
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("GhostLane")
         .with_inner_size([1280.0, 800.0])
@@ -153,6 +159,6 @@ fn main() -> eframe::Result {
             viewport,
             ..Default::default()
         },
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, open)))),
     )
 }
