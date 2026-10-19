@@ -104,7 +104,18 @@ fn quote(shell: &str, arg: &str) -> String {
     let name = file.strip_suffix(".exe").unwrap_or(&file);
     match name {
         // ponytail: double quotes are dropped for PowerShell/cmd; Windows PowerShell 5.1 mangles them in native args.
-        "pwsh" | "powershell" => format!("'{}'", arg.replace('"', "").replace('\'', "''")),
+        // PowerShell also ends single-quoted strings on the curly quotes ‘ ’ ‚ ‛; doubling any of them escapes it.
+        "pwsh" | "powershell" => {
+            let mut out = String::from("'");
+            for c in arg.chars().filter(|&c| c != '"') {
+                if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                    out.push(c);
+                }
+                out.push(c);
+            }
+            out.push('\'');
+            out
+        }
         "cmd" => format!("\"{}\"", arg.replace(['"', '%'], "")),
         _ => format!("'{}'", arg.replace('\'', r"'\''")),
     }
@@ -564,6 +575,9 @@ mod tests {
         assert_eq!(posix, r"claude '/tmp/x'\''; rm -rf ~; echo '\''/00001.md'");
         let ps = build_ai_command(claude(), "{ticket_path}", bad, "1", Path::new("/tmp"), "powershell.exe").unwrap();
         assert_eq!(ps, "claude '/tmp/x''; rm -rf ~; echo ''/00001.md'");
+        let curly = Path::new("C:/p/x’; calc; ‘‚‛/00001.md");
+        let ps = build_ai_command(claude(), "{ticket_path}", curly, "1", Path::new("/p"), "pwsh.exe").unwrap();
+        assert_eq!(ps, "claude 'C:/p/x’’; calc; ‘‘‚‚‛‛/00001.md'");
     }
 
     #[test]

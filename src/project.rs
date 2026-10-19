@@ -215,6 +215,18 @@ impl Project {
         let text = fs::read_to_string(ghost_path)?;
         let meta: GhostFile = serde_yaml_ng::from_str(&text)
             .map_err(|e| err(format!("{} is not a valid .ghost file: {e}", ghost_path.display())))?;
+        // Folders end up in paths and shell commands, and .ghost files can come from untrusted repos:
+        // only accept what `folder_name` would have produced.
+        let mut seen = HashSet::new();
+        for c in &meta.columns {
+            if folder_name(&c.folder).as_deref() != Some(c.folder.as_str()) || !seen.insert(&c.folder) {
+                return Err(err(format!(
+                    "{} has an invalid column folder \"{}\"",
+                    ghost_path.display(),
+                    c.folder.escape_default()
+                )));
+            }
+        }
         let root = ghost_path.parent().map(Path::to_path_buf).unwrap_or_default();
         let mut p = Project {
             ghost_path: ghost_path.to_path_buf(),
@@ -643,6 +655,29 @@ mod tests {
         assert_eq!(back.meta.ai_cli.as_deref(), Some("codex"));
         assert!(back.root.is_absolute());
         assert_eq!(back.root, d.path());
+    }
+
+    #[test]
+    fn load_refuses_unsafe_or_duplicate_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("p.ghost");
+        for folder in ["../../outside", "x’; calc; ’", "To Do", "", "a\nb"] {
+            let yaml = format!("name: P\ncolumns:\n- name: A\n  folder: {folder:?}\n");
+            fs::write(&path, yaml).unwrap();
+            assert!(Project::load(&path).is_err(), "{folder:?}");
+        }
+        fs::write(
+            &path,
+            "name: P\ncolumns:\n- {name: A, folder: a}\n- {name: B, folder: a}\n",
+        )
+        .unwrap();
+        assert!(Project::load(&path).is_err());
+        fs::write(
+            &path,
+            "name: P\ncolumns:\n- {name: A, folder: con_}\n- {name: B, folder: über_done}\n",
+        )
+        .unwrap();
+        assert!(Project::load(&path).is_ok());
     }
 
     #[test]
