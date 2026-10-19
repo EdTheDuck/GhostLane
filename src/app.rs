@@ -1568,14 +1568,14 @@ impl App {
                 };
                 let (t, last, root) = (t.clone(), p.last_col(), p.root.clone());
                 let last_name = p.meta.columns[last].name.clone();
-                let deps = self.dependencies(&t);
+                let links = self.links(&t);
                 let Some(Modal::ViewTicket(view)) = &mut self.modal else {
                     return;
                 };
                 if view.wants_changes() {
                     view.changes = Some(load_changes(&root, view.commit.as_deref(), &t));
                 }
-                match ticket_ui::view(ctx, view, &t, &deps, (col == last, &last_name), &mut self.md_cache) {
+                match ticket_ui::view(ctx, view, &t, &links, (col == last, &last_name), &mut self.md_cache) {
                     Some(ViewOutcome::Close) => self.modal = None,
                     Some(ViewOutcome::Edit) => self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(&t)))),
                     Some(ViewOutcome::Approve) => {
@@ -1592,6 +1592,7 @@ impl App {
                         self.modal = None;
                         self.reject(id, &note);
                     }
+                    Some(ViewOutcome::Open(other)) => self.open_ticket(other),
                     Some(ViewOutcome::Revert(commit)) => {
                         self.modal = None;
                         self.revert(id, commit, ctx);
@@ -1694,24 +1695,27 @@ impl App {
         }
     }
 
-    /// The tickets `t` is blocked by, with their titles and columns.
-    fn dependencies(&self, t: &Ticket) -> Vec<ticket_ui::Dependency> {
+    /// The tickets `t` is blocked by and those it blocks, with their titles and columns.
+    fn links(&self, t: &Ticket) -> ticket_ui::Links {
         let Some(p) = self.active_project() else {
-            return Vec::new();
+            return ticket_ui::Links::default();
         };
-        t.blocked_by
-            .iter()
-            .map(|&b| match p.find_ticket(b) {
-                Some((c, dep)) => ticket_ui::Dependency {
-                    label: format!("{} {} ({})", dep.id_str(), dep.title, p.meta.columns[c].name),
-                    waiting: c != p.last_col(),
-                },
-                None => ticket_ui::Dependency {
-                    label: format!("{} (missing)", format_id(b)),
-                    waiting: false,
-                },
-            })
-            .collect()
+        let dep = |id: u32| match p.find_ticket(id) {
+            Some((c, dep)) => ticket_ui::Dependency {
+                id,
+                label: format!("{} {} ({})", dep.id_str(), dep.title, p.meta.columns[c].name),
+                waiting: Some(c != p.last_col()),
+            },
+            None => ticket_ui::Dependency {
+                id,
+                label: format!("{} (missing)", format_id(id)),
+                waiting: None,
+            },
+        };
+        ticket_ui::Links {
+            blocked_by: t.blocked_by.iter().map(|&b| dep(b)).collect(),
+            blocks: p.dependents(t.id).into_iter().map(dep).collect(),
+        }
     }
 
     fn save_ticket_form(&mut self) {

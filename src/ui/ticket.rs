@@ -34,6 +34,8 @@ pub enum ViewOutcome {
     Reject(String),
     /// Revert this commit of the ticket.
     Revert(String),
+    /// Show this other ticket instead.
+    Open(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -72,12 +74,20 @@ impl TicketView {
     }
 }
 
-/// A ticket another one is blocked by, as shown in the view.
+/// A ticket linked to the one shown, through `blocked_by`.
 pub struct Dependency {
+    pub id: u32,
     /// Number, title and column.
     pub label: String,
-    /// Not in the last column yet.
-    pub waiting: bool,
+    /// Not in the last column yet. `None`: the ticket is missing.
+    pub waiting: Option<bool>,
+}
+
+/// The tickets the shown one waits for, and those waiting for it.
+#[derive(Default)]
+pub struct Links {
+    pub blocked_by: Vec<Dependency>,
+    pub blocks: Vec<Dependency>,
 }
 
 /// `done`: the ticket is in the last column (`last` is that column's name).
@@ -85,7 +95,7 @@ pub fn view(
     ctx: &egui::Context,
     state: &mut TicketView,
     t: &Ticket,
-    deps: &[Dependency],
+    links: &Links,
     (done, last): (bool, &str),
     cache: &mut CommonMarkCache,
 ) -> Option<ViewOutcome> {
@@ -123,18 +133,39 @@ pub fn view(
                 }
             });
         }
-        if !deps.is_empty() {
+        let waiting = links.blocked_by.iter().any(|d| d.waiting == Some(true));
+        let lock = if waiting {
+            (icon::LOCK, theme::DANGER)
+        } else {
+            (icon::LOCK_OPEN, theme::TEXT_MUTED)
+        };
+        for (deps, (glyph, color), text) in [
+            (&links.blocked_by, lock, "Blocked by"),
+            (
+                &links.blocks,
+                (icon::ARROW_BEND_DOWN_RIGHT, theme::TEXT_MUTED),
+                "Blocks",
+            ),
+        ] {
+            if deps.is_empty() {
+                continue;
+            }
             ui.horizontal_wrapped(|ui| {
-                let waiting = deps.iter().any(|d| d.waiting);
-                let (glyph, color) = if waiting {
-                    (icon::LOCK, theme::DANGER)
-                } else {
-                    (icon::LOCK_OPEN, theme::TEXT_MUTED)
-                };
-                ui.label(RichText::new(format!("{glyph}  Blocked by")).color(color));
+                ui.label(RichText::new(format!("{glyph}  {text}")).color(color));
                 for d in deps {
-                    let color = if d.waiting { theme::TEXT } else { theme::TEXT_MUTED };
-                    ui.label(RichText::new(&d.label).color(color));
+                    let color = if d.waiting == Some(true) {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_MUTED
+                    };
+                    if d.waiting.is_none() {
+                        ui.label(RichText::new(&d.label).color(color));
+                        continue;
+                    }
+                    let link = egui::Label::new(RichText::new(&d.label).color(color).underline());
+                    if super::pointer(ui.add(link.sense(egui::Sense::click()))).clicked() {
+                        outcome = Some(ViewOutcome::Open(d.id));
+                    }
                 }
             });
         }
@@ -875,7 +906,7 @@ mod tests {
         let mut h = Harness::new_ui_state(
             |ui, (view_state, t, done, out): &mut ViewState| {
                 let mut cache = CommonMarkCache::default();
-                match super::view(ui.ctx(), view_state, t, &[], (*done, "Done"), &mut cache) {
+                match super::view(ui.ctx(), view_state, t, &Links::default(), (*done, "Done"), &mut cache) {
                     Some(ViewOutcome::Approve) => out.push("approve".into()),
                     Some(ViewOutcome::Reject(note)) => out.push(format!("reject {note}")),
                     Some(ViewOutcome::Revert(c)) => out.push(format!("revert {c}")),
@@ -935,6 +966,48 @@ mod tests {
         h.get_by_label("Revert").click();
         h.run();
         assert_eq!(h.state().3, ["revert abc1234"]);
+    }
+
+    #[test]
+    fn linked_tickets_open_from_the_view() {
+        let ticket = Ticket {
+            id: 5,
+            title: "Login".into(),
+            ..Default::default()
+        };
+        let dep = |id, label: &str, waiting| Dependency {
+            id,
+            label: label.into(),
+            waiting,
+        };
+        let links = Links {
+            blocked_by: vec![
+                dep(2, "00002 Schema (To Do)", Some(true)),
+                dep(9, "00009 (missing)", None),
+            ],
+            blocks: vec![dep(7, "00007 Logout (Done)", Some(false))],
+        };
+        let mut h = Harness::new_ui_state(
+            |ui, (view_state, opened): &mut (TicketView, Option<u32>)| {
+                let mut cache = CommonMarkCache::default();
+                if let Some(ViewOutcome::Open(id)) =
+                    super::view(ui.ctx(), view_state, &ticket, &links, (false, "Done"), &mut cache)
+                {
+                    *opened = Some(id);
+                }
+            },
+            (TicketView::new(5, None), None),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 800.0));
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("Blocks").is_some());
+        h.get_by_label("00007 Logout (Done)").click();
+        h.run();
+        assert_eq!(h.state().1, Some(7));
+        h.get_by_label("00009 (missing)").click();
+        h.run();
+        assert_eq!(h.state().1, Some(7), "missing tickets aren't links");
     }
 
     #[test]

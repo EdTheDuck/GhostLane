@@ -404,6 +404,16 @@ impl Project {
         all
     }
 
+    /// Tickets that list `id` in their `blocked_by`, in board order.
+    pub fn dependents(&self, id: u32) -> Vec<u32> {
+        self.tickets
+            .iter()
+            .flatten()
+            .filter(|t| t.blocked_by.contains(&id))
+            .map(|t| t.id)
+            .collect()
+    }
+
     /// Is ticket `id` waiting for other tickets?
     pub fn is_blocked(&self, id: u32) -> bool {
         self.find_ticket(id).is_some_and(|(_, t)| !self.blockers(t).is_empty())
@@ -852,6 +862,8 @@ mod tests {
         let auto: HashSet<String> = ["to_do".to_string()].into();
         assert!(p.is_blocked(second.id));
         assert_eq!(p.blockers(p.find_ticket(second.id).unwrap().1), [first.id]);
+        assert_eq!(p.dependents(first.id), [second.id]);
+        assert!(p.dependents(second.id).is_empty());
         assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 0), Some((0, first.id)));
         p.move_ticket(&first.path, p.last_col()).unwrap();
         assert!(!p.is_blocked(second.id));

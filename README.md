@@ -130,6 +130,8 @@ With Claude Code and OpenAI Codex, GhostLane knows exactly when the AI has finis
 
 Some tickets can't start until others are finished. Type their numbers into a ticket's **Blocked by** field (or let your AI fill it in when it writes tickets from a spec) and the card shows a 🔒 until every one of them reaches the last column. Auto and the queue skip a blocked ticket and come back to it once it's free, so ticket 4 never starts before ticket 3 is done. Need it now anyway? ▶ still runs it straight away.
 
+Hover over a card to see how it connects: arrows run from the tickets it waits for to it, and from it to the tickets waiting on it, red while the one at the start isn't done yet. Open a ticket and it lists both sides, **Blocked by** and **Blocks**; click one to jump straight to it.
+
 ### Done means done
 
 The **Settings** section of the project dialog decides what happens when a ticket reaches the last column:

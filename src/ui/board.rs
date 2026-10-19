@@ -48,17 +48,76 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions:
     let Ok(project) = &op.project else { return };
     let columns = project.meta.columns.len();
     let width = column_width(ui.available_width(), columns);
+    let mut drawn = Drawn::default();
     ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = COLUMN_GAP;
             let height = ui.available_height();
             for col in 0..columns {
                 ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
-                    column_ui(ui, op, col, width, settings, actions);
+                    column_ui(ui, op, col, width, settings, actions, &mut drawn);
                 });
             }
         });
     });
+    let Ok(project) = &op.project else { return };
+    let hovered = drawn.cards.iter().find(|c| c.2).map(|c| c.0);
+    if let Some(id) = hovered
+        && ui.ctx().dragged_id().is_none()
+    {
+        dependency_arrows(ui, project, id, &drawn.cards);
+    }
+}
+
+/// What drawing the columns found out, for what happens once they are all on screen.
+#[derive(Default)]
+struct Drawn {
+    /// Cards on screen: id, rect, hovered.
+    cards: Vec<(u32, egui::Rect, bool)>,
+}
+
+/// While a card is hovered: arrows from the tickets it waits for to it, and from it to the tickets waiting for it.
+/// Red while the ticket at the start of an arrow isn't done yet.
+fn dependency_arrows(ui: &Ui, p: &Project, id: u32, cards: &[(u32, egui::Rect, bool)]) {
+    let Some((_, t)) = p.find_ticket(id) else { return };
+    let rect = |id: u32| cards.iter().find(|c| c.0 == id).map(|c| c.1);
+    let painter = ui
+        .ctx()
+        .layer_painter(egui::LayerId::new(Order::Foreground, Id::new("dependency_arrows")))
+        .with_clip_rect(ui.clip_rect());
+    let before = t.blocked_by.iter().map(|&b| (b, id));
+    for (from, to) in before.chain(p.dependents(id).into_iter().map(|d| (id, d))) {
+        let (Some(a), Some(b)) = (rect(from), rect(to)) else {
+            continue;
+        };
+        let waiting = p.find_ticket(from).is_some_and(|(c, _)| c != p.last_col());
+        arrow(&painter, a, b, if waiting { theme::DANGER } else { theme::TEXT_MUTED });
+    }
+}
+
+/// A curved arrow from card `a` to card `b`: side to side between columns, round the right edge within one.
+fn arrow(painter: &egui::Painter, a: egui::Rect, b: egui::Rect, color: egui::Color32) {
+    let reach = ((a.center().x - b.center().x).abs() / 2.0).max(40.0);
+    let (start, end, out, back) = if (a.center().x - b.center().x).abs() < 1.0 {
+        (a.right_center(), b.right_center(), reach, reach)
+    } else if a.center().x < b.center().x {
+        (a.right_center(), b.left_center(), reach, -reach)
+    } else {
+        (a.left_center(), b.right_center(), -reach, reach)
+    };
+    let stroke = Stroke::new(2.0, color);
+    let points = [start, start + vec2(out, 0.0), end + vec2(back, 0.0), end];
+    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        points,
+        false,
+        egui::Color32::TRANSPARENT,
+        stroke,
+    ));
+    // The curve arrives travelling away from its last control point.
+    let dir = vec2(-back.signum(), 0.0);
+    let side = dir.rot90() * 5.0;
+    let head = vec![end, end - dir * 9.0 + side, end - dir * 9.0 - side];
+    painter.add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
 }
 
 /// The selected tickets in board order: columns left to right, each top to bottom.
@@ -181,7 +240,15 @@ fn column_width(available: f32, columns: usize) -> f32 {
     ((available - COLUMN_GAP * (n - 1.0)) / n).floor().max(MIN_COLUMN_WIDTH)
 }
 
-fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: BoardSettings, actions: &mut Vec<Action>) {
+fn column_ui(
+    ui: &mut Ui,
+    op: &mut OpenProject,
+    col: usize,
+    width: f32,
+    s: BoardSettings,
+    actions: &mut Vec<Action>,
+    drawn: &mut Drawn,
+) {
     let OpenProject {
         project: Ok(project),
         search,
@@ -299,7 +366,11 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: Board
                     let flagged = auto_column && t.at_run_limit(s.run_limit);
                     let picked = selected.contains(&t.id);
                     let dragging = if picked { selected.len() } else { 1 };
-                    if card(ui, t, play, flagged, &project.blockers(t), (picked, dragging), actions) {
+                    let card = card(ui, t, play, flagged, &project.blockers(t), (picked, dragging), actions);
+                    if ui.clip_rect().intersects(card.rect) {
+                        drawn.cards.push((t.id, card.rect, card.hovered()));
+                    }
+                    if card.clicked() {
                         click(ui, t.id, &visible, selected, anchor, actions);
                     }
                 }
@@ -407,7 +478,7 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
 }
 
 /// `flagged`: Auto skips the ticket, it has been sent to the AI too many times. `blockers`: tickets it waits for.
-/// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along. True when clicked.
+/// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along.
 fn card(
     ui: &mut Ui,
     t: &Ticket,
@@ -416,7 +487,7 @@ fn card(
     blockers: &[u32],
     (selected, dragging): (bool, usize),
     actions: &mut Vec<Action>,
-) -> bool {
+) -> egui::Response {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
     let response = ui
         .scope_builder(builder, |ui| {
@@ -472,7 +543,7 @@ fn card(
             actions.push(Action::AskDelete(vec![t.id]));
         }
     });
-    response.clicked()
+    response
 }
 
 /// play: glyph and tooltip of the AI button, if the card has one.
@@ -748,6 +819,23 @@ mod tests {
         p.move_ticket(&first, 1).unwrap();
         h.run();
         assert_eq!(h.query_all_by_label(icon::LOCK).count(), 0);
+    }
+
+    #[test]
+    fn hovering_a_blocked_card_draws_its_links() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["First", "Second"]);
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        let mut t = p.find_ticket(2).unwrap().1.clone();
+        t.blocked_by = vec![1];
+        t.save().unwrap();
+        p.rescan().unwrap();
+        h.run();
+        let count = |h: &Harness<'static, State>| h.output().shapes.len();
+        let plain = count(&h);
+        h.get_by_label("Second").hover();
+        h.run();
+        assert!(count(&h) > plain, "arrow shapes added on hover");
     }
 
     #[test]
