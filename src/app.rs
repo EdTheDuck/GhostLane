@@ -1766,6 +1766,7 @@ impl App {
                     for (c, edit) in p.meta.columns.iter_mut().zip(columns) {
                         c.auto_move = edit.auto_move;
                         c.ai_prompt = edit.ai_prompt;
+                        c.wip_limit = edit.wip_limit.filter(|&n| n > 0);
                     }
                     if let Err(e) = p.save_meta() {
                         self.toast(format!("Couldn't save the project's settings: {e}"));

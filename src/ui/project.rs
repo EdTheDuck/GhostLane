@@ -23,6 +23,8 @@ pub struct ColumnRow {
     /// Play button prompt; starts as the one in Settings.
     ai_prompt: String,
     show_prompt: bool,
+    /// 0 = no limit.
+    wip_limit: u32,
 }
 
 impl DragDropItem for &mut ColumnRow {
@@ -89,6 +91,7 @@ impl ProjectForm {
                 auto_move,
                 ai_prompt: column_prompt.unwrap_or(prompt).to_string(),
                 show_prompt: false,
+                wip_limit: 0,
             })
             .collect();
         ProjectForm {
@@ -125,6 +128,7 @@ impl ProjectForm {
                 auto_move: c.auto_move,
                 ai_prompt: c.ai_prompt.clone().unwrap_or_else(|| prompt.to_string()),
                 show_prompt: false,
+                wip_limit: c.wip_limit.unwrap_or(0),
             })
             .collect();
         ProjectForm {
@@ -214,6 +218,7 @@ impl ProjectForm {
                     auto_move: AutoMove::Manual,
                     ai_prompt: self.default_prompt.clone(),
                     show_prompt: false,
+                    wip_limit: 0,
                 });
                 self.next_key += 1;
             }
@@ -331,6 +336,14 @@ impl ProjectForm {
                     {
                         row.show_prompt = !row.show_prompt;
                     }
+                    let wip = egui::DragValue::new(&mut row.wip_limit)
+                        .range(0..=99)
+                        .speed(0.1)
+                        .custom_formatter(|n, _| if n == 0.0 { "No limit".into() } else { format!("Max {n}") })
+                        .custom_parser(|s| s.trim().trim_start_matches("Max").trim().parse().ok().or(Some(0.0)));
+                    ui.add(wip).on_hover_text(
+                        "Work in progress limit: the column's count turns red past it, and Auto won't move more                          tickets into it.",
+                    );
                     if row.tickets > 0 {
                         ui.label(
                             RichText::new(plural(row.tickets, "ticket"))
@@ -407,6 +420,7 @@ impl ProjectForm {
                     auto_move: if i == 0 { AutoMove::Manual } else { r.auto_move },
                     // Unchanged or cleared: keep following Settings.
                     ai_prompt: (!prompt.is_empty() && prompt != self.default_prompt.trim()).then(|| prompt.to_string()),
+                    wip_limit: (r.wip_limit > 0).then_some(r.wip_limit),
                 }
             })
             .collect();
@@ -629,9 +643,11 @@ mod tests {
         let mut form = ProjectForm::new_project(vec!["claude".into()], "Do");
         form.location = Some(PathBuf::from("/p"));
         form.rows[0].auto_move = AutoMove::AiWorking;
+        form.rows[1].wip_limit = 2;
         let ProjectOutcome::Create { columns, .. } = form.submit() else {
             panic!("expected create");
         };
         assert_eq!(columns[0].auto_move, AutoMove::Manual);
+        assert_eq!((columns[0].wip_limit, columns[1].wip_limit), (None, Some(2)));
     }
 }

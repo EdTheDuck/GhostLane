@@ -124,6 +124,9 @@ pub struct Column {
     /// Play button prompt for tickets in this column; `None` = the one in Settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_prompt: Option<String>,
+    /// Most tickets the column should hold; its count turns red past it and Auto won't fill it further.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip_limit: Option<u32>,
 }
 
 /// Markers around the ticket guide GhostLane keeps in an AI CLI's instructions file.
@@ -155,6 +158,7 @@ pub struct ColumnEdit {
     pub orig_folder: Option<String>,
     pub auto_move: AutoMove,
     pub ai_prompt: Option<String>,
+    pub wip_limit: Option<u32>,
 }
 
 pub struct Project {
@@ -262,6 +266,7 @@ impl Project {
                 sort: Sort::default(),
                 auto_move: AutoMove::Manual,
                 ai_prompt: None,
+                wip_limit: None,
             })
             .collect();
         let meta = GhostFile {
@@ -339,13 +344,18 @@ impl Project {
 
     /// (column, id) of the ticket Auto works on next, from the columns whose folder is in `auto` and whose
     /// tickets move on "AI Working": first by `order`, then the right-most column, then the lowest id.
-    /// Tickets at `run_limit` are skipped.
+    /// Tickets at `run_limit` are skipped, and so are columns whose next column is at its WIP limit.
     pub fn next_auto(&self, auto: &HashSet<String>, order: AutoOrder, run_limit: u32) -> Option<(usize, u32)> {
         self.meta
             .columns
             .iter()
             .enumerate()
-            .filter(|(c, col)| auto.contains(&col.folder) && self.auto_target(*c, AutoMove::AiWorking).is_some())
+            .filter(|(c, col)| {
+                auto.contains(&col.folder)
+                    && self
+                        .auto_target(*c, AutoMove::AiWorking)
+                        .is_some_and(|to| !self.is_full(to))
+            })
             .flat_map(|(c, _)| self.tickets.get(c).into_iter().flatten().map(move |t| (c, t)))
             .filter(|(_, t)| !t.at_run_limit(run_limit) && self.blockers(t).is_empty())
             .min_by(|(ca, a), (cb, b)| {
@@ -358,6 +368,14 @@ impl Project {
                 ord.then(cb.cmp(ca)).then(a.id.cmp(&b.id))
             })
             .map(|(c, t)| (c, t.id))
+    }
+
+    /// Does column `col` hold as many tickets as its WIP limit allows, or more?
+    pub fn is_full(&self, col: usize) -> bool {
+        let count = self.tickets.get(col).map_or(0, Vec::len);
+        self.meta.columns[col]
+            .wip_limit
+            .is_some_and(|n| n > 0 && count >= n as usize)
     }
 
     /// The last column, where finished tickets go.
@@ -510,6 +528,7 @@ impl Project {
                     sort,
                     auto_move: e.auto_move,
                     ai_prompt: e.ai_prompt.clone(),
+                    wip_limit: e.wip_limit.filter(|&n| n > 0),
                 }
             })
             .collect();
@@ -809,6 +828,12 @@ mod tests {
         p.rescan().unwrap();
         assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 3), Some((0, a)));
         assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 4), Some((2, b)));
+        // A full In Test column stops Auto taking from Ready For Test.
+        p.meta.columns[3].wip_limit = Some(1);
+        assert!(!p.is_full(3));
+        p.add_ticket(3, Ticket::default()).unwrap();
+        assert!(p.is_full(3));
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc, 4), Some((0, a)));
     }
 
     #[test]
@@ -911,6 +936,8 @@ mod tests {
         let mut edits = [edit("B", Some("a")), edit("A", Some("b")), edit("D", None)];
         edits[1].auto_move = AutoMove::AiWorking;
         edits[2].ai_prompt = Some("Test {ticket_path}".into());
+        edits[0].wip_limit = Some(3);
+        edits[1].wip_limit = Some(0);
         let targets = HashMap::from([("c".to_string(), 1)]);
         p.apply_columns("P2", &edits, &targets).unwrap();
 
@@ -923,6 +950,8 @@ mod tests {
         assert!(titles(2).is_empty());
         assert_eq!(p.meta.columns[1].auto_move, AutoMove::AiWorking);
         assert_eq!(p.meta.columns[2].ai_prompt.as_deref(), Some("Test {ticket_path}"));
+        assert_eq!(p.meta.columns[0].wip_limit, Some(3));
+        assert_eq!(p.meta.columns[1].wip_limit, None);
         let back = Project::load(&p.ghost_path).unwrap();
         assert_eq!(back.meta, p.meta);
         assert!(!p.tickets_dir().join("c").exists());

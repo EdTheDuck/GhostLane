@@ -110,6 +110,8 @@ New projects start with **To Do → In Dev → Ready For Test → In Test → Do
 
 ![Editing a project's columns and AI CLI](docs/screenshots/project.png)
 
+Give a column a **WIP limit** to keep work in progress in check: its header shows `(4/3)` in red when there are too many tickets in it, and Auto won't move another ticket in until there's room.
+
 Each column is a folder with a safe, predictable name, so `Ready For Test` becomes `tickets/ready_for_test/`. Drag a card to another column and the file moves on disk. Move a file in Explorer, Finder or the terminal and the card moves on the board.
 
 ### Tickets that move themselves

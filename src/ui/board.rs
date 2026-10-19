@@ -230,20 +230,28 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: Board
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = gap;
-                    let count =
-                        egui::WidgetText::from(RichText::new(format!("({})", tickets.len())).color(theme::TEXT_MUTED))
-                            .into_galley(
-                                ui,
-                                Some(egui::TextWrapMode::Extend),
-                                f32::INFINITY,
-                                egui::TextStyle::Body,
-                            );
+                    let n = tickets.len();
+                    let limit = column.wip_limit.filter(|&l| l > 0);
+                    let (count, color) = match limit {
+                        Some(l) if n > l as usize => (format!("({n}/{l})"), theme::DANGER),
+                        Some(l) => (format!("({n}/{l})"), theme::TEXT_MUTED),
+                        None => (format!("({n})"), theme::TEXT_MUTED),
+                    };
+                    let count = egui::WidgetText::from(RichText::new(count).color(color)).into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Body,
+                    );
                     let name_width = (ui.available_width() - count.size().x - gap - 8.0).max(0.0);
                     ui.scope(|ui| {
                         ui.set_max_width(name_width);
                         ui.add(egui::Label::new(RichText::new(&column.name).strong().size(15.0)).truncate());
                     });
-                    ui.label(count);
+                    let count = ui.label(count);
+                    if let Some(l) = limit {
+                        count.on_hover_text(format!("At most {l} tickets in progress here"));
+                    }
                 });
             });
         });
@@ -854,6 +862,16 @@ mod tests {
         h.get_by_label(icon::X).click();
         h.run();
         assert!(h.state().1.iter().any(|a| matches!(a, Action::ToggleFilter)));
+    }
+
+    #[test]
+    fn column_count_shows_the_wip_limit() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["One", "Two"]);
+        assert!(h.query_by_label("(2)").is_some());
+        h.state_mut().0.project.as_mut().unwrap().meta.columns[0].wip_limit = Some(1);
+        h.run();
+        assert!(h.query_by_label("(2/1)").is_some());
     }
 
     #[test]
