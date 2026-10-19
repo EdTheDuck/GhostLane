@@ -128,7 +128,7 @@ With Claude Code and OpenAI Codex, GhostLane knows exactly when the AI has finis
 
 ### Work in the right order
 
-Some tickets can't start until others are finished. Type their numbers into a ticket's **Blocked by** field, or open its dropdown to search tickets by number or title and click the ones it waits for, (or let your AI fill it in when it writes tickets from a spec) and the card shows a 🔒 until every one of them reaches the last column. Auto and the queue skip a blocked ticket and come back to it once it's free, so ticket 4 never starts before ticket 3 is done. Need it now anyway? ▶ still runs it straight away.
+Some tickets can't start until others are finished. Click into a ticket's **Blocked by** field (on the Manual tab) and pick from the list of tickets that drops down, typing a number or a few title words to narrow it, (or let your AI fill it in when it writes tickets from a spec) and the card shows a 🔒 until every one of them reaches the last column. Auto and the queue skip a blocked ticket and come back to it once it's free, so ticket 4 never starts before ticket 3 is done. Need it now anyway? ▶ still runs it straight away.
 
 Hover over a card to see how it connects: arrows run from the tickets it waits for to it, and from it to the tickets waiting on it, red while the one at the start isn't done yet. Open a ticket and it lists both sides, **Blocked by** and **Blocks**; click one to jump straight to it.
 

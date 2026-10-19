@@ -397,38 +397,51 @@ fn blocker_options<'a>(tickets: &'a [(u32, String)], own: u32, query: &str, take
         .collect()
 }
 
-/// Search box and list of tickets; clicking one adds its number to `blocked`, the comma-separated list.
-fn blocker_picker(ui: &mut Ui, own: u32, tickets: &[(u32, String)], search: &mut String, blocked: &mut String) {
-    ui.set_width(380.0);
-    let typed = ui.add(
-        TextEdit::singleline(search)
-            .margin(super::INPUT_MARGIN)
-            .hint_text(format!("{}  Search by number or title", icon::MAGNIFYING_GLASS))
-            .desired_width(f32::INFINITY),
-    );
-    if ui.memory(|m| m.focused().is_none()) {
-        typed.request_focus();
-    }
-    let taken = parse_blocked(blocked, own).unwrap_or_default();
-    let options = blocker_options(tickets, own, search, &taken);
-    if options.is_empty() {
-        ui.label(RichText::new("No tickets match.").color(theme::TEXT_MUTED));
-        return;
-    }
-    ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-        for (id, title) in options {
-            let row = egui::Button::new(format!("{}  {}", format_id(*id), title.replace(['\n', '\r'], " ")))
-                .frame(false)
-                .truncate();
-            if ui.add_sized(vec2(ui.available_width(), 28.0), row).clicked() {
-                let kept = blocked.trim().trim_end_matches(',').trim_end();
-                *blocked = match kept {
-                    "" => format_id(*id),
-                    kept => format!("{kept}, {}", format_id(*id)),
-                };
+/// The tickets matching what is being typed after the last comma of `blocked`; clicking one puts its number there.
+/// True when one was picked.
+fn blocker_list(ui: &mut Ui, own: u32, tickets: &[(u32, String)], blocked: &mut String) -> bool {
+    ui.set_width(ui.available_width());
+    let (head, typing) = match blocked.rfind(',') {
+        Some(i) => blocked.split_at(i + 1),
+        None => ("", blocked.as_str()),
+    };
+    // A number written out in full, as the list writes them, is a pick rather than a search.
+    let written = typing.trim().parse().is_ok_and(|n: u32| format_id(n) == typing.trim());
+    let (head, typing) = if written {
+        (blocked.as_str(), "")
+    } else {
+        (head, typing)
+    };
+    let taken = parse_blocked(head, own).unwrap_or_default();
+    let options = blocker_options(tickets, own, typing.trim(), &taken);
+    let note = match (typing.trim(), options.is_empty()) {
+        ("", true) => "No other tickets to wait for.".to_string(),
+        (typed, true) => format!("No tickets match \"{typed}\"."),
+        ("", false) => "Pick a ticket this one waits for, or type to search by number or title.".to_string(),
+        (typed, false) => format!("Tickets matching \"{typed}\""),
+    };
+    ui.label(RichText::new(note).small().color(theme::TEXT_MUTED));
+    let mut picked = None;
+    ScrollArea::vertical()
+        .id_salt("blocker_list")
+        .max_height(180.0)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (id, title) in options {
+                let row = egui::Button::new(format!("{}  {}", format_id(*id), title.replace(['\n', '\r'], " ")))
+                    .frame(false)
+                    .truncate();
+                if ui.add_sized(vec2(ui.available_width(), 28.0), row).clicked() {
+                    picked = Some(*id);
+                }
             }
-        }
-    });
+        });
+    let Some(id) = picked else { return false };
+    *blocked = match head.trim_end().trim_end_matches(',') {
+        "" => format!("{}, ", format_id(id)),
+        head => format!("{head}, {}, ", format_id(id)),
+    };
+    true
 }
 
 fn blocked_text(ids: &[u32]) -> String {
@@ -462,8 +475,12 @@ pub struct TicketForm {
     notes_open: bool,
     /// Ticket numbers this one waits for, as typed.
     blocked: String,
-    /// What the Blocked by dropdown is searching for.
-    blocked_search: String,
+    /// The list of tickets to pick for Blocked by shows below the fields.
+    blocked_open: bool,
+    /// Where that list was drawn last frame; it stays open while the pointer is on it.
+    blocked_list: Option<egui::Rect>,
+    /// Give the Blocked by field the keyboard back after a ticket was picked from the list.
+    blocked_refocus: bool,
     /// (id, title) of the project's tickets, offered in the Blocked by dropdown.
     pub tickets: Vec<(u32, String)>,
     /// Comma-separated labels, as typed.
@@ -503,7 +520,9 @@ impl TicketForm {
             notes: RichEditor::new(("notes", ticket.id), &ticket.notes),
             notes_open: false,
             blocked: blocked_text(&ticket.blocked_by),
-            blocked_search: String::new(),
+            blocked_open: false,
+            blocked_list: None,
+            blocked_refocus: false,
             tickets: Vec::new(),
             labels: ticket.labels.join(", "),
             original: ticket.clone(),
@@ -520,7 +539,7 @@ impl TicketForm {
             || a.title != b.title
             || a.priority != b.priority
             || a.run_count != b.run_count
-            || self.blocked.trim() != blocked_text(&b.blocked_by)
+            || parse_blocked(&self.blocked, a.id).ok().as_ref() != Some(&b.blocked_by)
             || labels_from_text(&self.labels) != b.labels
             || self.description.changed()
             || self.test_scope.changed()
@@ -572,21 +591,34 @@ impl TicketForm {
                 super::pointer(combo.response);
                 ui.add_space(16.0);
                 ui.label("Blocked by");
-                let own = t.id;
-                ui.add(
-                    TextEdit::singleline(&mut self.blocked)
-                        .margin(super::INPUT_MARGIN)
-                        .hint_text("e.g. 12, 15")
-                        .desired_width(160.0),
-                )
-                .on_hover_text(
-                    "Numbers of tickets that must reach the last column first. Auto and the queue wait for them; \
-                     ▶ still runs the ticket straight away.",
-                );
-                let pick = icon_button(ui, icon::CARET_DOWN, "Pick tickets this one waits for");
-                egui::Popup::menu(&pick)
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .show(|ui| blocker_picker(ui, own, &self.tickets, &mut self.blocked_search, &mut self.blocked));
+                let field = ui
+                    .add(
+                        TextEdit::singleline(&mut self.blocked)
+                            .margin(super::INPUT_MARGIN)
+                            .hint_text("Type a number or title")
+                            .desired_width(240.0),
+                    )
+                    .on_hover_text(
+                        "Tickets that must reach the last column first. Type to search by number or title and pick \
+                         from the list. Auto and the queue wait for them; ▶ still runs the ticket straight away.",
+                    );
+                if std::mem::take(&mut self.blocked_refocus) {
+                    // Back to typing after the number just added.
+                    if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), field.id) {
+                        let end = egui::text::CCursor::new(self.blocked.chars().count());
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                        state.store(ui.ctx(), field.id);
+                    }
+                    field.request_focus();
+                    self.blocked_open = true;
+                } else if field.has_focus() {
+                    self.blocked_open = true;
+                } else {
+                    // Clicking the list takes the keyboard from the field; keep the list until the click lands.
+                    let pointer = ui.input(|i| i.pointer.interact_pos());
+                    let on_list = self.blocked_list.zip(pointer).is_some_and(|(r, p)| r.contains(p));
+                    self.blocked_open &= on_list;
+                }
                 ui.add_space(16.0);
                 ui.label("Labels");
                 ui.add(
@@ -601,6 +633,18 @@ impl TicketForm {
                     ui.label("Runs");
                 });
             });
+            self.blocked_list = None;
+            if self.blocked_open {
+                let (own, tickets) = (self.ticket.id, &self.tickets);
+                let shown = egui::Frame::new()
+                    .fill(theme::CARD)
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| blocker_list(ui, own, tickets, &mut self.blocked));
+                self.blocked_list = Some(shown.response.rect);
+                self.blocked_refocus = shown.inner;
+            }
+            let t = &mut self.ticket;
             let blocked = parse_blocked(&self.blocked, t.id);
 
             let footer = 56.0;
@@ -983,19 +1027,50 @@ mod tests {
         crate::theme::apply(&h.ctx);
         h.set_size(vec2(1200.0, 900.0));
         h.run_steps(3);
-        h.get_by_label(icon::CARET_DOWN).click();
-        h.run();
+        // Real pointer clicks: the field loses the keyboard on press, and the list must survive that.
+        let field = h.get_by_label("Blocked by").rect().right_center() + vec2(60.0, 0.0);
+        pointer_click(&mut h, field);
+        assert!(h.query_by_label("00002  Logout button").is_some(), "the list shows");
         assert!(h.query_by_label("00001  Login page").is_none(), "already listed");
-        h.event(egui::Event::Text("acc".into()));
+        h.event(egui::Event::Text(", acc".into()));
         h.run();
+        assert!(h.query_by_label_contains("matching \"acc\"").is_some());
         assert!(h.query_by_label("00002  Logout button").is_none());
-        h.get_by_label("00012  Account table").click();
-        h.run();
-        assert_eq!(h.state().blocked, "00001, 00012");
+        let row = h.get_by_label("00012  Account table").rect().center();
+        pointer_click(&mut h, row);
+        assert_eq!(h.state().blocked, "00001, 00012, ");
+        assert_eq!(parse_blocked(&h.state().blocked, 3), Ok(vec![1, 12]));
         assert!(
-            h.query_by_label("00012  Account table").is_none(),
-            "picked ones drop out, the list stays open"
+            h.query_by_label("00002  Logout button").is_some(),
+            "the list stays for the next one"
         );
+        h.event(egui::Event::Text("log".into()));
+        h.run();
+        let row = h.get_by_label("00002  Logout button").rect().center();
+        pointer_click(&mut h, row);
+        assert_eq!(h.state().blocked, "00001, 00012, 00002, ");
+        // Leaving the field closes the list.
+        let title = h.get_by_label("Title").rect().center() + vec2(0.0, 40.0);
+        pointer_click(&mut h, title);
+        assert!(h.query_by_label("00003  Signup").is_none() && h.query_by_label_contains("Pick a ticket").is_none());
+    }
+
+    /// Moves the pointer to `pos` and clicks there.
+    /// Single frames between press and release: a focused text box keeps repainting, and `run` would let the
+    /// clock pass egui's click time limit.
+    fn pointer_click<S>(h: &mut Harness<'_, S>, pos: egui::Pos2) {
+        h.hover_at(pos);
+        h.run();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        h.run();
     }
 
     #[test]
