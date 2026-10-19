@@ -117,13 +117,6 @@ pub fn view(
             ui.label(priority_icon(t.priority).size(16.0));
             ui.label(RichText::new(t.priority.label()).color(theme::TEXT_MUTED));
             ui.label(RichText::new(format!("·  Runs: {}", t.run_count)).color(theme::TEXT_MUTED));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Clear of the X in the corner.
-                ui.add_space(30.0);
-                if icon_button(ui, icon::PENCIL_SIMPLE, "Edit ticket").clicked() {
-                    outcome = Some(ViewOutcome::Edit);
-                }
-            });
         });
         ui.add_space(4.0);
         ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
@@ -181,39 +174,19 @@ pub fn view(
             // The app loads the changes on the next frame.
             ui.ctx().request_repaint();
         }
-        if state.tab == ViewTab::Changes {
-            changes_tab(ui, state, done, last, &mut outcome);
-            return;
-        }
-        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            // Description always shows; the optional sections only when they have text.
-            let sections = [("Test Scope", &t.test_scope), ("Notes", &t.notes)];
-            let shown = sections.into_iter().filter(|(_, text)| !text.trim().is_empty());
-            for (i, (heading, text)) in std::iter::once(("Description", &t.description))
-                .chain(shown)
-                .enumerate()
-            {
-                if i > 0 {
-                    ui.add_space(16.0);
-                }
-                ui.label(RichText::new(heading).size(17.0).strong().color(theme::ACCENT));
-                ui.add_space(4.0);
-                markdown(ui, cache, text);
+        // Footer first, from the bottom up, so the tab above gets whatever height is left.
+        ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
+            if accent_button(ui, "Edit").clicked() {
+                outcome = Some(ViewOutcome::Edit);
             }
-            if !t.runs.is_empty() || state.commit.is_some() {
-                ui.add_space(16.0);
-                ui.label(RichText::new("Run History").size(17.0).strong().color(theme::ACCENT));
-                ui.add_space(4.0);
-                if let Some(commit) = &state.commit {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(icon::GIT_COMMIT).color(theme::ACCENT));
-                        ui.label("Committed as");
-                        ui.label(RichText::new(commit).monospace());
-                        ui.label(RichText::new("· review or revert it on the Changes tab").color(theme::TEXT_MUTED));
-                    });
+            ui.separator();
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                if state.tab == ViewTab::Changes {
+                    changes_tab(ui, state, done, last, &mut outcome);
+                } else {
+                    details_tab(ui, state, t, cache);
                 }
-                run_history(ui, &t.runs);
-            }
+            });
         });
     });
     if state.confirm_revert {
@@ -230,6 +203,40 @@ pub fn view(
         outcome = Some(ViewOutcome::Close);
     }
     outcome
+}
+
+/// Description, test scope, notes and run history.
+fn details_tab(ui: &mut Ui, state: &TicketView, t: &Ticket, cache: &mut CommonMarkCache) {
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        // Description always shows; the optional sections only when they have text.
+        let sections = [("Test Scope", &t.test_scope), ("Notes", &t.notes)];
+        let shown = sections.into_iter().filter(|(_, text)| !text.trim().is_empty());
+        for (i, (heading, text)) in std::iter::once(("Description", &t.description))
+            .chain(shown)
+            .enumerate()
+        {
+            if i > 0 {
+                ui.add_space(16.0);
+            }
+            ui.label(RichText::new(heading).size(17.0).strong().color(theme::ACCENT));
+            ui.add_space(4.0);
+            markdown(ui, cache, text);
+        }
+        if !t.runs.is_empty() || state.commit.is_some() {
+            ui.add_space(16.0);
+            ui.label(RichText::new("Run History").size(17.0).strong().color(theme::ACCENT));
+            ui.add_space(4.0);
+            if let Some(commit) = &state.commit {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon::GIT_COMMIT).color(theme::ACCENT));
+                    ui.label("Committed as");
+                    ui.label(RichText::new(commit).monospace());
+                    ui.label(RichText::new("· review or revert it on the Changes tab").color(theme::TEXT_MUTED));
+                });
+            }
+            run_history(ui, &t.runs);
+        }
+    });
 }
 
 /// What the ticket changed, with buttons to pass it, send it back or undo its commit.
@@ -1169,6 +1176,7 @@ mod tests {
                 let mut cache = CommonMarkCache::default();
                 match super::view(ui.ctx(), view_state, t, &Links::default(), (*done, "Done"), &mut cache) {
                     Some(ViewOutcome::Approve) => out.push("approve".into()),
+                    Some(ViewOutcome::Edit) => out.push("edit".into()),
                     Some(ViewOutcome::Reject(note)) => out.push(format!("reject {note}")),
                     Some(ViewOutcome::Revert(c)) => out.push(format!("revert {c}")),
                     _ => {}
@@ -1207,6 +1215,24 @@ mod tests {
         h.get_by_label_contains("Reject").click();
         h.run();
         assert_eq!(h.state().3[1], "reject Handle empty passwords");
+    }
+
+    #[test]
+    fn edit_button_sits_at_the_bottom_right() {
+        let mut h = view_harness(TicketView::new(5, None), false);
+        assert!(h.query_by_label(icon::PENCIL_SIMPLE).is_none());
+        let edit = h.get_by_label("Edit").rect();
+        let modal = h.ctx.memory(|m| m.area_rect(egui::Id::new("view_ticket"))).unwrap();
+        assert!(
+            modal.right() - edit.right() < 30.0 && modal.bottom() - edit.bottom() < 30.0,
+            "{edit:?} {modal:?}"
+        );
+        h.get_by_label("Edit").click();
+        h.run();
+        assert_eq!(h.state().3, ["edit"]);
+        h.get_by_label("Changes").click();
+        h.run();
+        assert!(h.query_by_label("Edit").is_some(), "on both tabs");
     }
 
     #[test]
