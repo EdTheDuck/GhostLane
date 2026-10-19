@@ -449,6 +449,15 @@ impl App {
         }
     }
 
+    /// The ticket form as a modal, offering the active project's tickets for Blocked by.
+    fn ticket_form(&self, mut form: TicketForm) -> Modal {
+        if let Some(p) = self.active_project() {
+            form.tickets = p.tickets.iter().flatten().map(|t| (t.id, t.title.clone())).collect();
+            form.tickets.sort_by_key(|(id, _)| *id);
+        }
+        Modal::EditTicket(Box::new(form))
+    }
+
     /// Nothing else has the keyboard: no dialog, text box or terminal.
     fn keyboard_free(&self, ctx: &egui::Context) -> bool {
         self.modal.is_none() && !self.terminal_focused && ctx.memory(|m| m.focused().is_none())
@@ -707,7 +716,7 @@ impl App {
             Action::ViewTicket(id) => self.open_ticket(id),
             Action::EditTicket(id) => {
                 if let Some((_, t)) = self.find_ticket(id) {
-                    self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(t))));
+                    self.modal = Some(self.ticket_form(TicketForm::edit(t)));
                 }
             }
             Action::NewTicket(col) => {
@@ -716,7 +725,7 @@ impl App {
                     id: p.meta.next_ticket_id,
                     ..Default::default()
                 };
-                self.modal = Some(Modal::EditTicket(Box::new(TicketForm::create(col, t))));
+                self.modal = Some(self.ticket_form(TicketForm::create(col, t)));
             }
             Action::DuplicateTicket(id) => {
                 let Some(next) = self.active_project().map(|p| p.meta.next_ticket_id) else {
@@ -732,7 +741,7 @@ impl App {
                     done_at: None,
                     ..t.clone()
                 };
-                self.modal = Some(Modal::EditTicket(Box::new(TicketForm::create(col, copy))));
+                self.modal = Some(self.ticket_form(TicketForm::create(col, copy)));
             }
             Action::AskDelete(ids) if ids.is_empty() => {}
             Action::AskDelete(ids) => self.modal = Some(Modal::ConfirmDelete(ids)),
@@ -1732,7 +1741,7 @@ impl App {
                 }
                 match ticket_ui::view(ctx, view, &t, &links, (col == last, &last_name), &mut self.md_cache) {
                     Some(ViewOutcome::Close) => self.modal = None,
-                    Some(ViewOutcome::Edit) => self.modal = Some(Modal::EditTicket(Box::new(TicketForm::edit(&t)))),
+                    Some(ViewOutcome::Edit) => self.modal = Some(self.ticket_form(TicketForm::edit(&t))),
                     Some(ViewOutcome::Approve) => {
                         self.modal = None;
                         self.apply(

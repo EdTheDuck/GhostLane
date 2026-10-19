@@ -384,6 +384,53 @@ fn parse_blocked(text: &str, own: u32) -> Result<Vec<u32>, String> {
     Ok(ids)
 }
 
+/// (id, title) of the `tickets` matching `query` by number or title words, leaving out `own` and those in `taken`.
+fn blocker_options<'a>(tickets: &'a [(u32, String)], own: u32, query: &str, taken: &[u32]) -> Vec<&'a (u32, String)> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    tickets
+        .iter()
+        .filter(|(id, _)| *id != own && !taken.contains(id))
+        .filter(|(id, title)| {
+            let text = format!("{} {id} {}", format_id(*id), title.to_lowercase());
+            words.iter().all(|w| text.contains(w))
+        })
+        .collect()
+}
+
+/// Search box and list of tickets; clicking one adds its number to `blocked`, the comma-separated list.
+fn blocker_picker(ui: &mut Ui, own: u32, tickets: &[(u32, String)], search: &mut String, blocked: &mut String) {
+    ui.set_width(380.0);
+    let typed = ui.add(
+        TextEdit::singleline(search)
+            .margin(super::INPUT_MARGIN)
+            .hint_text(format!("{}  Search by number or title", icon::MAGNIFYING_GLASS))
+            .desired_width(f32::INFINITY),
+    );
+    if ui.memory(|m| m.focused().is_none()) {
+        typed.request_focus();
+    }
+    let taken = parse_blocked(blocked, own).unwrap_or_default();
+    let options = blocker_options(tickets, own, search, &taken);
+    if options.is_empty() {
+        ui.label(RichText::new("No tickets match.").color(theme::TEXT_MUTED));
+        return;
+    }
+    ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+        for (id, title) in options {
+            let row = egui::Button::new(format!("{}  {}", format_id(*id), title.replace(['\n', '\r'], " ")))
+                .frame(false)
+                .truncate();
+            if ui.add_sized(vec2(ui.available_width(), 28.0), row).clicked() {
+                let kept = blocked.trim().trim_end_matches(',').trim_end();
+                *blocked = match kept {
+                    "" => format_id(*id),
+                    kept => format!("{kept}, {}", format_id(*id)),
+                };
+            }
+        }
+    });
+}
+
 fn blocked_text(ids: &[u32]) -> String {
     ids.iter().map(|&id| format_id(id)).collect::<Vec<_>>().join(", ")
 }
@@ -415,6 +462,10 @@ pub struct TicketForm {
     notes_open: bool,
     /// Ticket numbers this one waits for, as typed.
     blocked: String,
+    /// What the Blocked by dropdown is searching for.
+    blocked_search: String,
+    /// (id, title) of the project's tickets, offered in the Blocked by dropdown.
+    pub tickets: Vec<(u32, String)>,
     /// Comma-separated labels, as typed.
     labels: String,
     confirm_discard: bool,
@@ -452,6 +503,8 @@ impl TicketForm {
             notes: RichEditor::new(("notes", ticket.id), &ticket.notes),
             notes_open: false,
             blocked: blocked_text(&ticket.blocked_by),
+            blocked_search: String::new(),
+            tickets: Vec::new(),
             labels: ticket.labels.join(", "),
             original: ticket.clone(),
             ticket,
@@ -519,6 +572,7 @@ impl TicketForm {
                 super::pointer(combo.response);
                 ui.add_space(16.0);
                 ui.label("Blocked by");
+                let own = t.id;
                 ui.add(
                     TextEdit::singleline(&mut self.blocked)
                         .margin(super::INPUT_MARGIN)
@@ -529,6 +583,10 @@ impl TicketForm {
                     "Numbers of tickets that must reach the last column first. Auto and the queue wait for them; \
                      ▶ still runs the ticket straight away.",
                 );
+                let pick = icon_button(ui, icon::CARET_DOWN, "Pick tickets this one waits for");
+                egui::Popup::menu(&pick)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| blocker_picker(ui, own, &self.tickets, &mut self.blocked_search, &mut self.blocked));
                 ui.add_space(16.0);
                 ui.label("Labels");
                 ui.add(
@@ -891,6 +949,53 @@ mod tests {
         assert!(h.state().1);
         assert_eq!(h.state().0.ticket.blocked_by, [1, 2]);
         assert_eq!(h.state().0.ticket.labels, ["ui", "api"]);
+    }
+
+    #[test]
+    fn blocked_by_picker_searches_and_appends() {
+        let tickets = vec![
+            (1, "Login page".to_string()),
+            (2, "Logout button".to_string()),
+            (3, "Signup".to_string()),
+            (12, "Account table".to_string()),
+        ];
+        let ids = |q: &str, taken: &[u32]| {
+            blocker_options(&tickets, 3, q, taken)
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("", &[]), [1, 2, 12]); // never itself
+        assert_eq!(ids("LOG", &[1]), [2]);
+        assert_eq!(ids("0001", &[]), [1, 12]);
+        assert_eq!(ids("12", &[]), [12]);
+        assert_eq!(ids("account table", &[]), [12]);
+
+        let mut form = TicketForm::edit(&Ticket {
+            id: 3,
+            title: "Signup".into(),
+            blocked_by: vec![1],
+            ..Default::default()
+        });
+        form.tab = Tab::Manual;
+        form.tickets = tickets.clone();
+        let mut h = Harness::new_ui_state(|ui, form: &mut TicketForm| _ = form.show(ui.ctx()), form);
+        crate::theme::apply(&h.ctx);
+        h.set_size(vec2(1200.0, 900.0));
+        h.run_steps(3);
+        h.get_by_label(icon::CARET_DOWN).click();
+        h.run();
+        assert!(h.query_by_label("00001  Login page").is_none(), "already listed");
+        h.event(egui::Event::Text("acc".into()));
+        h.run();
+        assert!(h.query_by_label("00002  Logout button").is_none());
+        h.get_by_label("00012  Account table").click();
+        h.run();
+        assert_eq!(h.state().blocked, "00001, 00012");
+        assert!(
+            h.query_by_label("00012  Account table").is_none(),
+            "picked ones drop out, the list stays open"
+        );
     }
 
     #[test]
