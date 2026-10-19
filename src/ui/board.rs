@@ -28,11 +28,16 @@ pub struct BoardSettings {
     pub run_limit: u32,
     /// The last column hides tickets that have been there longer than this many days. 0 = never.
     pub archive_days: u32,
+    /// Nothing else has the keyboard, so the arrow keys and friends work the board.
+    pub keys: bool,
 }
 
 pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions: &mut Vec<Action>) {
     let Ok(project) = &op.project else { return };
     op.selected.retain(|&id| project.find_ticket(id).is_some());
+    if op.cursor.is_some_and(|id| project.find_ticket(id).is_none()) {
+        op.cursor = None;
+    }
     if !op.selected.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.memory(|m| m.focused().is_none())
     {
         op.selected.clear();
@@ -60,6 +65,10 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions:
             }
         });
     });
+    op.scroll_to_cursor = false;
+    if settings.keys {
+        keyboard(ui, op, &drawn.columns, actions);
+    }
     let Ok(project) = &op.project else { return };
     let hovered = drawn.cards.iter().find(|c| c.2).map(|c| c.0);
     if let Some(id) = hovered
@@ -74,6 +83,83 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions:
 struct Drawn {
     /// Cards on screen: id, rect, hovered.
     cards: Vec<(u32, egui::Rect, bool)>,
+    /// Ids of the cards each column shows, top to bottom.
+    columns: Vec<Vec<u32>>,
+}
+
+/// Arrow keys move the keyboard cursor between the cards shown, Enter opens its ticket, Space adds it to the
+/// selection or takes it out, `[` and `]` move it (with the rest of the selection, when it's part of it) a column
+/// left or right, Delete deletes them, and Esc lets go of it.
+fn keyboard(ui: &Ui, op: &mut OpenProject, columns: &[Vec<u32>], actions: &mut Vec<Action>) {
+    use egui::Key;
+    let key = |k: Key| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
+    let pos = op.cursor.and_then(|id| {
+        columns
+            .iter()
+            .enumerate()
+            .find_map(|(c, ids)| ids.iter().position(|&x| x == id).map(|r| (c, r)))
+    });
+    for k in [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight] {
+        if key(k) {
+            if let Some((c, r)) = step(columns, pos, k) {
+                op.cursor = Some(columns[c][r]);
+                op.scroll_to_cursor = true;
+            }
+            ui.ctx().request_repaint();
+            return;
+        }
+    }
+    let (Some((col, row)), Ok(project)) = (pos, &op.project) else {
+        return;
+    };
+    let id = columns[col][row];
+    let group = if op.selected.contains(&id) {
+        selection(project, &op.selected)
+    } else {
+        vec![id]
+    };
+    let mut move_to = |to_col: usize| {
+        actions.push(Action::MoveTickets {
+            ids: group.clone(),
+            to_col,
+        });
+        op.scroll_to_cursor = true;
+    };
+    if key(Key::Enter) {
+        actions.push(Action::ViewTicket(id));
+    } else if key(Key::OpenBracket) && col > 0 {
+        move_to(col - 1);
+    } else if key(Key::CloseBracket) && col + 1 < columns.len() {
+        move_to(col + 1);
+    } else if key(Key::Delete) {
+        actions.push(Action::AskDelete(group));
+    } else if key(Key::Space) {
+        if !op.selected.remove(&id) {
+            op.selected.insert(id);
+        }
+        op.anchor = Some(id);
+    } else if ui.input(|i| i.key_pressed(Key::Escape)) && op.selected.is_empty() {
+        op.cursor = None;
+    }
+}
+
+/// Where an arrow key takes the cursor at `pos` (column, row) among `columns` of card ids. Without a cursor, any
+/// arrow lands on the first card; left and right skip empty columns and keep the row where they can.
+fn step(columns: &[Vec<u32>], pos: Option<(usize, usize)>, key: egui::Key) -> Option<(usize, usize)> {
+    use egui::Key;
+    let Some((col, row)) = pos else {
+        return columns.iter().position(|c| !c.is_empty()).map(|c| (c, 0));
+    };
+    let land = |c: usize| (c, row.min(columns[c].len() - 1));
+    let filled = |c: &usize| !columns[*c].is_empty();
+    let to = match key {
+        Key::ArrowUp => (col, row.saturating_sub(1)),
+        Key::ArrowDown => (col, (row + 1).min(columns[col].len() - 1)),
+        Key::ArrowLeft => (0..col).rev().find(filled).map_or((col, row), land),
+        Key::ArrowRight => (col + 1..columns.len()).find(filled).map_or((col, row), land),
+        _ => (col, row),
+    };
+    Some(to)
 }
 
 /// While a card is hovered: arrows from the tickets it waits for to it, and from it to the tickets waiting for it.
@@ -257,6 +343,8 @@ fn column_ui(
         selected,
         anchor,
         filter,
+        cursor,
+        scroll_to_cursor,
         ..
     } = op
     else {
@@ -362,15 +450,29 @@ fn column_ui(
                     .filter(|t| t.matches(query) && filter.matches(t, !project.blockers(t).is_empty()))
                     .filter(|t| !archived(t) || *show_archived || !query.trim().is_empty())
                     .collect();
+                drawn.columns.push(visible.iter().map(|t| t.id).collect());
                 for t in &visible {
                     let flagged = auto_column && t.at_run_limit(s.run_limit);
                     let picked = selected.contains(&t.id);
                     let dragging = if picked { selected.len() } else { 1 };
-                    let card = card(ui, t, play, flagged, &project.blockers(t), (picked, dragging), actions);
+                    let at = *cursor == Some(t.id);
+                    let card = card(
+                        ui,
+                        t,
+                        play,
+                        flagged,
+                        &project.blockers(t),
+                        (picked, dragging, at),
+                        actions,
+                    );
+                    if at && *scroll_to_cursor {
+                        card.scroll_to_me(None);
+                    }
                     if ui.clip_rect().intersects(card.rect) {
                         drawn.cards.push((t.id, card.rect, card.hovered()));
                     }
                     if card.clicked() {
+                        *cursor = Some(t.id);
                         click(ui, t.id, &visible, selected, anchor, actions);
                     }
                 }
@@ -478,14 +580,15 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
 }
 
 /// `flagged`: Auto skips the ticket, it has been sent to the AI too many times. `blockers`: tickets it waits for.
-/// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along.
+/// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along. `cursor`: the arrow
+/// keys are on it.
 fn card(
     ui: &mut Ui,
     t: &Ticket,
     play: Option<(&str, &str)>,
     flagged: bool,
     blockers: &[u32],
-    (selected, dragging): (bool, usize),
+    (selected, dragging, cursor): (bool, usize, bool),
     actions: &mut Vec<Action>,
 ) -> egui::Response {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
@@ -510,6 +613,10 @@ fn card(
             if selected {
                 let stroke = Stroke::new(2.0, theme::ACCENT);
                 ui.painter().rect_stroke(rect, 6, stroke, egui::StrokeKind::Inside);
+            }
+            if cursor {
+                let stroke = Stroke::new(2.0, theme::TEXT);
+                ui.painter().rect_stroke(rect, 6, stroke, egui::StrokeKind::Outside);
             }
         })
         .response;
@@ -710,6 +817,7 @@ mod tests {
                     engaged: *engaged,
                     run_limit: 3,
                     archive_days: 7,
+                    keys: true,
                 };
                 show(ui, op, settings, actions)
             },
@@ -960,6 +1068,51 @@ mod tests {
         h.state_mut().0.project.as_mut().unwrap().meta.columns[0].wip_limit = Some(1);
         h.run();
         assert!(h.query_by_label("(2/1)").is_some());
+    }
+
+    #[test]
+    fn arrow_steps_skip_empty_columns_and_keep_the_row() {
+        use egui::Key::*;
+        let cols = vec![vec![1, 2, 3], vec![], vec![4, 5]];
+        assert_eq!(step(&cols, None, ArrowDown), Some((0, 0)));
+        assert_eq!(step(&[vec![], vec![7]], None, ArrowUp), Some((1, 0)));
+        assert_eq!(step(&[vec![], vec![]], None, ArrowUp), None);
+        assert_eq!(step(&cols, Some((0, 0)), ArrowUp), Some((0, 0)));
+        assert_eq!(step(&cols, Some((0, 2)), ArrowDown), Some((0, 2)));
+        assert_eq!(step(&cols, Some((0, 2)), ArrowRight), Some((2, 1)));
+        assert_eq!(step(&cols, Some((2, 0)), ArrowLeft), Some((0, 0)));
+        assert_eq!(step(&cols, Some((2, 1)), ArrowRight), Some((2, 1)));
+    }
+
+    #[test]
+    fn keyboard_moves_opens_selects_and_shifts_cards() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["One", "Two"]);
+        h.key_press(egui::Key::ArrowDown);
+        h.run();
+        assert_eq!(h.state().0.cursor, Some(1));
+        h.key_press(egui::Key::ArrowDown);
+        h.run();
+        assert_eq!(h.state().0.cursor, Some(2));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::ViewTicket(2))));
+        h.key_press(egui::Key::Space);
+        h.run();
+        assert!(h.state().0.selected.contains(&2));
+        h.key_press(egui::Key::CloseBracket);
+        h.run();
+        assert!(
+            h.state()
+                .1
+                .iter()
+                .any(|a| matches!(a, Action::MoveTickets { ids, to_col: 1 } if ids == &[2]))
+        );
+        h.key_press(egui::Key::Space);
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().0.cursor, None);
     }
 
     #[test]

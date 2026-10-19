@@ -45,6 +45,10 @@ pub struct OpenProject {
     pub filter: Filter,
     /// The filter bar shows above the board.
     pub filter_open: bool,
+    /// The card the arrow keys are on.
+    pub cursor: Option<u32>,
+    /// Scroll the cursor's card into view on the next frame.
+    pub scroll_to_cursor: bool,
 }
 
 impl OpenProject {
@@ -61,6 +65,8 @@ impl OpenProject {
             anchor: None,
             filter: Filter::default(),
             filter_open: false,
+            cursor: None,
+            scroll_to_cursor: false,
         }
     }
 
@@ -78,6 +84,7 @@ impl OpenProject {
 }
 
 /// Things the UI asks for; applied after drawing so widgets never hold borrows across mutations.
+#[derive(Clone)]
 pub enum Action {
     SwitchProject(usize),
     OpenProjectDialog,
@@ -110,6 +117,10 @@ pub enum Action {
     ShowStats,
     ToggleFilter,
     Export(ExportFormat),
+    /// Switch Auto on or off for the column with this folder.
+    ToggleAuto(String),
+    /// Pause or resume the AI queue and Auto.
+    TogglePause,
 }
 
 #[derive(Clone, Copy)]
@@ -425,8 +436,7 @@ impl App {
     /// Ctrl+K finds a ticket and Ctrl+Z undoes the last card move or delete (Cmd on macOS), unless something else
     /// has the keyboard: a dialog, a text box or the terminal.
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        let free = self.modal.is_none() && !self.terminal_focused && ctx.memory(|m| m.focused().is_none());
-        if !free || self.active_project().is_none() {
+        if !self.keyboard_free(ctx) || self.active_project().is_none() {
             return;
         }
         if ctx.input_mut(|i| i.consume_shortcut(&FIND)) {
@@ -435,6 +445,57 @@ impl App {
         if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
             self.undo();
         }
+    }
+
+    /// Nothing else has the keyboard: no dialog, text box or terminal.
+    fn keyboard_free(&self, ctx: &egui::Context) -> bool {
+        self.modal.is_none() && !self.terminal_focused && ctx.memory(|m| m.focused().is_none())
+    }
+
+    /// What Ctrl+K can run besides opening a ticket, for the active project.
+    fn commands(&self) -> Vec<(String, Action)> {
+        let mut c: Vec<(String, Action)> = Vec::new();
+        let Some(i) = self.active else { return c };
+        let op = &self.projects[i];
+        if let Ok(p) = &op.project {
+            for (col, column) in p.meta.columns.iter().enumerate() {
+                c.push((format!("New ticket in {}", column.name), Action::NewTicket(col)));
+            }
+            for (col, column) in p.meta.columns.iter().enumerate() {
+                if p.auto_target(col, AutoMove::AiWorking).is_some() {
+                    let verb = if op.auto.contains(&column.folder) { "off" } else { "on" };
+                    let action = Action::ToggleAuto(column.folder.clone());
+                    c.push((format!("Turn Auto {verb} for {}", column.name), action));
+                }
+            }
+        }
+        let pause = if op.paused { "Resume the AI" } else { "Pause the AI" };
+        let filter = if op.filter_open {
+            "Close the filter"
+        } else {
+            "Filter the board"
+        };
+        c.extend([
+            (pause.to_string(), Action::TogglePause),
+            (filter.to_string(), Action::ToggleFilter),
+            ("Project stats".to_string(), Action::ShowStats),
+            ("Edit project".to_string(), Action::EditProject),
+            ("Generate tickets from a document".to_string(), Action::ImportDocument),
+            ("Export tickets as CSV".to_string(), Action::Export(ExportFormat::Csv)),
+            (
+                "Export board as Markdown report".to_string(),
+                Action::Export(ExportFormat::Markdown),
+            ),
+            ("Settings".to_string(), Action::OpenSettings),
+            ("New project".to_string(), Action::NewProject),
+            ("Open project".to_string(), Action::OpenProjectDialog),
+        ]);
+        for (j, other) in self.projects.iter().enumerate() {
+            if j != i && other.project.is_ok() {
+                c.push((format!("Switch to {}", other.name()), Action::SwitchProject(j)));
+            }
+        }
+        c
     }
 
     /// Sends `tickets` to the trash, remembering what they held so Ctrl+Z can bring them back.
@@ -701,6 +762,18 @@ impl App {
             Action::QuickOpen => self.modal = Some(Modal::QuickOpen(QuickOpen::default())),
             Action::ShowStats => self.modal = Some(Modal::Stats),
             Action::Export(format) => self.export(format),
+            Action::ToggleAuto(folder) => {
+                if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i))
+                    && !op.auto.remove(&folder)
+                {
+                    op.auto.insert(folder);
+                }
+            }
+            Action::TogglePause => {
+                if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
+                    op.paused = !op.paused;
+                }
+            }
             Action::ToggleFilter => {
                 if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
                     // Closing the bar drops the filter too, so nothing stays hidden out of sight.
@@ -1591,6 +1664,10 @@ impl App {
     }
 
     fn show_modal(&mut self, ctx: &egui::Context) {
+        let commands = match self.modal {
+            Some(Modal::QuickOpen(_)) => self.commands(),
+            _ => Vec::new(),
+        };
         match &mut self.modal {
             None => {}
             Some(Modal::Project(form)) => {
@@ -1643,8 +1720,12 @@ impl App {
                     self.modal = None;
                     return;
                 };
-                match q.show(ctx, p) {
+                match q.show(ctx, p, &commands) {
                     Some(QuickOutcome::Open(id)) => self.open_ticket(id),
+                    Some(QuickOutcome::Run(action)) => {
+                        self.modal = None;
+                        self.apply(action, ctx);
+                    }
                     Some(QuickOutcome::Close) => self.modal = None,
                     None => {}
                 }
@@ -1912,7 +1993,7 @@ impl App {
                         if icon_button(ui, icon::UPLOAD_SIMPLE, "Generate tickets from a document").clicked() {
                             actions.push(Action::ImportDocument);
                         }
-                        let find = format!("Find a ticket ({})", ui.ctx().format_shortcut(&FIND));
+                        let find = format!("Find a ticket or run a command ({})", ui.ctx().format_shortcut(&FIND));
                         if icon_button(ui, icon::MAGNIFYING_GLASS, &find).clicked() {
                             actions.push(Action::QuickOpen);
                         }
@@ -2276,6 +2357,7 @@ impl eframe::App for App {
                         engaged: self.ai_engaged(i),
                         run_limit: self.config.settings.auto_run_limit,
                         archive_days: self.config.settings.archive_after_days,
+                        keys: self.keyboard_free(&ctx),
                     };
                     ui::board::show(ui, &mut self.projects[i], settings, &mut actions)
                 }

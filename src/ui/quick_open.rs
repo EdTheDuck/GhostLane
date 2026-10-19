@@ -1,6 +1,7 @@
 use egui::{Key, Label, Modifiers, RichText, ScrollArea, TextEdit};
 
 use super::priority_icon;
+use crate::app::Action;
 use crate::project::Project;
 use crate::theme;
 use crate::ticket::Ticket;
@@ -8,7 +9,10 @@ use crate::ticket::Ticket;
 /// Rows shown at most; typing narrows them down.
 const MAX_RESULTS: usize = 50;
 
-/// Ctrl+K: find any ticket on the board by number, title or text and open it.
+/// Commands listed above the tickets while the query doesn't start with `>`.
+const MAX_COMMANDS: usize = 5;
+
+/// Ctrl+K: find any ticket on the board by number, title or text and open it, or run a command.
 #[derive(Default)]
 pub struct QuickOpen {
     pub query: String,
@@ -18,6 +22,31 @@ pub struct QuickOpen {
 pub enum QuickOutcome {
     Close,
     Open(u32),
+    Run(Action),
+}
+
+/// Positions in `commands` whose label has every word of `query`. A query starting with `>` lists commands only,
+/// all of them when nothing follows; otherwise an empty query lists none.
+pub fn matching_commands(commands: &[(String, Action)], query: &str) -> Vec<usize> {
+    let only = query.trim_start().strip_prefix('>');
+    let words: Vec<String> = only
+        .unwrap_or(query)
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect();
+    if words.is_empty() && only.is_none() {
+        return Vec::new();
+    }
+    let found = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, (label, _))| words.iter().all(|w| label.to_lowercase().contains(w)))
+        .map(|(i, _)| i);
+    if only.is_some() {
+        found.collect()
+    } else {
+        found.take(MAX_COMMANDS).collect()
+    }
 }
 
 /// (column, ticket) of the tickets matching `query`, archived ones too: an exact number first, then newest first.
@@ -36,8 +65,25 @@ pub fn results<'a>(project: &'a Project, query: &str) -> Vec<(usize, &'a Ticket)
 }
 
 impl QuickOpen {
-    pub fn show(&mut self, ctx: &egui::Context, project: &Project) -> Option<QuickOutcome> {
-        let found = results(project, &self.query);
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        project: &Project,
+        commands: &[(String, Action)],
+    ) -> Option<QuickOutcome> {
+        let commanding = self.query.trim_start().starts_with('>');
+        let matched = matching_commands(commands, &self.query);
+        let found = if commanding {
+            Vec::new()
+        } else {
+            results(project, &self.query)
+        };
+        // Commands first, then tickets.
+        let rows = matched.len() + found.len();
+        let pick = |row: usize| match row.checked_sub(matched.len()) {
+            None => QuickOutcome::Run(commands[matched[row]].1.clone()),
+            Some(t) => QuickOutcome::Open(found[t].1.id),
+        };
         // Read before the text box sees them: it would move its cursor instead.
         let (down, up, enter) = ctx.input_mut(|i| {
             (
@@ -46,7 +92,7 @@ impl QuickOpen {
                 i.consume_key(Modifiers::NONE, Key::Enter),
             )
         });
-        let last = found.len().saturating_sub(1);
+        let last = rows.saturating_sub(1);
         if down {
             self.selected = (self.selected + 1).min(last);
         }
@@ -54,9 +100,7 @@ impl QuickOpen {
             self.selected = self.selected.saturating_sub(1);
         }
         self.selected = self.selected.min(last);
-        let mut outcome = enter
-            .then(|| found.get(self.selected).map(|(_, t)| QuickOutcome::Open(t.id)))
-            .flatten();
+        let mut outcome = (enter && self.selected < rows).then(|| pick(self.selected));
         let modal = super::show_modal(ctx, "quick_open", |ui| {
             ui.set_width(560.0);
             // Rows take the clicks, not the text in them.
@@ -65,7 +109,7 @@ impl QuickOpen {
                 TextEdit::singleline(&mut self.query)
                     .margin(super::INPUT_MARGIN)
                     .hint_text(format!(
-                        "{}  Find a ticket by number, title or text",
+                        "{}  Find a ticket by number, title or text, or type > for commands",
                         egui_phosphor::regular::MAGNIFYING_GLASS
                     ))
                     .desired_width(f32::INFINITY),
@@ -74,13 +118,42 @@ impl QuickOpen {
             if typed.changed() {
                 self.selected = 0;
             }
-            if found.is_empty() {
-                ui.label(RichText::new("No tickets match.").color(theme::TEXT_MUTED));
+            if rows == 0 {
+                let text = if commanding {
+                    "No commands match."
+                } else {
+                    "No tickets match."
+                };
+                ui.label(RichText::new(text).color(theme::TEXT_MUTED));
                 return;
             }
             ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
+                for (i, &c) in matched.iter().enumerate() {
+                    let fill = if i == self.selected {
+                        theme::CARD_HOVER
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let row = egui::Frame::new()
+                        .fill(fill)
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(8, 2))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new(egui_phosphor::regular::CARET_RIGHT).color(theme::ACCENT));
+                                ui.add(Label::new(&commands[c].0).truncate());
+                            });
+                        })
+                        .response
+                        .interact(egui::Sense::click());
+                    if super::pointer(row).clicked() {
+                        outcome = Some(pick(i));
+                    }
+                }
                 for (i, (col, t)) in found.iter().enumerate() {
+                    let i = i + matched.len();
                     let fill = if i == self.selected {
                         theme::CARD_HOVER
                     } else {
@@ -154,7 +227,7 @@ mod tests {
         let state = (QuickOpen::default(), project(d.path()), None::<u32>);
         let mut h = Harness::new_ui_state(
             |ui, (q, p, opened): &mut (QuickOpen, Project, Option<u32>)| {
-                if let Some(QuickOutcome::Open(id)) = q.show(ui.ctx(), p) {
+                if let Some(QuickOutcome::Open(id)) = q.show(ui.ctx(), p, &[]) {
                     *opened = Some(id);
                 }
             },
@@ -171,5 +244,56 @@ mod tests {
         h.key_press(Key::Enter);
         h.run();
         assert_eq!(h.state().2, Some(1)); // second row: "Login page"
+    }
+
+    fn commands() -> Vec<(String, Action)> {
+        vec![
+            ("Project stats".into(), Action::ShowStats),
+            ("Login settings".into(), Action::OpenSettings),
+            ("Filter the board".into(), Action::ToggleFilter),
+        ]
+    }
+
+    #[test]
+    fn commands_match_every_word_and_show_with_a_prefix() {
+        let c = commands();
+        assert!(matching_commands(&c, "").is_empty());
+        assert_eq!(matching_commands(&c, ">"), [0, 1, 2]);
+        assert_eq!(matching_commands(&c, "STATS"), [0]);
+        assert_eq!(matching_commands(&c, "the filter"), [2]);
+        assert_eq!(matching_commands(&c, "> set"), [1]);
+    }
+
+    type PaletteState = (QuickOpen, Project, Option<&'static str>);
+
+    #[test]
+    fn commands_come_before_tickets_and_run() {
+        let d = tempfile::tempdir().unwrap();
+        let state: PaletteState = (QuickOpen::default(), project(d.path()), None);
+        let mut h = Harness::new_ui_state(
+            |ui, (q, p, out): &mut PaletteState| match q.show(ui.ctx(), p, &commands()) {
+                Some(QuickOutcome::Run(Action::OpenSettings)) => *out = Some("settings"),
+                Some(QuickOutcome::Open(_)) => *out = Some("ticket"),
+                _ => {}
+            },
+            state,
+        );
+        theme::apply(&h.ctx);
+        h.set_size(egui::vec2(900.0, 700.0));
+        h.run_steps(3);
+        h.event(egui::Event::Text("login".into()));
+        h.run();
+        assert!(h.query_by_label("Login settings").is_some());
+        assert!(h.query_by_label("Login page").is_some());
+        h.key_press(Key::Enter);
+        h.run();
+        assert_eq!(h.state().2, Some("settings"));
+        h.state_mut().2 = None;
+        h.state_mut().0.query = ">".into();
+        h.run();
+        assert!(h.query_by_label("Login page").is_none(), "> lists commands only");
+        h.get_by_label("Login settings").click();
+        h.run();
+        assert_eq!(h.state().2, Some("settings"));
     }
 }

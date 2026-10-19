@@ -156,6 +156,8 @@ Ctrl-click cards (Cmd-click on macOS) to pick several, or Shift-click to pick a 
 
 Moved or deleted something by mistake? **Ctrl+Z** puts it back.
 
+Prefer the keyboard? With nothing else focused, the **arrow keys** walk between cards, **Enter** opens one, **Space** adds it to the selection, **[** and **]** move it (or the whole selection) a column left or right, and **Delete** deletes it.
+
 ### See how it's going
 
 The chart icon in the title bar opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, and which tickets needed the most runs.
@@ -185,7 +187,7 @@ Each column header shows a live ticket count and three quick tools:
 
 Want to see just part of the board? The funnel in the title bar opens a filter bar: pick priorities, labels, only blocked tickets, or tickets that have needed a certain number of runs, and every column narrows down at once.
 
-Looking for one ticket? Press **Ctrl+K** (Cmd+K on macOS) or the magnifying glass in the title bar, type a number or a few words, and jump straight to it from any column.
+Looking for one ticket? Press **Ctrl+K** (Cmd+K on macOS) or the magnifying glass in the title bar, type a number or a few words, and jump straight to it from any column. The same box runs commands too: type `stats`, `auto` or `export`, or start with `>` to list them all, from adding a ticket to any column to switching projects or pausing the AI.
 
 The last column stays short: tickets that have been done for a while (a week by default) tuck away behind a **Show archived** link at the bottom. Their files stay right where they are, and a search still finds them.
 
