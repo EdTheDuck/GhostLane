@@ -3,6 +3,7 @@ use egui_phosphor::regular as icon;
 
 use super::{accent_button, icon_button};
 use crate::config::Settings;
+use crate::project::AutoOrder;
 use crate::terminal::{AI_CLIS, detect_ai_clis, detect_shell};
 use crate::theme;
 
@@ -15,6 +16,7 @@ pub struct SettingsForm {
     shell: String,
     terminal_font_size: f32,
     check_for_updates: bool,
+    auto_order: AutoOrder,
     detected_shell: String,
     installed: Vec<String>,
 }
@@ -33,6 +35,7 @@ impl SettingsForm {
             shell: s.shell.clone().unwrap_or_default(),
             terminal_font_size: s.terminal_font_size,
             check_for_updates: s.check_for_updates,
+            auto_order: s.auto_order,
             detected_shell: detect_shell(None).0,
             installed: detect_ai_clis(),
         }
@@ -97,6 +100,20 @@ impl SettingsForm {
                     .margin(super::INPUT_MARGIN)
                     .desired_width(f32::INFINITY),
             );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Auto order").strong())
+                    .on_hover_text("Which ticket columns set to Auto start next");
+                let combo = ComboBox::from_id_salt("auto_order")
+                    .selected_text(self.auto_order.label())
+                    .show_ui(ui, |ui| {
+                        for order in AutoOrder::ALL {
+                            ui.selectable_value(&mut self.auto_order, order, order.label());
+                        }
+                    });
+                super::pointer(combo.response);
+            });
             ui.add_space(8.0);
 
             ui.label(RichText::new("Shell").strong());
@@ -183,6 +200,7 @@ impl SettingsForm {
             shell: (!shell.is_empty()).then(|| shell.to_string()),
             terminal_font_size: self.terminal_font_size,
             check_for_updates: self.check_for_updates,
+            auto_order: self.auto_order,
         }
     }
 }
@@ -217,6 +235,7 @@ mod tests {
             ai_clis: Some(vec!["aider".into()]),
             shell: Some("fish".into()),
             check_for_updates: false,
+            auto_order: AutoOrder::IdAsc,
         });
         form.reset();
         let s = form.to_settings();
@@ -224,6 +243,7 @@ mod tests {
         assert_eq!(s.terminal_font_size, 13.0);
         assert_eq!(s.shell, None);
         assert!(s.check_for_updates);
+        assert_eq!(s.auto_order, AutoOrder::PriorityDesc);
         assert_eq!(s.ai_clis, Some(detect_ai_clis()));
     }
 

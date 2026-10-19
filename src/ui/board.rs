@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use egui::text::LayoutJob;
 use egui::{
@@ -9,7 +9,7 @@ use egui_phosphor::regular as icon;
 
 use super::{icon_button, priority_icon};
 use crate::app::{Action, OpenProject};
-use crate::project::{AutoMove, Column, Sort, SortBy, SortDir};
+use crate::project::{AutoMove, Project, Sort, SortBy, SortDir};
 use crate::theme;
 use crate::ticket::Ticket;
 
@@ -26,9 +26,9 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = COLUMN_GAP;
             let height = ui.available_height();
-            for (col, column) in project.meta.columns.iter().enumerate() {
+            for col in 0..project.meta.columns.len() {
                 ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
-                    column_ui(ui, col, column, width, &project.tickets[col], &mut op.search, actions);
+                    column_ui(ui, project, col, width, &mut op.search, &mut op.auto, actions);
                 });
             }
         });
@@ -44,13 +44,14 @@ fn column_width(available: f32, columns: usize) -> f32 {
 
 fn column_ui(
     ui: &mut Ui,
+    project: &Project,
     col: usize,
-    column: &Column,
     width: f32,
-    tickets: &[Ticket],
     search: &mut HashMap<String, String>,
+    auto: &mut HashSet<String>,
     actions: &mut Vec<Action>,
 ) {
+    let (column, tickets) = (&project.meta.columns[col], &project.tickets[col]);
     let mut prepared = Frame::new()
         .fill(theme::PANEL)
         .corner_radius(CornerRadius::same(8))
@@ -63,8 +64,8 @@ fn column_ui(
 
         let mut focus_search = false;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&column.name).strong().size(15.0));
-            ui.label(RichText::new(format!("({})", tickets.len())).color(theme::TEXT_MUTED));
+            let gap = ui.spacing().item_spacing.x;
+            // Buttons first, so a long column name shortens instead of running under them.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Visible gap between glyphs was 14 (30px button, 16px glyph) + 12 spacing; 75% of that.
                 ui.spacing_mut().item_spacing.x = 5.5;
@@ -79,6 +80,26 @@ fn column_ui(
                     search.insert(column.folder.clone(), String::new());
                     focus_search = true;
                 }
+                if project.auto_target(col, AutoMove::AiWorking).is_some() {
+                    auto_toggle(ui, auto, &column.folder);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    let count =
+                        egui::WidgetText::from(RichText::new(format!("({})", tickets.len())).color(theme::TEXT_MUTED))
+                            .into_galley(
+                                ui,
+                                Some(egui::TextWrapMode::Extend),
+                                f32::INFINITY,
+                                egui::TextStyle::Body,
+                            );
+                    let name_width = (ui.available_width() - count.size().x - gap - 8.0).max(0.0);
+                    ui.scope(|ui| {
+                        ui.set_max_width(name_width);
+                        ui.add(egui::Label::new(RichText::new(&column.name).strong().size(15.0)).truncate());
+                    });
+                    ui.label(count);
+                });
             });
         });
 
@@ -127,6 +148,26 @@ fn column_ui(
         });
     }
     prepared.paint(ui);
+}
+
+/// "Auto" switch: while on, the AI works through this column's tickets by itself whenever its queue is empty.
+fn auto_toggle(ui: &mut Ui, auto: &mut HashSet<String>, folder: &str) {
+    const TIP: &str = "Work on this column's tickets automatically when the queue is empty";
+    let mut on = auto.contains(folder);
+    ui.add_space(6.0);
+    // Right to left: the label lands to the right of the switch. Like a checkbox label, it toggles too.
+    let label = ui
+        .add(egui::Label::new("Auto").sense(Sense::click()))
+        .on_hover_text(TIP);
+    if super::pointer(label).clicked() {
+        on = !on;
+    }
+    super::toggle(ui, &mut on).on_hover_text(TIP);
+    if on {
+        auto.insert(folder.to_string());
+    } else {
+        auto.remove(folder);
+    }
 }
 
 fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
@@ -323,6 +364,7 @@ mod tests {
             project: Ok(p),
             search: HashMap::new(),
             queue: Vec::new(),
+            auto: HashSet::new(),
         };
         let mut h = Harness::new_ui_state(|ui, (op, actions): &mut State| show(ui, op, actions), (op, Vec::new()));
         crate::theme::apply(&h.ctx);
@@ -359,6 +401,23 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let h = harness_cols(d.path(), &["Hello"], AutoMove::AiComplete);
         assert_eq!(h.get_all_by_label(icon::PLAY).count(), 2);
+    }
+
+    #[test]
+    fn auto_switch_only_on_columns_that_hand_tickets_to_the_ai() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_cols(d.path(), &["Hello"], AutoMove::AiWorking);
+        assert_eq!(h.get_all_by_label("Auto").count(), 1);
+        h.get_by_label("Auto").click();
+        h.run();
+        assert!(h.state().0.auto.contains("to_do"));
+        // The switch itself toggles as well as its label.
+        h.get_by_role(egui::accesskit::Role::CheckBox).click();
+        h.run();
+        assert!(h.state().0.auto.is_empty());
+        let d = tempfile::tempdir().unwrap();
+        let h = harness_cols(d.path(), &["Hello"], AutoMove::AiComplete);
+        assert_eq!(h.query_all_by_label("Auto").count(), 0);
     }
 
     #[test]

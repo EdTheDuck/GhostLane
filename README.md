@@ -51,6 +51,8 @@ Every card has a ▶ button. Press it and GhostLane fills in that column's comma
 
 Busy AI? Keep pressing ▶. Each extra ticket joins a queue and starts the moment the AI finishes the one before it. The queue icon at the right of the terminal bar turns green when tickets are waiting; click it to open the queue beside the terminal, drag tickets into the order you want, or remove any you've changed your mind about.
 
+Want it hands-free? Flip the **Auto** switch on a column whose tickets the AI picks up (like To Do or Ready For Test). Whenever the queue is empty, GhostLane starts the next ticket from your Auto columns by itself, in the **Auto order** you choose in Settings (highest priority first, unless you change it). On a tie, the ticket further along the board goes first, so work gets finished before new work starts. Auto switches off when you close GhostLane, so a project never sets the AI going until you say so.
+
 Each column can have its own command. New projects come with two ready to go:
 
 - **To Do** asks the AI to develop the ticket and move it to Ready For Test when it's finished.
@@ -135,6 +137,7 @@ Click the ⚙ cog to choose:
 
 - which **AI CLIs** are available to your projects (installed ones are switched on for you the first time)
 - the **Default AI command** the ▶ button sends for columns that don't have their own, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
+- the **Auto order** your Auto columns work through tickets in: by priority or by number, ascending or descending
 - which **shell** to use (detected automatically by default)
 - the **terminal font size**
 

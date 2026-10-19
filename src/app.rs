@@ -27,6 +27,8 @@ pub struct OpenProject {
     pub search: HashMap<String, String>,
     /// Tickets to hand to the AI once it finishes the current one, in order.
     pub queue: Vec<u32>,
+    /// Folders of the columns set to Auto. Kept in memory only, so a cloned repo never starts the AI by itself.
+    pub auto: std::collections::HashSet<String>,
 }
 
 impl OpenProject {
@@ -37,6 +39,7 @@ impl OpenProject {
             project,
             search: HashMap::new(),
             queue: Vec::new(),
+            auto: std::collections::HashSet::new(),
         }
     }
 
@@ -313,6 +316,7 @@ impl App {
                     project: Err(String::new()),
                     search: HashMap::new(),
                     queue: Vec::new(),
+                    auto: std::collections::HashSet::new(),
                 });
                 self.projects.len() - 1
             }
@@ -558,7 +562,12 @@ impl App {
                 self.toast(format!("Couldn't move {}: {e}", crate::ticket::format_id(run.id)));
             }
         }
-        // A project whose AI is free starts its next queued ticket.
+        // A project whose AI is free starts its next queued ticket, or with an empty queue, the next one
+        // from its Auto columns. Not while a ticket is being written: that prompt is still in flight.
+        if self.generating.is_some() {
+            return;
+        }
+        let order = self.config.settings.auto_order;
         for i in 0..self.projects.len() {
             let Ok(p) = &self.projects[i].project else { continue };
             if self.ai_runs.iter().any(|r| r.ghost == p.ghost_path) {
@@ -569,6 +578,28 @@ impl App {
                 if self.run_ai(i, id, ctx) {
                     break;
                 }
+            }
+            let op = &self.projects[i];
+            let Ok(p) = &op.project else { continue };
+            if !op.queue.is_empty() || self.ai_runs.iter().any(|r| r.ghost == p.ghost_path) {
+                continue;
+            }
+            let Some((col, id)) = p.next_auto(&op.auto, order) else {
+                continue;
+            };
+            let started = self.run_ai(i, id, ctx);
+            let op = &mut self.projects[i];
+            let moved = op
+                .project
+                .as_ref()
+                .is_ok_and(|p| p.find_ticket(id).is_none_or(|(c, _)| c != col));
+            if !started || !moved {
+                // Otherwise Auto would pick the same ticket again and again.
+                op.auto.clear();
+                self.toast(format!(
+                    "Auto turned off: {} didn't start",
+                    crate::ticket::format_id(id)
+                ));
             }
         }
     }

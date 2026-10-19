@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use crate::project::AutoOrder;
 use crate::ticket::write_atomic;
 
 pub const DEFAULT_AI_PROMPT: &str = "Complete the ticket at {ticket_path}";
@@ -19,6 +20,8 @@ pub struct Settings {
     pub terminal_font_size: f32,
     /// Look for a newer GitHub release on startup.
     pub check_for_updates: bool,
+    /// Which ticket columns set to Auto start next.
+    pub auto_order: AutoOrder,
 }
 
 impl Default for Settings {
@@ -29,6 +32,7 @@ impl Default for Settings {
             shell: None,
             terminal_font_size: 13.0,
             check_for_updates: true,
+            auto_order: AutoOrder::default(),
         }
     }
 }

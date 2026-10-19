@@ -60,6 +60,35 @@ impl AutoMove {
     }
 }
 
+/// Which ticket the columns set to Auto hand to the AI first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOrder {
+    PriorityAsc,
+    #[default]
+    PriorityDesc,
+    IdAsc,
+    IdDesc,
+}
+
+impl AutoOrder {
+    pub const ALL: [AutoOrder; 4] = [
+        AutoOrder::PriorityAsc,
+        AutoOrder::PriorityDesc,
+        AutoOrder::IdAsc,
+        AutoOrder::IdDesc,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AutoOrder::PriorityAsc => "Priority Ascending",
+            AutoOrder::PriorityDesc => "Priority Descending",
+            AutoOrder::IdAsc => "Number Ascending",
+            AutoOrder::IdDesc => "Number Descending",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortBy {
@@ -297,6 +326,27 @@ impl Project {
     }
 
     /// (column, ticket) of ticket `id`.
+    /// (column, id) of the ticket Auto works on next, from the columns whose folder is in `auto` and whose
+    /// tickets move on "AI Working": first by `order`, then the right-most column, then the lowest id.
+    pub fn next_auto(&self, auto: &HashSet<String>, order: AutoOrder) -> Option<(usize, u32)> {
+        self.meta
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(c, col)| auto.contains(&col.folder) && self.auto_target(*c, AutoMove::AiWorking).is_some())
+            .flat_map(|(c, _)| self.tickets.get(c).into_iter().flatten().map(move |t| (c, t)))
+            .min_by(|(ca, a), (cb, b)| {
+                let ord = match order {
+                    AutoOrder::PriorityAsc => a.priority.cmp(&b.priority),
+                    AutoOrder::PriorityDesc => b.priority.cmp(&a.priority),
+                    AutoOrder::IdAsc => a.id.cmp(&b.id),
+                    AutoOrder::IdDesc => b.id.cmp(&a.id),
+                };
+                ord.then(cb.cmp(ca)).then(a.id.cmp(&b.id))
+            })
+            .map(|(c, t)| (c, t.id))
+    }
+
     pub fn find_ticket(&self, id: u32) -> Option<(usize, &Ticket)> {
         self.tickets
             .iter()
@@ -608,6 +658,34 @@ mod tests {
         let t = add(&mut p, 0, "c");
         assert_eq!(t.id, 42);
         assert!(t.path.ends_with("tickets/to_do/00042.md"));
+    }
+
+    #[test]
+    fn auto_picks_by_order_then_right_most_column() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = new_project(d.path());
+        for (c, m) in p.meta.columns.iter_mut().zip(DEFAULT_AUTO_MOVES) {
+            c.auto_move = m;
+        }
+        let mut put = |col, priority| {
+            let t = Ticket {
+                priority,
+                ..Default::default()
+            };
+            p.add_ticket(col, t).unwrap().id
+        };
+        let (a, b, c) = (
+            put(0, ticket::Priority::High),
+            put(2, ticket::Priority::High),
+            put(0, ticket::Priority::Low),
+        );
+        let _not_auto = put(4, ticket::Priority::Highest);
+        let auto: HashSet<String> = ["to_do", "ready_for_test", "done"].map(String::from).into();
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityDesc), Some((2, b)));
+        assert_eq!(p.next_auto(&auto, AutoOrder::PriorityAsc), Some((0, c)));
+        assert_eq!(p.next_auto(&auto, AutoOrder::IdAsc), Some((0, a)));
+        assert_eq!(p.next_auto(&auto, AutoOrder::IdDesc), Some((0, c)));
+        assert_eq!(p.next_auto(&HashSet::new(), AutoOrder::IdAsc), None);
     }
 
     #[test]
