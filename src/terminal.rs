@@ -438,6 +438,20 @@ fn notify_command(title: &str, body: &str) -> std::process::Command {
     }
 }
 
+/// Opens `dir` in the system's file manager (Explorer, Finder or the desktop's default) without waiting.
+pub fn open_folder(dir: &Path) -> std::io::Result<()> {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(program).arg(dir).spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 /// Runs `script` with `shell` in `cwd` and waits. Returns whether it exited with 0, and the last lines of its
 /// output.
 pub fn run_script(shell: Option<&str>, script: &str, cwd: &Path) -> (bool, String) {

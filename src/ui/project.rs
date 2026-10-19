@@ -76,6 +76,8 @@ pub enum ProjectOutcome {
     OpenExisting(PathBuf),
     /// Save the board to a file; the dialog stays open.
     Export(ExportFormat),
+    /// Open this folder in the system's file manager; the dialog stays open.
+    ShowFolder(PathBuf),
 }
 
 impl ProjectForm {
@@ -169,9 +171,18 @@ impl ProjectForm {
         let modal = super::show_modal(ctx, "project_modal", |ui| {
             ui.set_width(540.0);
             let title = if self.editing { "Edit Project" } else { "New Project" };
-            if super::modal_header(ui, title, "Close") {
+            if super::modal_close(ui, "Close") {
                 outcome = Some(ProjectOutcome::Cancel);
             }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).size(20.0).strong());
+                if self.editing
+                    && let Some(dir) = &self.location
+                    && icon_button(ui, icon::FOLDER_OPEN, "Open the project folder").clicked()
+                {
+                    outcome = Some(ProjectOutcome::ShowFolder(dir.clone()));
+                }
+            });
             ui.add_space(6.0);
 
             ui.label("Name");
@@ -608,6 +619,35 @@ mod tests {
         h.get_by_label_contains("Board as Markdown report").click();
         h.run();
         assert_eq!(h.state().1, Some("markdown"));
+    }
+
+    #[test]
+    fn folder_icon_opens_the_project_folder_when_editing() {
+        let h = harness();
+        assert!(
+            h.query_by_label(icon::FOLDER_OPEN).is_none(),
+            "a new project has no folder yet"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let p = Project::create(d.path(), "P", &["To Do".into()]).unwrap();
+        let form = ProjectForm::edit(&p, vec!["claude".into()], "Do", ProjectSettings::default());
+        let mut h = Harness::new_ui_state(
+            |ui, (form, out): &mut (ProjectForm, Option<PathBuf>)| {
+                if let Some(ProjectOutcome::ShowFolder(dir)) = form.show(ui.ctx()) {
+                    *out = Some(dir);
+                }
+            },
+            (form, None),
+        );
+        crate::theme::apply(&h.ctx);
+        h.set_size(egui::vec2(900.0, 1000.0));
+        h.run_steps(3);
+        let title = h.get_by_label("Edit Project").rect();
+        let folder = h.get_by_label(icon::FOLDER_OPEN).rect();
+        assert!(folder.left() > title.right() && (folder.center().y - title.center().y).abs() < 4.0);
+        h.get_by_label(icon::FOLDER_OPEN).click();
+        h.run();
+        assert_eq!(h.state().1.as_deref(), Some(d.path()));
     }
 
     #[test]

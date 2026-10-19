@@ -1928,6 +1928,11 @@ impl App {
             ProjectOutcome::Cancel => self.modal = None,
             // The dialog stays open.
             ProjectOutcome::Export(format) => self.export(format),
+            ProjectOutcome::ShowFolder(dir) => {
+                if let Err(e) = terminal::open_folder(&dir) {
+                    self.toast(format!("Couldn't open {}: {e}", dir.display()));
+                }
+            }
             ProjectOutcome::OpenExisting(path) => {
                 self.modal = None;
                 self.open_path(path, ctx);
