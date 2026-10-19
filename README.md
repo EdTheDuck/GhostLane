@@ -10,7 +10,7 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 
 **[⬇ Download the latest release](../../releases/latest)**
 
-![The GhostLane board with Claude Code working on a ticket, Auto switched on for To Do and two tickets queued beside the terminal](docs/screenshots/board.png)
+![The GhostLane board: labelled tickets across five columns, locks on blocked tickets, a WIP limit on In Dev, and Claude Code ready in the terminal below](docs/screenshots/board.png)
 
 ---
 
@@ -22,6 +22,7 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 - **Hands-free when you want it.** Queue up tickets while the AI is busy, or switch a column to Auto and let it work through the backlog by itself. Pause or stop it whenever you need to step in.
 - **Tickets move themselves.** Press ▶ on a To Do ticket and it slides into In Dev while the AI works, then on to Ready For Test when it's done. Testing works the same way, so a ticket can go from idea to Done with two clicks.
 - **A Developer and a Tester on call.** GhostLane sets up developer and tester sub agents for your AI CLI that know your columns, which tickets are theirs and where to move them next.
+- **A big backlog stays readable.** Labels, a filter bar, WIP limits and arrows between dependent tickets show what matters at a glance, and Ctrl+K jumps to any ticket or command.
 - **The AI can see the plan.** Tickets live in `tickets/` inside your project, so your AI can read past and upcoming work, and can create or edit tickets itself. The board picks up every change the moment the file changes.
 - **Bring your own AI.** Claude Code, OpenAI Codex, Gemini CLI, GitHub Copilot CLI, Cursor, opencode and Aider are built in. Each project picks its own.
 - **Plain files, no lock-in.** A ticket is a `.md` file with a short YAML header. Grep it, commit it, edit it in any editor. If you stop using GhostLane tomorrow, your plan is still readable.
@@ -42,7 +43,7 @@ GhostLane sends the request to the project's AI CLI in the terminal. The AI look
 
 When the file appears, the new ticket lands on the board. If the CLI exits early or something goes wrong, GhostLane tells you what happened.
 
-Existing tickets work the same way. Open a ticket, click the pencil, and the **AI Assisted** tab lets you say what should change ("raise the priority and add a test for expired links"). The AI updates the file in place and keeps its ID and run count.
+Existing tickets work the same way. Open a ticket, click **Edit**, and the **AI Assisted** tab lets you say what should change ("raise the priority and add a test for expired links"). The AI updates the file in place and keeps its ID and run count.
 
 Prefer to write it yourself? The **Manual** tab is always one click away.
 
@@ -64,7 +65,7 @@ A ticket that keeps failing its tests won't loop forever: once it has been sent 
 
 Need to step in? The terminal bar has a ⏸ **Pause** button that lets the AI finish the ticket it's on and then starts nothing new, and a ⏹ **Stop** button that interrupts the AI straight away, leaves the ticket where it is and pauses the queue. Press ▶ **Resume** when you're ready.
 
-GhostLane also gets your attention when you're in another window: the taskbar flashes (or the Dock icon bounces) when the AI has run out of work, and when a ticket fails and comes back to an earlier column.
+GhostLane also gets your attention when you're in another window: the taskbar flashes (or the Dock icon bounces) when the AI has run out of work, and when a ticket fails and comes back to an earlier column. A desktop notification tells you each time a run ends, which column the ticket landed in, and whether the test command passed.
 
 Each column can have its own command. New projects come with two ready to go:
 
@@ -83,7 +84,7 @@ A real shell sits at the bottom of the window, opened in your project folder: Po
 
 Tickets are edited like a document, not like source code. Headings, bullet and numbered lists, checklists, quotes, code blocks, bold, italic, inline code and links all show formatted as you type. Markdown shortcuts such as `- ` or `## ` format the line for you, and Ctrl+B and Ctrl+I work as you'd expect.
 
-![The visual ticket editor](docs/screenshots/editor.png)
+![The visual ticket editor, with the Blocked by list open](docs/screenshots/editor.png)
 
 Behind the scenes it's still plain Markdown. If a ticket uses Markdown the editor can't show (a table, say), that field opens as plain text so nothing gets lost, and fields you don't touch are saved exactly as they were.
 
@@ -102,13 +103,15 @@ Every ticket has:
 - an optional **Blocked by** list of tickets that have to be finished first
 - a **run history**: every time the AI worked on it, how long it took, where the ticket went, how it ended and, with Claude Code, how many tokens it used
 
-Click a card to read it with the Markdown fully rendered, including its run history. Right-click it to **Edit**, **Duplicate** or **Delete**. Deleted tickets go to your Recycle Bin or Trash, so you can get them back.
+Click a card to read it with the Markdown fully rendered, its labels, the tickets it blocks or waits for, and its run history. **Edit** at the bottom right opens it for changes. Right-click a card to **Edit**, **Duplicate** or **Delete** it. Deleted tickets go to your Recycle Bin or Trash, so you can get them back.
+
+![A ticket opened for reading, with its labels, the ticket it blocks and a run history with token counts](docs/screenshots/ticket-view.png)
 
 ### Boards shaped to your workflow
 
-New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that: drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. Done with a project? **Delete** at the bottom left either just removes it from GhostLane, leaving every file in place, or also moves its `.ghost` file and `tickets/` folder to the Recycle Bin or Trash; nothing else in the folder is touched. This is also where you pick the project's AI CLI, and where the terminal icon on each column opens that column's ▶ command.
+New projects start with **To Do → In Dev → Ready For Test → In Test → Done**. Click the pencil next to the project name to change that (the folder icon beside the dialog's title opens the project's folder): drag columns into a new order, rename them, add more or remove some. If a column you remove still has tickets, GhostLane asks where to move them first. Done with a project? **Delete** at the bottom left either just removes it from GhostLane, leaving every file in place, or also moves its `.ghost` file and `tickets/` folder to the Recycle Bin or Trash; nothing else in the folder is touched. This is also where you pick the project's AI CLI, and where the terminal icon on each column opens that column's ▶ command.
 
-![Editing a project's columns and AI CLI](docs/screenshots/project.png)
+![Editing a project's columns, WIP limits, Git options and exports](docs/screenshots/project.png)
 
 Give a column a **WIP limit** to keep work in progress in check: its header shows `(4/3)` in red when there are too many tickets in it, and Auto won't move another ticket in until there's room.
 
@@ -128,9 +131,11 @@ With Claude Code and OpenAI Codex, GhostLane knows exactly when the AI has finis
 
 ### Work in the right order
 
-Some tickets can't start until others are finished. Click into a ticket's **Blocked by** field (on the Manual tab) and pick from the list of tickets that drops down, typing a number or a few title words to narrow it, (or let your AI fill it in when it writes tickets from a spec) and the card shows a 🔒 until every one of them reaches the last column. Auto and the queue skip a blocked ticket and come back to it once it's free, so ticket 4 never starts before ticket 3 is done. Need it now anyway? ▶ still runs it straight away.
+Some tickets can't start until others are finished. Click into a ticket's **Blocked by** field on the Manual tab and pick them from the list that drops down, typing a number or a few title words to narrow it. Your AI fills it in too when it writes tickets from a spec. The card then shows a 🔒 until every one of them reaches the last column. Auto and the queue skip a blocked ticket and come back to it once it's free, so ticket 4 never starts before ticket 3 is done. Need it now anyway? ▶ still runs it straight away.
 
 Hover over a card to see how it connects: arrows run from the tickets it waits for to it, and from it to the tickets waiting on it, red while the one at the start isn't done yet. Open a ticket and it lists both sides, **Blocked by** and **Blocks**; click one to jump straight to it.
+
+![Hovering a blocked ticket: a red arrow from the unfinished ticket it waits for and a grey one from a finished one](docs/screenshots/dependencies.png)
 
 ### Done means done
 
@@ -164,7 +169,9 @@ Prefer the keyboard? With nothing else focused, the **arrow keys** walk between 
 
 ### See how it's going
 
-The chart icon in the title bar opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, how many tokens the AI has used (with Claude Code), and which tickets needed the most runs.
+The chart icon in the title bar, next to the settings cog, opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, how many tokens the AI has used (with Claude Code), and which tickets needed the most runs.
+
+![Project stats: headline numbers, tickets done per day and the tickets that needed the most runs](docs/screenshots/stats.png)
 
 ### Take the board with you
 
@@ -189,9 +196,13 @@ Each column header shows a live ticket count and three quick tools:
 - ⇅ **Sort** orders tickets by ID, priority or title, ascending or descending. GhostLane remembers your choice for each column.
 - ➕ **Add** creates a new ticket directly in that column.
 
-Want to see just part of the board? The funnel in the title bar opens a filter bar: pick priorities, labels, only blocked tickets, or tickets that have needed a certain number of runs, and every column narrows down at once.
+Want to see just part of the board? The funnel in the title bar opens a filter bar: pick priorities, labels, only blocked tickets, or tickets that have needed a certain number of runs, and every column narrows down at once. Clicking a label on a card does the same for that label.
+
+![The filter bar narrowing the board to tickets labelled ui](docs/screenshots/filter.png)
 
 Looking for one ticket? Press **Ctrl+K** (Cmd+K on macOS) or the magnifying glass in the title bar, type a number or a few words, and jump straight to it from any column. The same box runs commands too: type `stats`, `auto` or `export`, or start with `>` to list them all, from adding a ticket to any column to switching projects or pausing the AI.
+
+![Ctrl+K listing commands](docs/screenshots/command-palette.png)
 
 The last column stays short: tickets that have been done for a while (a week by default) tuck away behind a **Show archived** link at the bottom. Their files stay right where they are, and a search still finds them.
 

@@ -50,7 +50,11 @@ pub fn show(ctx: &egui::Context, name: &str, s: &Stats, today: u64) -> bool {
                         .monospace()
                         .color(theme::TEXT_MUTED),
                 );
-                ui.add(egui::Label::new(title).truncate());
+                // A grid column only grows to what it is given, so the title gets a width to truncate at.
+                ui.scope(|ui| {
+                    ui.set_width(560.0);
+                    ui.add(egui::Label::new(title).truncate());
+                });
                 ui.label(RichText::new(format!("{runs} runs")).color(theme::TEXT_MUTED));
                 ui.end_row();
             }
@@ -68,9 +72,12 @@ fn tile(ui: &mut Ui, value: &str, label: &str) -> egui::Response {
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(124.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(RichText::new(value).size(22.0).strong());
-            ui.add(egui::Label::new(RichText::new(label).small().color(theme::TEXT_MUTED)).wrap());
+            // The tiles sit in a row; each stacks its number over its label.
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new(value).size(22.0).strong());
+                ui.add(egui::Label::new(RichText::new(label).small().color(theme::TEXT_MUTED)).wrap());
+            });
         })
         .response
 }
