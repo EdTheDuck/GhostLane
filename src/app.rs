@@ -459,14 +459,23 @@ impl App {
     /// Play button: hands ticket `id` to the AI now, or queues it while the AI is on another ticket.
     fn play(&mut self, id: u32, ctx: &egui::Context) {
         let Some(i) = self.active else { return };
-        let Ok(p) = &self.projects[i].project else { return };
-        if !self.ai_runs.iter().any(|r| r.ghost == p.ghost_path) {
+        if !self.ai_engaged(i) {
             self.run_ai(i, id, ctx);
         } else if self.projects[i].queue.contains(&id) {
             self.toast(format!("{} is already queued", crate::ticket::format_id(id)));
         } else {
             self.projects[i].queue.push(id);
         }
+    }
+
+    /// Is project `i`'s AI on a ticket from the play button, or are tickets waiting for it? Play buttons queue then.
+    fn ai_engaged(&self, i: usize) -> bool {
+        let op = &self.projects[i];
+        !op.queue.is_empty()
+            || op
+                .project
+                .as_ref()
+                .is_ok_and(|p| self.ai_runs.iter().any(|r| r.ghost == p.ghost_path))
     }
 
     /// Hands ticket `id` of project `pi` to its AI CLI. False if it couldn't.
@@ -537,6 +546,10 @@ impl App {
     // ponytail: "quiet" is the same output heuristic as the busy title, so a CLI waiting on a
     // permission prompt counts as done; a CLI-side completion hook would be exact.
     fn poll_ai_runs(&mut self, ctx: &egui::Context) {
+        if !self.ai_runs.is_empty() {
+            // A quiet CLI makes no repaints, so look again to notice it has finished.
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         let now = Instant::now();
         let terminals = &self.terminals;
         let (done, running): (Vec<AiRun>, Vec<AiRun>) = std::mem::take(&mut self.ai_runs)
@@ -1377,7 +1390,10 @@ impl eframe::App for App {
         let board = egui::CentralPanel::default()
             .frame(central)
             .show(ui, |ui| match self.active {
-                Some(i) if self.projects[i].project.is_ok() => ui::board::show(ui, &mut self.projects[i], &mut actions),
+                Some(i) if self.projects[i].project.is_ok() => {
+                    let engaged = self.ai_engaged(i);
+                    ui::board::show(ui, &mut self.projects[i], engaged, &mut actions)
+                }
                 _ => Self::empty_state(ui, &mut actions),
             })
             .response

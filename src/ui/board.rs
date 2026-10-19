@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use egui::text::LayoutJob;
 use egui::{
@@ -9,7 +9,7 @@ use egui_phosphor::regular as icon;
 
 use super::{icon_button, priority_icon};
 use crate::app::{Action, OpenProject};
-use crate::project::{AutoMove, Project, Sort, SortBy, SortDir};
+use crate::project::{AutoMove, Sort, SortBy, SortDir};
 use crate::theme;
 use crate::ticket::Ticket;
 
@@ -19,16 +19,18 @@ const COLUMN_GAP: f32 = 12.0;
 /// Drag payload for a ticket card.
 pub struct DragTicket(pub u32);
 
-pub fn show(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
+/// `engaged`: the AI is busy with or has queued tickets, so play buttons add to the queue instead.
+pub fn show(ui: &mut Ui, op: &mut OpenProject, engaged: bool, actions: &mut Vec<Action>) {
     let Ok(project) = &op.project else { return };
-    let width = column_width(ui.available_width(), project.meta.columns.len());
+    let columns = project.meta.columns.len();
+    let width = column_width(ui.available_width(), columns);
     ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = COLUMN_GAP;
             let height = ui.available_height();
-            for col in 0..project.meta.columns.len() {
+            for col in 0..columns {
                 ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
-                    column_ui(ui, project, col, width, &mut op.search, &mut op.auto, actions);
+                    column_ui(ui, op, col, width, engaged, actions);
                 });
             }
         });
@@ -42,15 +44,16 @@ fn column_width(available: f32, columns: usize) -> f32 {
     ((available - COLUMN_GAP * (n - 1.0)) / n).floor().max(MIN_COLUMN_WIDTH)
 }
 
-fn column_ui(
-    ui: &mut Ui,
-    project: &Project,
-    col: usize,
-    width: f32,
-    search: &mut HashMap<String, String>,
-    auto: &mut HashSet<String>,
-    actions: &mut Vec<Action>,
-) {
+fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, engaged: bool, actions: &mut Vec<Action>) {
+    let OpenProject {
+        project: Ok(project),
+        search,
+        auto,
+        ..
+    } = op
+    else {
+        return;
+    };
     let (column, tickets) = (&project.meta.columns[col], &project.tickets[col]);
     let mut prepared = Frame::new()
         .fill(theme::PANEL)
@@ -128,7 +131,11 @@ fn column_ui(
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // Tickets arrive here because the AI is already on them.
-                let play = column.auto_move != AutoMove::AiWorking;
+                let play = (column.auto_move != AutoMove::AiWorking).then_some(if engaged {
+                    (icon::LIST_PLUS, "Add to the AI queue")
+                } else {
+                    (icon::PLAY, "Complete task with AI")
+                });
                 for t in tickets.iter().filter(|t| t.matches(query)) {
                     card(ui, t, play, actions);
                 }
@@ -195,7 +202,7 @@ fn sort_menu(ui: &mut Ui, col: usize, sort: Sort, actions: &mut Vec<Action>) {
     }
 }
 
-fn card(ui: &mut Ui, t: &Ticket, play: bool, actions: &mut Vec<Action>) {
+fn card(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &mut Vec<Action>) {
     let builder = UiBuilder::new().id_salt(("card", t.id)).sense(Sense::click_and_drag());
     let response = ui
         .scope_builder(builder, |ui| {
@@ -243,12 +250,17 @@ fn card(ui: &mut Ui, t: &Ticket, play: bool, actions: &mut Vec<Action>) {
     });
 }
 
-fn card_contents(ui: &mut Ui, t: &Ticket, play: bool, actions: &mut Vec<Action>) {
+/// play: glyph and tooltip of the AI button, if the card has one.
+fn card_contents(ui: &mut Ui, t: &Ticket, play: Option<(&str, &str)>, actions: &mut Vec<Action>) {
     const PLAY: f32 = 30.0;
     let full = ui.available_width();
     let left = ui.cursor().left();
     ui.set_min_width(full);
-    let width = if play { (full - PLAY - 6.0).max(40.0) } else { full };
+    let width = if play.is_some() {
+        (full - PLAY - 6.0).max(40.0)
+    } else {
+        full
+    };
     let text_rect = ui
         .allocate_ui(vec2(width, 0.0), |ui| {
             ui.set_width(width);
@@ -267,9 +279,7 @@ fn card_contents(ui: &mut Ui, t: &Ticket, play: bool, actions: &mut Vec<Action>)
         })
         .response
         .rect;
-    if !play {
-        return;
-    }
+    let Some((glyph, tip)) = play else { return };
     // Fixed slot at the right edge, vertically centred.
     let slot = egui::Rect::from_min_size(
         egui::pos2(left + full - PLAY, text_rect.center().y - PLAY / 2.0),
@@ -277,9 +287,9 @@ fn card_contents(ui: &mut Ui, t: &Ticket, play: bool, actions: &mut Vec<Action>)
     );
     let clicked = ui
         .put(slot, |ui: &mut Ui| {
-            super::glyph_button(ui, icon::PLAY, theme::ACCENT, theme::ACCENT, true)
+            super::glyph_button(ui, glyph, theme::ACCENT, theme::ACCENT, true)
         })
-        .on_hover_text("Complete task with AI")
+        .on_hover_text(tip)
         .clicked();
     if clicked {
         actions.push(Action::RunAi(t.id));
@@ -329,8 +339,10 @@ mod tests {
     use crate::project::Project;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+    use std::collections::HashMap;
 
-    type State = (OpenProject, Vec<Action>);
+    /// The project, actions pushed, and whether the AI is engaged.
+    type State = (OpenProject, Vec<Action>, bool);
 
     fn harness(dir: &std::path::Path) -> Harness<'static, State> {
         harness_with(dir, &["Hello"])
@@ -366,7 +378,10 @@ mod tests {
             queue: Vec::new(),
             auto: HashSet::new(),
         };
-        let mut h = Harness::new_ui_state(|ui, (op, actions): &mut State| show(ui, op, actions), (op, Vec::new()));
+        let mut h = Harness::new_ui_state(
+            |ui, (op, actions, engaged): &mut State| show(ui, op, *engaged, actions),
+            (op, Vec::new(), false),
+        );
         crate::theme::apply(&h.ctx);
         h.set_size(vec2(1000.0, 600.0));
         h.run();
@@ -391,6 +406,21 @@ mod tests {
         let actions = &h.state().1;
         assert!(actions.iter().any(|a| matches!(a, Action::RunAi(1))));
         assert!(!actions.iter().any(|a| matches!(a, Action::ViewTicket(_))));
+    }
+
+    #[test]
+    fn play_becomes_add_to_queue_while_the_ai_is_engaged() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        h.state_mut().2 = true;
+        h.run();
+        assert_eq!(h.query_all_by_label(icon::PLAY).count(), 0);
+        h.get_by_label(icon::LIST_PLUS).click();
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::RunAi(1))));
+        h.state_mut().2 = false;
+        h.run();
+        assert_eq!(h.get_all_by_label(icon::PLAY).count(), 1);
     }
 
     #[test]
