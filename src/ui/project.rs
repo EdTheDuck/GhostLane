@@ -56,6 +56,8 @@ pub struct ProjectForm {
     settings: ProjectSettings,
     /// The project's .ghost file, when editing.
     ghost: Option<PathBuf>,
+    /// The .ghost file and tickets folder are in the project's .gitignore.
+    git_excluded: bool,
     /// Asking how to delete the project.
     confirm_delete: bool,
     pub error: Option<String>,
@@ -69,6 +71,8 @@ pub enum ProjectOutcome {
         columns: Vec<ColumnEdit>,
         ai_cli: String,
         settings: ProjectSettings,
+        /// Put the .ghost file and tickets folder in .gitignore.
+        git_excluded: bool,
     },
     Save {
         name: String,
@@ -76,6 +80,7 @@ pub enum ProjectOutcome {
         targets: HashMap<String, usize>,
         ai_cli: String,
         settings: ProjectSettings,
+        git_excluded: bool,
     },
     OpenExisting(PathBuf),
     /// Save the board to a file; the dialog stays open.
@@ -119,6 +124,7 @@ impl ProjectForm {
             default_prompt: prompt.to_string(),
             settings: ProjectSettings::default(),
             ghost: None,
+            git_excluded: false,
             confirm_delete: false,
             error: None,
         }
@@ -158,6 +164,7 @@ impl ProjectForm {
             default_prompt: prompt.to_string(),
             settings,
             ghost: Some(p.ghost_path.clone()),
+            git_excluded: p.git_excluded(),
             confirm_delete: false,
             error: None,
         }
@@ -251,7 +258,7 @@ impl ProjectForm {
             self.columns_ui(ui);
             self.removed_ui(ui);
             ui.add_space(8.0);
-            settings_ui(ui, &mut self.settings);
+            settings_ui(ui, &mut self.settings, &mut self.git_excluded);
             if self.editing {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -483,6 +490,7 @@ impl ProjectForm {
                 columns: edits,
                 ai_cli: self.ai_cli.clone(),
                 settings: self.submitted_settings(),
+                git_excluded: self.git_excluded,
             };
         }
         let targets = self
@@ -499,6 +507,7 @@ impl ProjectForm {
             targets,
             ai_cli: self.ai_cli.clone(),
             settings: self.submitted_settings(),
+            git_excluded: self.git_excluded,
         }
     }
 
@@ -550,11 +559,17 @@ fn delete_choice(ctx: &egui::Context, name: &str, ghost: Option<&std::path::Path
     choice
 }
 
-/// Commit, push and test command for the project.
-fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings) {
-    ui.label("Settings");
+/// Git options and the test command for the project.
+fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings, git_excluded: &mut bool) {
+    ui.label("Git");
+    super::pointer(ui.checkbox(git_excluded, "Exclude from Git")).on_hover_text(
+        "Adds the .ghost file and the tickets folder to the project's .gitignore, so the board stays out of the \
+         repository. Unticking takes them out again. Files git already tracks stay tracked until you remove them \
+         with git rm --cached.",
+    );
     super::pointer(ui.checkbox(&mut s.commit, "Commit when ticket is done")).on_hover_text(
-        "When a ticket reaches the last column, commit everything in the project's git repository with the          ticket's number and title as the message.",
+        "When a ticket reaches the last column, commit everything in the project's git repository with the \
+         ticket's number and title as the message.",
     );
     if s.commit {
         ui.horizontal(|ui| {
@@ -571,11 +586,12 @@ fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings) {
                 .desired_width(f32::INFINITY),
         )
         .on_hover_text(
-            "Runs in the project folder when the AI finishes a ticket in the last column. The ticket only stays              there if the command succeeds; otherwise it goes back to the first column with the output in its notes.",
+            "Runs in the project folder when the AI finishes a ticket in the last column. The ticket only stays \
+             there if the command succeeds; otherwise it goes back to the first column with the output in its notes.",
         );
     });
     ui.label(
-        RichText::new("These settings stay on this computer.")
+        RichText::new("Committing, pushing and the test command stay on this computer.")
             .small()
             .color(theme::TEXT_MUTED),
     );
@@ -831,6 +847,29 @@ mod tests {
                 test_command: "cargo test".into()
             }
         );
+    }
+
+    #[test]
+    fn exclude_from_git_sits_under_the_git_heading_and_reflects_gitignore() {
+        let mut h = harness();
+        let heading = h.get_by_label("Git").rect();
+        let exclude = h.get_by_label("Exclude from Git").rect();
+        let commit = h.get_by_label("Commit when ticket is done").rect();
+        assert!(heading.bottom() <= exclude.top() && exclude.bottom() <= commit.top());
+        h.get_by_label("Exclude from Git").click();
+        h.run();
+        let form = &mut h.state_mut().0;
+        form.location = Some(PathBuf::from("/p"));
+        let ProjectOutcome::Create { git_excluded, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        assert!(git_excluded);
+
+        let d = tempfile::tempdir().unwrap();
+        let p = Project::create(d.path(), "P", &["To Do".into()]).unwrap();
+        p.set_git_excluded(true).unwrap();
+        let form = ProjectForm::edit(&p, vec!["claude".into()], "Do", ProjectSettings::default());
+        assert!(form.git_excluded, "read from .gitignore");
     }
 
     #[test]

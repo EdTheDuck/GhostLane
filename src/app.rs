@@ -1987,6 +1987,7 @@ impl App {
                 columns,
                 ai_cli,
                 settings,
+                git_excluded,
             } => match Project::create(&dir, &name, &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()) {
                 Ok(mut p) => {
                     self.modal = None;
@@ -2001,6 +2002,9 @@ impl App {
                     }
                     if let Err(e) = write_ai_guide(&p) {
                         self.toast(e);
+                    }
+                    if let Err(e) = p.set_git_excluded(git_excluded) {
+                        self.toast(format!("Couldn't update .gitignore: {e}"));
                     }
                     self.config.projects.insert(p.ghost_path.clone(), settings);
                     self.add_project(p, ctx);
@@ -2017,8 +2021,12 @@ impl App {
                 targets,
                 ai_cli,
                 settings,
+                git_excluded,
             } => {
                 self.modal = None;
+                if let Some(Err(e)) = self.active_project().map(|p| p.set_git_excluded(git_excluded)) {
+                    self.toast(format!("Couldn't update .gitignore: {e}"));
+                }
                 if let Some(ghost) = self.active_project().map(|p| p.ghost_path.clone()) {
                     self.config.projects.insert(ghost, settings);
                     self.save_config();

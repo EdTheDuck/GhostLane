@@ -637,6 +637,88 @@ Anything else worth keeping, such as why a test failed.
     }
 }
 
+/// Comment GhostLane puts above the lines it adds to `.gitignore`.
+const IGNORE_COMMENT: &str = "# GhostLane board";
+
+impl Project {
+    /// `.gitignore` lines that keep the board (this .ghost file and the tickets folder) out of git.
+    fn ignore_lines(&self) -> [String; 2] {
+        let ghost = self.ghost_path.file_name().unwrap_or_default().to_string_lossy();
+        [format!("/{ghost}"), "/tickets/".to_string()]
+    }
+
+    /// Does the project's `.gitignore` leave out both the .ghost file and the tickets folder?
+    pub fn git_excluded(&self) -> bool {
+        let text = fs::read_to_string(self.root.join(".gitignore")).unwrap_or_default();
+        self.ignore_lines()
+            .iter()
+            .all(|entry| text.lines().any(|l| same_ignore(l, entry)))
+    }
+
+    /// Adds the .ghost file and tickets folder to the project's `.gitignore`, or takes them out again. Touches no
+    /// other line; a `.gitignore` left empty is removed.
+    pub fn set_git_excluded(&self, excluded: bool) -> io::Result<()> {
+        let path = self.root.join(".gitignore");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        let updated = toggle_ignore(&text, &self.ignore_lines(), excluded);
+        if updated == text {
+            Ok(())
+        } else if updated.trim().is_empty() {
+            fs::remove_file(&path)
+        } else {
+            write_atomic(&path, &updated)
+        }
+    }
+}
+
+/// Is `.gitignore` line `line` the same pattern as `entry`, give or take its leading and trailing slashes?
+fn same_ignore(line: &str, entry: &str) -> bool {
+    let bare = |s: &str| s.trim().trim_start_matches('/').trim_end_matches('/').to_string();
+    !line.trim_start().starts_with('#') && bare(line) == bare(entry)
+}
+
+/// `.gitignore` text with `entries` added (those missing, under GhostLane's comment) or removed (with the comment).
+fn toggle_ignore(text: &str, entries: &[String], excluded: bool) -> String {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    if excluded {
+        let missing: Vec<&String> = entries
+            .iter()
+            .filter(|e| !text.lines().any(|l| same_ignore(l, e)))
+            .collect();
+        if missing.is_empty() {
+            return text.to_string();
+        }
+        let mut out = text.trim_end().to_string();
+        if !out.is_empty() {
+            out.push_str(newline);
+            out.push_str(newline);
+        }
+        out.push_str(IGNORE_COMMENT);
+        for e in missing {
+            out.push_str(newline);
+            out.push_str(e);
+        }
+        out.push_str(newline);
+        return out;
+    }
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| l.trim() != IGNORE_COMMENT && !entries.iter().any(|e| same_ignore(l, e)))
+        .collect();
+    if kept.len() == text.lines().count() {
+        return text.to_string();
+    }
+    let mut out = kept.join(newline).trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str(newline);
+    }
+    out
+}
+
 /// `text` with the block between GhostLane's markers set to `guide`, appended when there is none yet.
 fn replace_guide(text: &str, guide: &str) -> String {
     let block = format!("{GUIDE_START}\n{}\n{GUIDE_END}", guide.trim());
@@ -1050,6 +1132,47 @@ mod tests {
         assert!(!p.tickets_dir().join("c").exists());
         assert!(!a.path.exists()); // a's file now lives under folder b
         assert!(p.tickets_dir().join("b").join(a.path.file_name().unwrap()).exists());
+    }
+
+    #[test]
+    fn gitignore_entries_come_and_go_leaving_the_rest() {
+        let entries = ["/p.ghost".to_string(), "/tickets/".to_string()];
+        let added = toggle_ignore("target/\n", &entries, true);
+        assert_eq!(added, "target/\n\n# GhostLane board\n/p.ghost\n/tickets/\n");
+        assert_eq!(toggle_ignore(&added, &entries, true), added, "added once");
+        assert_eq!(toggle_ignore(&added, &entries, false), "target/\n");
+        // The user's own spelling counts, and only the missing one is added.
+        assert_eq!(
+            toggle_ignore("tickets\r\n", &entries, true),
+            "tickets\r\n\r\n# GhostLane board\r\n/p.ghost\r\n"
+        );
+        assert_eq!(
+            toggle_ignore("", &entries, true),
+            "# GhostLane board\n/p.ghost\n/tickets/\n"
+        );
+        assert_eq!(
+            toggle_ignore("a\n# tickets\n", &entries, false),
+            "a\n# tickets\n",
+            "comments stay"
+        );
+
+        let d = tempfile::tempdir().unwrap();
+        let p = new_project(d.path());
+        assert!(!p.git_excluded());
+        p.set_git_excluded(true).unwrap();
+        assert!(p.git_excluded());
+        let text = fs::read_to_string(d.path().join(".gitignore")).unwrap();
+        assert!(text.contains("/my_project.ghost\n/tickets/\n"), "{text}");
+        p.set_git_excluded(false).unwrap();
+        assert!(!p.git_excluded());
+        assert!(!d.path().join(".gitignore").exists(), "nothing else in it, so it goes");
+        fs::write(d.path().join(".gitignore"), "node_modules/\n").unwrap();
+        p.set_git_excluded(true).unwrap();
+        p.set_git_excluded(false).unwrap();
+        assert_eq!(
+            fs::read_to_string(d.path().join(".gitignore")).unwrap(),
+            "node_modules/\n"
+        );
     }
 
     #[test]
