@@ -25,29 +25,49 @@ pub fn pointer(response: Response) -> Response {
     }
 }
 
+/// Space between a modal's edge and its contents.
+const MODAL_PADDING: f32 = 20.0;
+
 /// Shows a modal with generous padding to its edge and extra room between items.
 pub fn show_modal<R>(
     ctx: &egui::Context,
     id: impl std::hash::Hash + std::fmt::Debug,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> egui::ModalResponse<R> {
-    let frame = egui::Frame::popup(&ctx.style_of(egui::Theme::Dark)).inner_margin(egui::Margin::same(20));
+    let frame =
+        egui::Frame::popup(&ctx.style_of(egui::Theme::Dark)).inner_margin(egui::Margin::same(MODAL_PADDING as i8));
     egui::Modal::new(egui::Id::new(id)).frame(frame).show(ctx, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
         add_contents(ui)
     })
 }
 
-/// Modal title with an X on the right. True when the X is clicked.
+/// Modal title with an X in the top right corner. True when the X is clicked.
 pub fn modal_header(ui: &mut Ui, title: &str, close_tip: &str) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(20.0).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            icon_button(ui, icon::X, close_tip).clicked()
-        })
-        .inner
-    })
-    .inner
+    let close = modal_close(ui, close_tip);
+    ui.label(RichText::new(title).size(20.0).strong());
+    close
+}
+
+/// The X in a modal's top right corner, tucked into the padding: the gap between the glyph and the modal's top
+/// and right edges is half what it would be at the corner of the contents. Call it first thing in the modal, while
+/// `ui` still spans the whole content area. True when clicked.
+pub fn modal_close(ui: &mut Ui, tooltip: &str) -> bool {
+    const SIZE: f32 = 30.0;
+    const GLYPH: f32 = 16.0;
+    let content = ui.max_rect();
+    // Laid out at the contents' corner, the glyph's gap to the edge is the border, the padding and the button's own
+    // margin.
+    let edge = MODAL_PADDING + ui.visuals().window_stroke.width;
+    let gap = (edge + (SIZE - GLYPH) / 2.0) / 2.0;
+    let inset = gap + GLYPH / 2.0 - edge;
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(content.right() - inset, content.top() + inset),
+        egui::vec2(SIZE, SIZE),
+    );
+    let response = ui.interact(rect, ui.id().with("modal_close"), egui::Sense::click());
+    paint_glyph(ui, rect, &response, icon::X, theme::TEXT, theme::ACCENT, false);
+    pointer(response).on_hover_text(tooltip).clicked()
 }
 
 /// A switch with a label that toggles it too, like a checkbox label.
@@ -111,10 +131,23 @@ pub fn danger_icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
 /// Icon-only button: no background or border; the icon turns `hover` colour on hover.
 /// With `fill_on_hover` it also switches to the filled Phosphor glyph.
 pub fn glyph_button(ui: &mut Ui, glyph: &str, idle: Color32, hover: Color32, fill_on_hover: bool) -> Response {
-    let enabled = ui.is_enabled();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+    paint_glyph(ui, rect, &response, glyph, idle, hover, fill_on_hover);
+    pointer(response)
+}
+
+/// Draws an icon button's glyph in `rect`, `hover` coloured while `response` is hovered or focused.
+fn paint_glyph(
+    ui: &Ui,
+    rect: egui::Rect,
+    response: &Response,
+    glyph: &str,
+    idle: Color32,
+    hover: Color32,
+    fill_on_hover: bool,
+) {
+    let enabled = ui.is_enabled();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, glyph));
-    let response = pointer(response);
     if ui.is_rect_visible(rect) {
         let hot = response.hovered() || response.has_focus();
         let family = if hot && fill_on_hover {
@@ -127,7 +160,6 @@ pub fn glyph_button(ui: &mut Ui, glyph: &str, idle: Color32, hover: Color32, fil
         ui.painter()
             .text(rect.center(), egui::Align2::CENTER_CENTER, glyph, font, color);
     }
-    response
 }
 
 pub fn accent_button(ui: &mut Ui, text: &str) -> Response {

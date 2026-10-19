@@ -104,6 +104,9 @@ pub fn view(
     let modal = super::show_modal(ctx, "view_ticket", |ui| {
         ui.set_width(size.x);
         ui.set_height(size.y);
+        if super::modal_close(ui, "Close") {
+            outcome = Some(ViewOutcome::Close);
+        }
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(t.id_str())
@@ -115,9 +118,8 @@ pub fn view(
             ui.label(RichText::new(t.priority.label()).color(theme::TEXT_MUTED));
             ui.label(RichText::new(format!("·  Runs: {}", t.run_count)).color(theme::TEXT_MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, icon::X, "Close").clicked() {
-                    outcome = Some(ViewOutcome::Close);
-                }
+                // Clear of the X in the corner.
+                ui.add_space(30.0);
                 if icon_button(ui, icon::PENCIL_SIMPLE, "Edit ticket").clicked() {
                     outcome = Some(ViewOutcome::Edit);
                 }
@@ -930,6 +932,15 @@ mod tests {
         h.set_size(vec2(1200.0, 800.0));
         h.run_steps(3); // modals centre themselves once their size is known
         assert!(h.query_by_label("Close").is_none(), "no Close button at the bottom");
+        // Half as far from the modal's top and right edges as the contents are, glyph to edge.
+        let x = h.get_by_label(icon::X).rect();
+        let modal = h.ctx.memory(|m| m.area_rect(egui::Id::new("edit_ticket"))).unwrap();
+        let glyph = egui::Rect::from_center_size(x.center(), vec2(16.0, 16.0));
+        assert!(
+            (modal.right() - glyph.right() - 14.0).abs() < 0.5,
+            "{modal:?} {glyph:?}"
+        );
+        assert!((glyph.top() - modal.top() - 14.0).abs() < 0.5, "{modal:?} {glyph:?}");
         h.get_by_label(icon::X).click();
         h.run();
         assert!(h.state().1);
