@@ -49,6 +49,7 @@ pub struct AppConfig {
     pub open_projects: Vec<PathBuf>,
     pub active_project: Option<PathBuf>,
     pub terminal_collapsed: bool,
+    pub queue_open: bool,
     pub settings: Settings,
 }
 

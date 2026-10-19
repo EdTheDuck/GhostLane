@@ -25,6 +25,8 @@ pub struct OpenProject {
     pub project: Result<Project, String>,
     /// Column folder -> search text. Present = search box open.
     pub search: HashMap<String, String>,
+    /// Tickets to hand to the AI once it finishes the current one, in order.
+    pub queue: Vec<u32>,
 }
 
 impl OpenProject {
@@ -34,6 +36,7 @@ impl OpenProject {
             path,
             project,
             search: HashMap::new(),
+            queue: Vec::new(),
         }
     }
 
@@ -309,6 +312,7 @@ impl App {
                     path,
                     project: Err(String::new()),
                     search: HashMap::new(),
+                    queue: Vec::new(),
                 });
                 self.projects.len() - 1
             }
@@ -397,7 +401,7 @@ impl App {
                 self.modal = Some(Modal::EditTicket(Box::new(TicketForm::create(col, copy))));
             }
             Action::AskDelete(id) => self.modal = Some(Modal::ConfirmDelete(id)),
-            Action::RunAi(id) => self.run_ai(id, ctx),
+            Action::RunAi(id) => self.play(id, ctx),
             Action::OpenSettings => self.modal = Some(Modal::Settings(SettingsForm::new(&self.config.settings))),
         }
     }
@@ -448,13 +452,34 @@ impl App {
         Ok(())
     }
 
-    fn run_ai(&mut self, id: u32, ctx: &egui::Context) {
-        let Some(p) = self.active_project() else { return };
-        let Some((col, t)) = self.find_ticket(id) else { return };
+    /// Play button: hands ticket `id` to the AI now, or queues it while the AI is on another ticket.
+    fn play(&mut self, id: u32, ctx: &egui::Context) {
+        let Some(i) = self.active else { return };
+        let Ok(p) = &self.projects[i].project else { return };
+        if !self.ai_runs.iter().any(|r| r.ghost == p.ghost_path) {
+            self.run_ai(i, id, ctx);
+        } else if self.projects[i].queue.contains(&id) {
+            self.toast(format!("{} is already queued", crate::ticket::format_id(id)));
+        } else {
+            self.projects[i].queue.push(id);
+        }
+    }
+
+    /// Hands ticket `id` of project `pi` to its AI CLI. False if it couldn't.
+    fn run_ai(&mut self, pi: usize, id: u32, ctx: &egui::Context) -> bool {
+        let Some(p) = self.projects.get(pi).and_then(|op| op.project.as_ref().ok()) else {
+            return false;
+        };
+        let Some((col, t)) = p.find_ticket(id) else {
+            return false;
+        };
         let (key, root, mut t) = (p.ghost_path.clone(), p.root.clone(), t.clone());
         let cli = match self.project_cli(p) {
             Ok(cli) => cli,
-            Err(e) => return self.toast(e),
+            Err(e) => {
+                self.toast(e);
+                return false;
+            }
         };
         let template = p.meta.columns[col]
             .ai_prompt
@@ -468,34 +493,46 @@ impl App {
         };
         let prompt = match terminal::fill_prompt(&template, &ai_path, &t.id_str(), &root) {
             Ok(prompt) => prompt,
-            Err(e) => return self.toast(e),
+            Err(e) => {
+                self.toast(e);
+                return false;
+            }
         };
         if let Err(e) = self.send_to_cli(&key, &root, cli, &prompt, ctx) {
-            return self.toast(e);
+            self.toast(e);
+            return false;
         }
+        let mut errors = Vec::new();
         t.run_count += 1;
         if let Err(e) = t.save() {
-            self.toast(format!("Couldn't update run count for {}: {e}", t.id_str()));
+            errors.push(format!("Couldn't update run count for {}: {e}", t.id_str()));
         }
-        self.reload_active();
-        let p = self.active_project_mut().expect("checked above");
-        if let Some(to) = working_col
-            && let Err(e) = p.move_ticket(&t.path, to)
-        {
-            self.toast(format!("Couldn't move {}: {e}", t.id_str()));
+        if let Ok(p) = &mut self.projects[pi].project {
+            if let Err(e) = p.rescan() {
+                errors.push(format!("Couldn't reload project: {e}"));
+            }
+            if let Some(to) = working_col
+                && let Err(e) = p.move_ticket(&t.path, to)
+            {
+                errors.push(format!("Couldn't move {}: {e}", t.id_str()));
+            }
+        }
+        for e in errors {
+            self.toast(e);
         }
         self.ai_runs.push(AiRun {
             ghost: key,
             id,
             started: Instant::now(),
         });
+        true
     }
 
     /// Once a project's AI CLI goes quiet, moves the tickets it was working on into the next
     /// column if that column takes tickets on "AI Complete".
     // ponytail: "quiet" is the same output heuristic as the busy title, so a CLI waiting on a
     // permission prompt counts as done; a CLI-side completion hook would be exact.
-    fn poll_ai_runs(&mut self) {
+    fn poll_ai_runs(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let terminals = &self.terminals;
         let (done, running): (Vec<AiRun>, Vec<AiRun>) = std::mem::take(&mut self.ai_runs)
@@ -519,6 +556,19 @@ impl App {
                 && let Err(e) = p.move_ticket(&path, to)
             {
                 self.toast(format!("Couldn't move {}: {e}", crate::ticket::format_id(run.id)));
+            }
+        }
+        // A project whose AI is free starts its next queued ticket.
+        for i in 0..self.projects.len() {
+            let Ok(p) = &self.projects[i].project else { continue };
+            if self.ai_runs.iter().any(|r| r.ghost == p.ghost_path) {
+                continue;
+            }
+            while !self.projects[i].queue.is_empty() {
+                let id = self.projects[i].queue.remove(0);
+                if self.run_ai(i, id, ctx) {
+                    break;
+                }
             }
         }
     }
@@ -671,11 +721,13 @@ impl App {
         }
     }
 
+    /// Bottom panel: the terminal (75% of the width) and the AI queue (25%); either one alone gets it all.
     fn terminal_panel(&mut self, ui: &mut Ui) {
         self.terminals.poll();
         let collapsed = self.config.terminal_collapsed;
+        let queue_open = self.config.queue_open;
         let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 6));
-        let panel = if collapsed {
+        let panel = if collapsed && !queue_open {
             egui::Panel::bottom("terminal_collapsed")
                 .resizable(false)
                 .exact_size(34.0)
@@ -701,79 +753,126 @@ impl App {
                     }
                 }
                 ui.label(RichText::new(format!("{}  Terminal", icon::TERMINAL_WINDOW)).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let queued = self.active.is_some_and(|i| !self.projects[i].queue.is_empty());
+                    let idle = if queued { theme::ACCENT } else { theme::TEXT };
+                    let tip = if queue_open { "Hide queue" } else { "Show queue" };
+                    if ui::glyph_button(ui, icon::QUEUE, idle, theme::ACCENT, false)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.config.queue_open = !queue_open;
+                        if let Err(e) = self.config.save() {
+                            eprintln!("couldn't save settings: {e}");
+                        }
+                    }
+                });
             });
-            if collapsed {
+            if collapsed && !queue_open {
                 return;
             }
-            let shell = self.config.settings.shell.clone();
-            // A project's terminal opens with its AI CLI running, ready to use.
-            let startup = self
-                .active_project()
-                .and_then(|p| self.project_cli(p).ok())
-                .map(|c| c.program);
-            match self
-                .terminals
-                .get_or_start(&key, &cwd, shell.as_deref(), startup, ui.ctx())
-            {
-                Ok(session) if session.exited => {
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Shell exited.").color(theme::TEXT_MUTED));
-                        if ui.button("Restart shell").clicked() {
-                            self.terminals.restart(&key);
-                        }
+            const GAP: f32 = 8.0;
+            let size = ui.available_size();
+            let terminal_width = match (collapsed, queue_open) {
+                (true, _) => 0.0,
+                (false, true) => (size.x - GAP) * 0.75,
+                (false, false) => size.x,
+            };
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                if !collapsed {
+                    ui.allocate_ui_with_layout(vec2(terminal_width, size.y), Layout::top_down(Align::Min), |ui| {
+                        self.terminal_view(ui, &key, &cwd);
                     });
                 }
-                Ok(session) => {
-                    let font = egui_term::TerminalFont::new(egui_term::FontSettings {
-                        font_type: egui::FontId::monospace(self.config.settings.terminal_font_size),
-                    });
-                    let focus = self.terminal_focused && self.modal.is_none();
-                    let response = Frame::new()
-                        .fill(theme::BG)
-                        .corner_radius(CornerRadius::same(6))
-                        .inner_margin(Margin::symmetric(12, 6))
-                        .show(ui, |ui| {
-                            let view = egui_term::TerminalView::new(ui, &mut session.backend)
-                                .set_focus(focus)
-                                .set_font(font)
-                                .set_theme(terminal::theme())
-                                .set_size(ui.available_size());
-                            ui.add(view)
-                        })
-                        .response;
-                    if ui.input(|i| i.pointer.any_pressed()) {
-                        self.terminal_focused = response.contains_pointer();
-                    }
-                    let typed = ui.input(|i| {
-                        i.events
-                            .iter()
-                            .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }))
-                    });
-                    if self.terminal_focused && typed {
-                        self.last_terminal_typing = Some(Instant::now());
-                    }
-                    let submitted = ui.input(|i| {
-                        i.events.iter().any(|e| {
-                            matches!(
-                                e,
-                                egui::Event::Key {
-                                    key: egui::Key::Enter,
-                                    pressed: true,
-                                    ..
+                if queue_open {
+                    ui.allocate_ui_with_layout(ui.available_size(), Layout::top_down(Align::Min), |ui| {
+                        Frame::new()
+                            .fill(theme::BG)
+                            .corner_radius(CornerRadius::same(6))
+                            .inner_margin(Margin::same(8))
+                            .show(ui, |ui| {
+                                ui.set_min_size(ui.available_size());
+                                match self.active.and_then(|i| self.projects.get_mut(i)) {
+                                    Some(op) => ui::queue::show(ui, &mut op.queue, op.project.as_ref().ok()),
+                                    None => ui::queue::show(ui, &mut Vec::new(), None),
                                 }
-                            )
-                        })
+                            });
                     });
-                    if self.terminal_focused && submitted {
-                        self.ai_request = Some(Instant::now());
-                    }
                 }
-                Err(e) => {
-                    ui.label(RichText::new(e).color(theme::DANGER));
+            });
+        });
+    }
+
+    fn terminal_view(&mut self, ui: &mut Ui, key: &Path, cwd: &Path) {
+        let shell = self.config.settings.shell.clone();
+        // A project's terminal opens with its AI CLI running, ready to use.
+        let startup = self
+            .active_project()
+            .and_then(|p| self.project_cli(p).ok())
+            .map(|c| c.program);
+        match self
+            .terminals
+            .get_or_start(key, cwd, shell.as_deref(), startup, ui.ctx())
+        {
+            Ok(session) if session.exited => {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Shell exited.").color(theme::TEXT_MUTED));
+                    if ui.button("Restart shell").clicked() {
+                        self.terminals.restart(key);
+                    }
+                });
+            }
+            Ok(session) => {
+                let font = egui_term::TerminalFont::new(egui_term::FontSettings {
+                    font_type: egui::FontId::monospace(self.config.settings.terminal_font_size),
+                });
+                let focus = self.terminal_focused && self.modal.is_none();
+                let response = Frame::new()
+                    .fill(theme::BG)
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        let view = egui_term::TerminalView::new(ui, &mut session.backend)
+                            .set_focus(focus)
+                            .set_font(font)
+                            .set_theme(terminal::theme())
+                            .set_size(ui.available_size());
+                        ui.add(view)
+                    })
+                    .response;
+                if ui.input(|i| i.pointer.any_pressed()) {
+                    self.terminal_focused = response.contains_pointer();
+                }
+                let typed = ui.input(|i| {
+                    i.events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }))
+                });
+                if self.terminal_focused && typed {
+                    self.last_terminal_typing = Some(Instant::now());
+                }
+                let submitted = ui.input(|i| {
+                    i.events.iter().any(|e| {
+                        matches!(
+                            e,
+                            egui::Event::Key {
+                                key: egui::Key::Enter,
+                                pressed: true,
+                                ..
+                            }
+                        )
+                    })
+                });
+                if self.terminal_focused && submitted {
+                    self.ai_request = Some(Instant::now());
                 }
             }
-        });
+            Err(e) => {
+                ui.label(RichText::new(e).color(theme::DANGER));
+            }
+        }
     }
 
     fn show_modal(&mut self, ctx: &egui::Context) {
@@ -1207,7 +1306,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_watcher();
         self.poll_generation();
-        self.poll_ai_runs();
+        self.poll_ai_runs(&ctx);
         if let Some(v) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.update = Some(v);
         }

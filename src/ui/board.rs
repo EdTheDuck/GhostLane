@@ -322,6 +322,7 @@ mod tests {
             path: p.ghost_path.clone(),
             project: Ok(p),
             search: HashMap::new(),
+            queue: Vec::new(),
         };
         let mut h = Harness::new_ui_state(|ui, (op, actions): &mut State| show(ui, op, actions), (op, Vec::new()));
         crate::theme::apply(&h.ctx);

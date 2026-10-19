@@ -49,6 +49,8 @@ Prefer to write it yourself? The **Manual** tab is always one click away.
 
 Every card has a ▶ button. Press it and GhostLane fills in that column's command and hands it to the project's AI CLI in the terminal. The ticket's run count goes up, so you can see at a glance what has already been attempted.
 
+Busy AI? Keep pressing ▶. Each extra ticket joins a queue and starts the moment the AI finishes the one before it. The queue icon at the right of the terminal bar turns green when tickets are waiting; click it to open the queue beside the terminal, drag tickets into the order you want, or remove any you've changed your mind about.
+
 Each column can have its own command. New projects come with two ready to go:
 
 - **To Do** asks the AI to develop the ticket and move it to Ready For Test when it's finished.
@@ -132,7 +134,7 @@ Open as many projects as you like and switch between them from the dropdown in t
 Click the ⚙ cog to choose:
 
 - which **AI CLIs** are available to your projects (installed ones are switched on for you the first time)
-- the **AI command** the ▶ button sends for columns that don't have their own, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
+- the **Default AI command** the ▶ button sends for columns that don't have their own, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
 - which **shell** to use (detected automatically by default)
 - the **terminal font size**
 
