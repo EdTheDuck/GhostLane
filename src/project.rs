@@ -700,6 +700,80 @@ impl Project {
     }
 }
 
+impl Project {
+    /// Every ticket as a CSV row, in board order, with a header row.
+    pub fn export_csv(&self) -> String {
+        let mut out = String::from("id,title,column,priority,labels,run_count,blocked_by,done_at\r\n");
+        for (col, tickets) in self.tickets.iter().enumerate() {
+            for t in tickets {
+                let blocked: Vec<String> = t.blocked_by.iter().map(|&b| ticket::format_id(b)).collect();
+                let row = [
+                    t.id_str(),
+                    t.title.clone(),
+                    self.meta.columns[col].name.clone(),
+                    t.priority.label().to_string(),
+                    t.labels.join("; "),
+                    t.run_count.to_string(),
+                    blocked.join("; "),
+                    t.done_at.map(ticket::utc_timestamp).unwrap_or_default(),
+                ];
+                let row: Vec<String> = row.iter().map(|f| csv_field(f)).collect();
+                out.push_str(&row.join(","));
+                out.push_str("\r\n");
+            }
+        }
+        out
+    }
+
+    /// A Markdown summary of the board, column by column, as of `now`.
+    pub fn export_markdown(&self, now: u64) -> String {
+        let one_line = |s: &str| s.replace(['\n', '\r'], " ");
+        let mut out = format!(
+            "# {}\n\nExported {}.\n",
+            one_line(&self.meta.name),
+            ticket::readable_utc(&ticket::utc_timestamp(now))
+        );
+        for (col, tickets) in self.tickets.iter().enumerate() {
+            let name = one_line(&self.meta.columns[col].name);
+            out.push_str(&format!("\n## {name} ({})\n\n", tickets.len()));
+            if tickets.is_empty() {
+                out.push_str("Nothing here.\n");
+            }
+            for t in tickets {
+                let mut line = format!("- **{}** {} · {}", t.id_str(), one_line(&t.title), t.priority.label());
+                for l in &t.labels {
+                    line.push_str(&format!(" `{}`", l.replace('`', "")));
+                }
+                let blockers: Vec<String> = self.blockers(t).iter().map(|&b| ticket::format_id(b)).collect();
+                if !blockers.is_empty() {
+                    line.push_str(&format!(" · blocked by {}", blockers.join(", ")));
+                }
+                if let Some(done) = t.done_at.filter(|_| col == self.last_col()) {
+                    line.push_str(&format!(" · done {}", &ticket::utc_timestamp(done)[..10]));
+                }
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+}
+
+/// One CSV field, quoted when needed. Text a spreadsheet would run as a formula gets a leading `'`, since ticket
+/// files can come from untrusted repos.
+fn csv_field(field: &str) -> String {
+    let field = if field.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{field}")
+    } else {
+        field.to_string()
+    };
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field
+    }
+}
+
 pub fn find_ghost_file(dir: &Path) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?
@@ -969,6 +1043,43 @@ mod tests {
         assert!(!p.tickets_dir().join("c").exists());
         assert!(!a.path.exists()); // a's file now lives under folder b
         assert!(p.tickets_dir().join("b").join(a.path.file_name().unwrap()).exists());
+    }
+
+    #[test]
+    fn exports_csv_and_markdown() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = Project::create(d.path(), "Shop", &s(&["To Do", "Done"])).unwrap();
+        let first = Ticket {
+            title: "Cart, \"quick\" view".into(),
+            labels: vec!["ui".into(), "web".into()],
+            ..Default::default()
+        };
+        let first = p.add_ticket(0, first).unwrap();
+        let formula = Ticket {
+            title: "=HYPERLINK(\"x\")".into(),
+            blocked_by: vec![first.id],
+            ..Default::default()
+        };
+        p.add_ticket(0, formula).unwrap();
+        let done = Ticket {
+            title: "Login".into(),
+            done_at: Some(1_709_210_096),
+            ..Default::default()
+        };
+        p.add_ticket(1, done).unwrap();
+
+        let csv = p.export_csv();
+        let lines: Vec<&str> = csv.split("\r\n").collect();
+        assert_eq!(lines[0], "id,title,column,priority,labels,run_count,blocked_by,done_at");
+        assert_eq!(lines[1], "00001,\"Cart, \"\"quick\"\" view\",To Do,Medium,ui; web,0,,");
+        assert_eq!(lines[2], "00002,\"'=HYPERLINK(\"\"x\"\")\",To Do,Medium,,0,00001,");
+        assert_eq!(lines[3], "00003,Login,Done,Medium,,0,,2024-02-29T12:34:56Z");
+
+        let md = p.export_markdown(1_709_210_096);
+        assert!(md.starts_with("# Shop\n\nExported 2024-02-29 12:34 UTC.\n"), "{md}");
+        assert!(md.contains("\n## To Do (2)\n\n- **00001** Cart, \"quick\" view · Medium `ui` `web`\n"));
+        assert!(md.contains("- **00002** =HYPERLINK(\"x\") · Medium · blocked by 00001\n"));
+        assert!(md.contains("\n## Done (1)\n\n- **00003** Login · Medium · done 2024-02-29\n"));
     }
 
     #[test]

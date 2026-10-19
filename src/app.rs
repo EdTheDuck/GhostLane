@@ -109,6 +109,13 @@ pub enum Action {
     QuickOpen,
     ShowStats,
     ToggleFilter,
+    Export(ExportFormat),
+}
+
+#[derive(Clone, Copy)]
+pub enum ExportFormat {
+    Csv,
+    Markdown,
 }
 
 pub enum Modal {
@@ -693,6 +700,7 @@ impl App {
             }
             Action::QuickOpen => self.modal = Some(Modal::QuickOpen(QuickOpen::default())),
             Action::ShowStats => self.modal = Some(Modal::Stats),
+            Action::Export(format) => self.export(format),
             Action::ToggleFilter => {
                 if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
                     // Closing the bar drops the filter too, so nothing stays hidden out of sight.
@@ -713,6 +721,36 @@ impl App {
                 self.reload_active();
             }
             Action::OpenSettings => self.modal = Some(Modal::Settings(SettingsForm::new(&self.config.settings))),
+        }
+    }
+
+    /// Saves the active board as a CSV file or a Markdown report wherever the user picks.
+    fn export(&mut self, format: ExportFormat) {
+        let Some(p) = self.active_project() else { return };
+        let stem = p
+            .ghost_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let (name, kind, ext, text) = match format {
+            ExportFormat::Csv => (format!("{stem}_tickets.csv"), "CSV", "csv", p.export_csv()),
+            ExportFormat::Markdown => (
+                format!("{stem}_board.md"),
+                "Markdown",
+                "md",
+                p.export_markdown(crate::ticket::now_secs()),
+            ),
+        };
+        let picked = rfd::FileDialog::new()
+            .set_directory(&p.root)
+            .set_file_name(name)
+            .add_filter(kind, &[ext])
+            .save_file();
+        if let Some(path) = picked
+            && let Err(e) = crate::ticket::write_atomic(&path, &text)
+        {
+            self.toast(format!("Couldn't export to {}: {e}", path.display()));
         }
     }
 
@@ -1881,6 +1919,15 @@ impl App {
                         if icon_button(ui, icon::CHART_BAR, "Project stats").clicked() {
                             actions.push(Action::ShowStats);
                         }
+                        let export = icon_button(ui, icon::EXPORT, "Export the board");
+                        Popup::menu(&export).show(|ui| {
+                            if ui.button(format!("{}  Tickets as CSV…", icon::TABLE)).clicked() {
+                                actions.push(Action::Export(ExportFormat::Csv));
+                            }
+                            if ui.button(format!("{}  Board as Markdown report…", icon::FILE_TEXT)).clicked() {
+                                actions.push(Action::Export(ExportFormat::Markdown));
+                            }
+                        });
                         let filtering = self.active.is_some_and(|i| self.projects[i].filter_open);
                         let idle = if filtering { theme::ACCENT } else { theme::TEXT };
                         if ui::glyph_button(ui, icon::FUNNEL, idle, theme::ACCENT, false)
