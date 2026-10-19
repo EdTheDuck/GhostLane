@@ -90,7 +90,7 @@ impl SettingsForm {
                 });
             ui.add_space(8.0);
 
-            ui.label(RichText::new("AI command").strong())
+            ui.label(RichText::new("Default AI command").strong())
                 .on_hover_text("Placeholders: {ticket_path}  {ticket_id}  {project_dir}");
             ui.add(
                 TextEdit::singleline(&mut self.ai_prompt)
