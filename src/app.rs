@@ -1082,6 +1082,8 @@ impl App {
         }
         let settings = self.config.settings.clone();
         let mut attention = false;
+        // Desktop notifications, shown while GhostLane is in the background.
+        let mut notices = Vec::new();
         let ended_ghosts: Vec<PathBuf> = ended.iter().map(|(run, _)| run.cli.ghost.clone()).collect();
         for (run, end) in ended {
             let ghost = run.cli.ghost.clone();
@@ -1096,6 +1098,7 @@ impl App {
             let mut messages = Vec::new();
             if let RunEnd::CliGone = end {
                 messages.push(format!("The AI CLI closed before it finished {id}"));
+                notices.push(messages[0].clone());
                 messages.extend(record_run(p, &run, seconds, RunResult::CliClosed).err());
                 self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
                 continue;
@@ -1139,6 +1142,13 @@ impl App {
             }
             let result = moved(p, &run);
             messages.extend(record_run(p, &run, seconds, result).err());
+            if let Some((col, t)) = p.find_ticket(run.id) {
+                let (title, column) = (t.title.replace(['\n', '\r'], " "), &p.meta.columns[col].name);
+                notices.push(match result {
+                    RunResult::SentBack => format!("{id} {title} came back to {column}"),
+                    _ => format!("{id} {title} is in {column}"),
+                });
+            }
             // A ticket that ends up left of where it started came back from testing.
             if settings.notify_failed
                 && result == RunResult::SentBack
@@ -1168,6 +1178,19 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
             ));
+        }
+        if idle && settings.notify_idle {
+            notices.push("The AI has finished all its work".to_string());
+        }
+        for n in notices {
+            self.desktop_notify(ctx, &n);
+        }
+    }
+
+    /// Pops up a desktop notification, unless they're switched off or GhostLane is in front.
+    fn desktop_notify(&self, ctx: &egui::Context, body: &str) {
+        if self.config.settings.notify_desktop && !ctx.input(|i| i.focused) {
+            terminal::notify("GhostLane", body);
         }
     }
 
@@ -1286,6 +1309,11 @@ impl App {
                 check.command
             ));
         }
+        let notice = match passed {
+            true => format!("{} passed \"{}\"", format_id(check.run.id), check.command),
+            false => messages.last().cloned().unwrap_or_default(),
+        };
+        self.desktop_notify(ctx, &notice);
         for m in messages {
             self.toast(m);
         }

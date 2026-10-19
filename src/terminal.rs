@@ -386,6 +386,58 @@ pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command 
     cmd
 }
 
+/// Shows a desktop notification in the background. The text goes in as arguments or environment variables, never
+/// as script, since ticket titles can come from untrusted repos.
+pub fn notify(title: &str, body: &str) {
+    let mut cmd = notify_command(title, body);
+    std::thread::spawn(move || {
+        let null = std::process::Stdio::null;
+        let _ = no_window(&mut cmd).stdin(null()).stdout(null()).stderr(null()).status();
+    });
+}
+
+/// Windows toast through Windows PowerShell, which can load the WinRT notification types.
+// ponytail: shows under PowerShell's name; GhostLane's own would need a Start menu shortcut with an app id.
+const TOAST_SCRIPT: &str = "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, \
+     ContentType = WindowsRuntime] > $null; \
+     $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(\
+     [Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+     $x = $t.GetElementsByTagName('text'); \
+     $x.Item(0).AppendChild($t.CreateTextNode($env:GHOSTLANE_TITLE)) > $null; \
+     $x.Item(1).AppendChild($t.CreateTextNode($env:GHOSTLANE_BODY)) > $null; \
+     [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(\
+     '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show(\
+     [Windows.UI.Notifications.ToastNotification]::new($t))";
+
+fn notify_command(title: &str, body: &str) -> std::process::Command {
+    if cfg!(windows) {
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", TOAST_SCRIPT])
+            .env("GHOSTLANE_TITLE", title)
+            .env("GHOSTLANE_BODY", body);
+        cmd
+    } else if cfg!(target_os = "macos") {
+        let mut cmd = std::process::Command::new("osascript");
+        cmd.args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 2 of argv) with title (item 1 of argv)",
+            "-e",
+            "end run",
+            title,
+            body,
+        ]);
+        cmd
+    } else {
+        // Some notification daemons read the body as markup.
+        let body = body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let mut cmd = std::process::Command::new("notify-send");
+        cmd.args(["--app-name=GhostLane", title, &body]);
+        cmd
+    }
+}
+
 /// Runs `script` with `shell` in `cwd` and waits. Returns whether it exited with 0, and the last lines of its
 /// output.
 pub fn run_script(shell: Option<&str>, script: &str, cwd: &Path) -> (bool, String) {
@@ -703,6 +755,22 @@ mod tests {
         assert_eq!(run_tokens(&marker, since), Some(t));
         std::fs::write(&marker, "1").unwrap();
         assert_eq!(run_tokens(&marker, since), None);
+    }
+
+    #[test]
+    fn notifications_keep_the_text_out_of_the_script() {
+        let body = "00012 '; Remove-Item -Recurse C:\\ ; $(rm -rf ~) <b>";
+        let cmd = notify_command("GhostLane", body);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        if cfg!(windows) {
+            assert!(args.iter().all(|a| !a.contains("Remove-Item")));
+            let env: Vec<_> = cmd.get_envs().collect();
+            assert!(env.contains(&(std::ffi::OsStr::new("GHOSTLANE_BODY"), Some(std::ffi::OsStr::new(body)))));
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(args.last().map(String::as_str), Some(body));
+        } else {
+            assert!(args.last().is_some_and(|a| a.ends_with("&lt;b&gt;")));
+        }
     }
 
     #[test]

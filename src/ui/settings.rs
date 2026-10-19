@@ -22,6 +22,7 @@ pub struct SettingsForm {
     auto_run_limit: u32,
     notify_idle: bool,
     notify_failed: bool,
+    notify_desktop: bool,
     archive_after_days: u32,
     detected_shell: String,
     installed: Vec<String>,
@@ -45,6 +46,7 @@ impl SettingsForm {
             auto_run_limit: s.auto_run_limit,
             notify_idle: s.notify_idle,
             notify_failed: s.notify_failed,
+            notify_desktop: s.notify_desktop,
             archive_after_days: s.archive_after_days,
             detected_shell: detect_shell(None).0,
             installed: detect_ai_clis(),
@@ -164,6 +166,11 @@ impl SettingsForm {
                 &mut self.notify_failed,
                 "Get my attention when a ticket fails and comes back",
             );
+            switch_row(
+                ui,
+                &mut self.notify_desktop,
+                "Show a desktop notification when a run ends while GhostLane is in the background",
+            );
             ui.add_space(8.0);
 
             ui.label(RichText::new("Shell").strong());
@@ -249,6 +256,7 @@ impl SettingsForm {
             auto_run_limit: self.auto_run_limit,
             notify_idle: self.notify_idle,
             notify_failed: self.notify_failed,
+            notify_desktop: self.notify_desktop,
             archive_after_days: self.archive_after_days,
         }
     }
@@ -288,6 +296,7 @@ mod tests {
             auto_run_limit: 0,
             notify_idle: false,
             notify_failed: false,
+            notify_desktop: false,
             archive_after_days: 0,
         });
         form.reset();
@@ -298,7 +307,7 @@ mod tests {
         assert!(s.check_for_updates);
         assert_eq!(s.auto_order, AutoOrder::PriorityDesc);
         assert_eq!(s.auto_run_limit, 6);
-        assert!(s.notify_idle && s.notify_failed);
+        assert!(s.notify_idle && s.notify_failed && s.notify_desktop);
         assert_eq!(s.archive_after_days, 7);
         assert_eq!(s.ai_clis, Some(detect_ai_clis()));
     }

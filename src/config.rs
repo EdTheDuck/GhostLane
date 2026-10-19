@@ -29,6 +29,8 @@ pub struct Settings {
     pub notify_idle: bool,
     /// Ask for the user's attention when a ticket comes back to an earlier column.
     pub notify_failed: bool,
+    /// Show a desktop notification when an AI run ends while GhostLane is in the background.
+    pub notify_desktop: bool,
     /// Hide tickets that have been in the last column longer than this many days. 0 = never.
     pub archive_after_days: u32,
 }
@@ -45,6 +47,7 @@ impl Default for Settings {
             auto_run_limit: 6,
             notify_idle: true,
             notify_failed: true,
+            notify_desktop: true,
             archive_after_days: 7,
         }
     }

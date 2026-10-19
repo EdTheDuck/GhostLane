@@ -204,7 +204,7 @@ Click the ⚙ cog to choose:
 - the **Auto order** your Auto columns work through tickets in: by priority or by number, ascending or descending
 - the **Auto run limit**: how many times a ticket can be sent to the AI before Auto skips it
 - **Archive done tickets**: how long a ticket stays in view in the last column before it's tucked away
-- **notifications**: whether GhostLane gets your attention when the AI runs out of work, and when a ticket fails
+- **notifications**: whether GhostLane gets your attention when the AI runs out of work and when a ticket fails, and whether it pops up a desktop notification each time a run ends while you're working in another window
 - which **shell** to use (detected automatically by default)
 - the **terminal font size**
 - whether to **check for updates** on startup. When a newer release is out, an **Update** button appears in the title bar and takes you to the download.
