@@ -6,7 +6,7 @@ use egui_phosphor::regular as icon;
 use super::rich_editor::RichEditor;
 use super::{accent_button, icon_button, priority_icon};
 use crate::theme;
-use crate::ticket::{Priority, RunRecord, Ticket, format_id};
+use crate::ticket::{Priority, RunRecord, Ticket, format_id, labels_from_text};
 
 fn modal_size(ctx: &egui::Context) -> egui::Vec2 {
     let screen = ctx.content_rect().size();
@@ -115,6 +115,14 @@ pub fn view(
         });
         ui.add_space(4.0);
         ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
+        if !t.labels.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for l in &t.labels {
+                    super::label_chip(ui, l);
+                }
+            });
+        }
         if !deps.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 let waiting = deps.iter().any(|d| d.waiting);
@@ -361,6 +369,8 @@ pub struct TicketForm {
     notes_open: bool,
     /// Ticket numbers this one waits for, as typed.
     blocked: String,
+    /// Comma-separated labels, as typed.
+    labels: String,
     confirm_discard: bool,
     pub error: Option<String>,
 }
@@ -396,6 +406,7 @@ impl TicketForm {
             notes: RichEditor::new(("notes", ticket.id), &ticket.notes),
             notes_open: false,
             blocked: blocked_text(&ticket.blocked_by),
+            labels: ticket.labels.join(", "),
             original: ticket.clone(),
             ticket,
             confirm_discard: false,
@@ -411,6 +422,7 @@ impl TicketForm {
             || a.priority != b.priority
             || a.run_count != b.run_count
             || self.blocked.trim() != blocked_text(&b.blocked_by)
+            || labels_from_text(&self.labels) != b.labels
             || self.description.changed()
             || self.test_scope.changed()
             || self.notes.changed()
@@ -471,6 +483,15 @@ impl TicketForm {
                     "Numbers of tickets that must reach the last column first. Auto and the queue wait for them; \
                      ▶ still runs the ticket straight away.",
                 );
+                ui.add_space(16.0);
+                ui.label("Labels");
+                ui.add(
+                    TextEdit::singleline(&mut self.labels)
+                        .margin(super::INPUT_MARGIN)
+                        .hint_text("e.g. ui, backend")
+                        .desired_width(200.0),
+                )
+                .on_hover_text("Separate labels with commas. Search a column for label:name to find them.");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add(DragValue::new(&mut t.run_count).range(0..=u32::MAX).speed(0.1));
                     ui.label("Runs");
@@ -525,6 +546,7 @@ impl TicketForm {
         // Untouched text keeps its original Markdown byte for byte instead of the editor's normalised form.
         if matches!(outcome, Some(FormOutcome::Save)) {
             self.ticket.blocked_by = parse_blocked(&self.blocked, self.ticket.id).unwrap_or_default();
+            self.ticket.labels = labels_from_text(&self.labels);
             if self.description.changed() {
                 self.ticket.description = self.description.markdown();
             }
@@ -808,6 +830,7 @@ mod tests {
         assert!(!form.dirty());
         form.blocked = "1, 2".into();
         assert!(form.dirty());
+        form.labels = " ui,api ".into();
         let mut h = Harness::new_ui_state(
             |ui, (form, saved): &mut (TicketForm, bool)| {
                 *saved |= matches!(form.show(ui.ctx()), Some(FormOutcome::Save));
@@ -821,6 +844,7 @@ mod tests {
         h.run();
         assert!(h.state().1);
         assert_eq!(h.state().0.ticket.blocked_by, [1, 2]);
+        assert_eq!(h.state().0.ticket.labels, ["ui", "api"]);
     }
 
     #[test]

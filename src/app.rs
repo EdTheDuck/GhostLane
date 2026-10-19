@@ -16,7 +16,7 @@ use crate::config::AppConfig;
 use crate::project::{AutoMove, Project, Sort};
 use crate::terminal::{self, Terminals};
 use crate::theme;
-use crate::ticket::{Priority, RunRecord, RunResult, Ticket, format_id};
+use crate::ticket::{Filter, Priority, RunRecord, RunResult, Ticket, format_id};
 use crate::ui::import::{ImportForm, ImportOutcome};
 use crate::ui::project::{ProjectForm, ProjectOutcome};
 use crate::ui::quick_open::{QuickOpen, QuickOutcome};
@@ -41,6 +41,10 @@ pub struct OpenProject {
     pub selected: HashSet<u32>,
     /// The card last clicked; Shift-click selects from here.
     pub anchor: Option<u32>,
+    /// Board filter, kept while the app runs.
+    pub filter: Filter,
+    /// The filter bar shows above the board.
+    pub filter_open: bool,
 }
 
 impl OpenProject {
@@ -55,6 +59,8 @@ impl OpenProject {
             show_archived: false,
             selected: HashSet::new(),
             anchor: None,
+            filter: Filter::default(),
+            filter_open: false,
         }
     }
 
@@ -102,6 +108,7 @@ pub enum Action {
     ResetRunCount(u32),
     QuickOpen,
     ShowStats,
+    ToggleFilter,
 }
 
 pub enum Modal {
@@ -686,6 +693,15 @@ impl App {
             }
             Action::QuickOpen => self.modal = Some(Modal::QuickOpen(QuickOpen::default())),
             Action::ShowStats => self.modal = Some(Modal::Stats),
+            Action::ToggleFilter => {
+                if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
+                    // Closing the bar drops the filter too, so nothing stays hidden out of sight.
+                    if op.filter_open {
+                        op.filter = Filter::default();
+                    }
+                    op.filter_open = !op.filter_open;
+                }
+            }
             Action::ResetRunCount(id) => {
                 let Some(mut t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
                     return;
@@ -1859,6 +1875,14 @@ impl App {
                         }
                         if icon_button(ui, icon::CHART_BAR, "Project stats").clicked() {
                             actions.push(Action::ShowStats);
+                        }
+                        let filtering = self.active.is_some_and(|i| self.projects[i].filter_open);
+                        let idle = if filtering { theme::ACCENT } else { theme::TEXT };
+                        if ui::glyph_button(ui, icon::FUNNEL, idle, theme::ACCENT, false)
+                            .on_hover_text("Filter the board")
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleFilter);
                         }
                     }
                     left_end = ui.min_rect().right();

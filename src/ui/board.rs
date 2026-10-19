@@ -11,7 +11,7 @@ use super::{icon_button, priority_icon};
 use crate::app::{Action, OpenProject};
 use crate::project::{AutoMove, Project, Sort, SortBy, SortDir};
 use crate::theme;
-use crate::ticket::Ticket;
+use crate::ticket::{Filter, Priority, Ticket};
 
 const MIN_COLUMN_WIDTH: f32 = 300.0;
 const COLUMN_GAP: f32 = 12.0;
@@ -36,6 +36,10 @@ pub fn show(ui: &mut Ui, op: &mut OpenProject, settings: BoardSettings, actions:
     if !op.selected.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.memory(|m| m.focused().is_none())
     {
         op.selected.clear();
+    }
+    if op.filter_open {
+        filter_bar(ui, op, actions);
+        ui.add_space(8.0);
     }
     if !op.selected.is_empty() {
         selection_bar(ui, op, actions);
@@ -94,7 +98,7 @@ fn selection_bar(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
             }
         });
         ui.menu_button(format!("{}  Priority", icon::CARET_UP), |ui| {
-            for p in crate::ticket::Priority::ALL {
+            for p in Priority::ALL {
                 if ui.button(super::ticket::priority_text(p)).clicked() {
                     actions.push(Action::SetPriority {
                         ids: ids.clone(),
@@ -116,6 +120,60 @@ fn selection_bar(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
     }
 }
 
+/// Narrows the board down by priority, label, blocked tickets and runs.
+fn filter_bar(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
+    let Ok(project) = &op.project else { return };
+    let labels = project.labels();
+    let f = &mut op.filter;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{}  Filter", icon::FUNNEL)).strong());
+        ui.add_space(4.0);
+        for p in Priority::ALL {
+            let on = f.priorities.contains(&p);
+            let chip = ui.add(egui::Button::selectable(on, super::ticket::priority_text(p)));
+            if chip.clicked() {
+                if on {
+                    f.priorities.retain(|&x| x != p);
+                } else {
+                    f.priorities.push(p);
+                }
+            }
+        }
+        ui.add_space(4.0);
+        let text = match f.labels.len() {
+            0 => format!("{}  Labels", icon::TAG),
+            n => format!("{}  Labels ({n})", icon::TAG),
+        };
+        ui.menu_button(text, |ui| {
+            if labels.is_empty() {
+                ui.label(RichText::new("No ticket has a label yet").color(theme::TEXT_MUTED));
+            }
+            for l in &labels {
+                let mut on = f.labels.iter().any(|x| x.to_lowercase() == l.to_lowercase());
+                if super::pointer(ui.checkbox(&mut on, l)).changed() {
+                    if on {
+                        f.labels.push(l.clone());
+                    } else {
+                        f.labels.retain(|x| x.to_lowercase() != l.to_lowercase());
+                    }
+                }
+            }
+        });
+        super::pointer(ui.checkbox(&mut f.blocked, "Blocked only"));
+        ui.add_space(4.0);
+        ui.label("Runs at least");
+        ui.add(egui::DragValue::new(&mut f.min_runs).range(0..=99).speed(0.1));
+        if f.is_active() && ui.button("Clear").clicked() {
+            *f = Filter::default();
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if icon_button(ui, icon::X, "Close the filter").clicked() {
+                actions.push(Action::ToggleFilter);
+            }
+        });
+    });
+}
+
 /// Columns share the board width equally, but never shrink below `MIN_COLUMN_WIDTH`
 /// (the board scrolls sideways instead).
 fn column_width(available: f32, columns: usize) -> f32 {
@@ -131,6 +189,7 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: Board
         show_archived,
         selected,
         anchor,
+        filter,
         ..
     } = op
     else {
@@ -225,7 +284,7 @@ fn column_ui(ui: &mut Ui, op: &mut OpenProject, col: usize, width: f32, s: Board
                 let hidden = tickets.iter().filter(|t| archived(t)).count();
                 let visible: Vec<&Ticket> = tickets
                     .iter()
-                    .filter(|t| t.matches(query))
+                    .filter(|t| t.matches(query) && filter.matches(t, !project.blockers(t).is_empty()))
                     .filter(|t| !archived(t) || *show_archived || !query.trim().is_empty())
                     .collect();
                 for t in &visible {
@@ -459,6 +518,14 @@ fn card_contents(
                 }
             });
             ui.label(title_job(ui, &t.title, width));
+            if !t.labels.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for l in &t.labels {
+                        super::label_chip(ui, l);
+                    }
+                });
+            }
         })
         .response
         .rect;
@@ -759,6 +826,34 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::MoveTickets { ids, to_col: 1 } if ids == &[1, 3]))
         );
+    }
+
+    #[test]
+    fn labels_show_on_cards_and_the_filter_bar_narrows_the_board() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["Plain", "Tagged"]);
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        let mut t = p.find_ticket(2).unwrap().1.clone();
+        t.labels = vec!["ui".into()];
+        t.priority = Priority::High;
+        t.save().unwrap();
+        p.rescan().unwrap();
+        h.state_mut().0.filter_open = true;
+        h.run();
+        assert!(h.query_by_label("ui").is_some(), "label chip on the card");
+        h.get_by_label("Blocked only").click();
+        h.run();
+        assert!(h.query_by_label("Plain").is_none() && h.query_by_label("Tagged").is_none());
+        h.get_by_label("Clear").click();
+        h.run();
+        h.get_by_label(&format!("{}High", icon::CARET_UP)).click();
+        h.run();
+        assert!(h.query_by_label("Plain").is_none());
+        assert!(h.query_by_label("Tagged").is_some());
+        assert_eq!(h.state().0.filter.priorities, [Priority::High]);
+        h.get_by_label(icon::X).click();
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::ToggleFilter)));
     }
 
     #[test]

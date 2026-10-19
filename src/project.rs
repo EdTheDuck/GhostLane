@@ -374,6 +374,18 @@ impl Project {
             .collect()
     }
 
+    /// Every label on the board, sorted; spellings that differ only in case count once.
+    pub fn labels(&self) -> Vec<String> {
+        let mut all: Vec<String> = Vec::new();
+        for l in self.tickets.iter().flatten().flat_map(|t| &t.labels) {
+            if !all.iter().any(|a| a.to_lowercase() == l.to_lowercase()) {
+                all.push(l.clone());
+            }
+        }
+        all.sort_by_key(|l| l.to_lowercase());
+        all
+    }
+
     /// Is ticket `id` waiting for other tickets?
     pub fn is_blocked(&self, id: u32) -> bool {
         self.find_ticket(id).is_some_and(|(_, t)| !self.blockers(t).is_empty())
@@ -569,6 +581,7 @@ Anything else worth keeping, such as why a test failed.
 ```
 
 - `priority` is one of `low`, `medium`, `high` or `highest`.
+- Optional `labels` lists short tags for grouping and filtering, for example `labels: [ui, backend]`.
 - Optional `blocked_by` lists the IDs of tickets that must reach the last column first, for example `blocked_by: ['00012', '00015']`. GhostLane won't start a blocked ticket from its queue or an Auto column.
 - `## Test Scope` and `## Notes` are optional; leave a section out when it is empty.
 - Leave `id`, `run_count`, `done_at` and `runs` as they are; GhostLane maintains them.

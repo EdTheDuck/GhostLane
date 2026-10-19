@@ -143,6 +143,16 @@ pub fn priority_color(p: Priority) -> Color32 {
     }
 }
 
+/// A ticket label as a small rounded tag.
+pub fn label_chip(ui: &mut Ui, label: &str) -> Response {
+    egui::Frame::new()
+        .fill(theme::BORDER)
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| ui.label(RichText::new(label).small().color(theme::TEXT)))
+        .response
+}
+
 pub fn priority_icon(p: Priority) -> RichText {
     let glyph = match p {
         Priority::Low => icon::CARET_DOWN,

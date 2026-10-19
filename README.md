@@ -98,6 +98,7 @@ Every ticket has:
 - an optional **test scope**, so you and your AI agree on what "done" means
 - optional **notes** for anything else worth keeping with the ticket
 - a **run count** showing how many times the ticket has been sent to AI
+- optional **labels** such as `ui` or `backend`, shown as tags on the card
 - an optional **Blocked by** list of tickets that have to be finished first
 - a **run history**: every time the AI worked on it, how long it took, where the ticket went and how it ended
 
@@ -170,9 +171,11 @@ Both know every column, its folder and how tickets move between them, and GhostL
 
 Each column header shows a live ticket count and three quick tools:
 
-- 🔍 **Search** filters the column as you type, matching on ID, title, description, test scope and notes.
+- 🔍 **Search** filters the column as you type, matching on ID, title, labels, description, test scope and notes. Type `label:ui` to see only tickets with that label.
 - ⇅ **Sort** orders tickets by ID, priority or title, ascending or descending. GhostLane remembers your choice for each column.
 - ➕ **Add** creates a new ticket directly in that column.
+
+Want to see just part of the board? The funnel in the title bar opens a filter bar: pick priorities, labels, only blocked tickets, or tickets that have needed a certain number of runs, and every column narrows down at once.
 
 Looking for one ticket? Press **Ctrl+K** (Cmd+K on macOS) or the magnifying glass in the title bar, type a number or a few words, and jump straight to it from any column.
 
@@ -233,6 +236,8 @@ id: 00001
 title: Login page
 priority: high
 run_count: 2
+labels:
+- ui
 blocked_by:
 - '00002'
 ---

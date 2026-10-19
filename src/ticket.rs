@@ -96,6 +96,8 @@ pub struct Ticket {
     pub title: String,
     pub priority: Priority,
     pub run_count: u32,
+    /// Short tags shown on the card, as written; filterable with `label:name`.
+    pub labels: Vec<String>,
     /// Tickets that must reach the last column before Auto or the queue start this one.
     pub blocked_by: Vec<u32>,
     /// When the ticket last arrived in the last column, in seconds since 1970.
@@ -117,6 +119,8 @@ struct FrontOut<'a> {
     title: &'a str,
     priority: Priority,
     run_count: u32,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    labels: &'a [String],
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocked_by: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,14 +217,33 @@ impl Ticket {
         limit > 0 && self.run_count >= limit
     }
 
+    /// Does the ticket match a search? `label:name` words need that label; the rest is looked for in the
+    /// number, title, labels and text.
     pub fn matches(&self, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
+        let mut words = Vec::new();
+        for word in query.split_whitespace() {
+            match word.strip_prefix("label:") {
+                Some(label) => {
+                    if !self.has_label(label) {
+                        return false;
+                    }
+                }
+                None => words.push(word),
+            }
+        }
+        let q = words.join(" ").to_lowercase();
         q.is_empty()
             || self.id_str().contains(&q)
             || self.title.to_lowercase().contains(&q)
+            || self.labels.iter().any(|l| l.to_lowercase().contains(&q))
             || self.description.to_lowercase().contains(&q)
             || self.test_scope.to_lowercase().contains(&q)
             || self.notes.to_lowercase().contains(&q)
+    }
+
+    pub fn has_label(&self, label: &str) -> bool {
+        let label = label.to_lowercase();
+        self.labels.iter().any(|l| l.to_lowercase() == label)
     }
 
     pub fn parse(id: u32, path: PathBuf, text: &str) -> Ticket {
@@ -251,6 +274,7 @@ impl Ticket {
                     .and_then(|v| v.as_u64())
                     .map(|n| n.min(u32::MAX as u64) as u32)
                     .unwrap_or(0);
+                t.labels = get("labels").map(parse_labels).unwrap_or_default();
                 t.blocked_by = get("blocked_by").map(parse_ids).unwrap_or_default();
                 t.blocked_by.retain(|&b| b != id);
                 t.done_at = get("done_at").and_then(|v| v.as_str()).and_then(parse_utc);
@@ -278,6 +302,7 @@ impl Ticket {
             title: &self.title,
             priority: self.priority,
             run_count: self.run_count,
+            labels: &self.labels,
             blocked_by: self.blocked_by.iter().map(|&b| format_id(b)).collect(),
             done_at: self.done_at.map(utc_timestamp),
             runs: &self.runs,
@@ -352,6 +377,63 @@ fn parse_ids(v: &serde_yaml_ng::Value) -> Vec<u32> {
     ids.sort_unstable();
     ids.dedup();
     ids
+}
+
+/// Labels from a YAML list (or a single comma-separated string); blanks and repeats are dropped.
+fn parse_labels(v: &serde_yaml_ng::Value) -> Vec<String> {
+    let text = |v: &serde_yaml_ng::Value| match v {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    match v.as_sequence() {
+        Some(seq) => clean_labels(seq.iter().filter_map(text)),
+        None => text(v).map_or_else(Vec::new, |s| labels_from_text(&s)),
+    }
+}
+
+/// "ui, Backend ,ui" -> ["ui", "Backend"].
+pub fn labels_from_text(text: &str) -> Vec<String> {
+    clean_labels(text.split(',').map(String::from))
+}
+
+/// Trimmed onto one line, without blanks or repeats (ignoring case); first spelling wins.
+fn clean_labels(labels: impl Iterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in labels {
+        let l = l.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !l.is_empty() && !out.iter().any(|o| o.to_lowercase() == l.to_lowercase()) {
+            out.push(l);
+        }
+    }
+    out
+}
+
+/// Narrows the board down. A ticket shows when it passes every part that is set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Filter {
+    /// Any of these; empty = any priority.
+    pub priorities: Vec<Priority>,
+    /// Any of these; empty = any labels or none.
+    pub labels: Vec<String>,
+    /// Only tickets waiting for others.
+    pub blocked: bool,
+    /// Only tickets sent to the AI at least this often. 0 = any.
+    pub min_runs: u32,
+}
+
+impl Filter {
+    pub fn is_active(&self) -> bool {
+        *self != Filter::default()
+    }
+
+    /// `blocked`: the ticket waits for others (see `Project::blockers`).
+    pub fn matches(&self, t: &Ticket, blocked: bool) -> bool {
+        (self.priorities.is_empty() || self.priorities.contains(&t.priority))
+            && (self.labels.is_empty() || self.labels.iter().any(|l| t.has_label(l)))
+            && (!self.blocked || blocked)
+            && t.run_count >= self.min_runs
+    }
 }
 
 /// Writes `contents` to a temp file beside `path`, then renames it over `path`. Creates missing folders.
@@ -456,6 +538,7 @@ mod tests {
             description: "Build it.\n\n- a\n- b".into(),
             test_scope: "- works".into(),
             notes: "Spoke to *design*.".into(),
+            labels: vec!["ui".into(), "Back end".into()],
             blocked_by: vec![2, 5],
             done_at: Some(1_709_210_096),
             runs: vec![RunRecord {
@@ -626,6 +709,77 @@ mod tests {
         assert!(t.matches("00012"));
         assert!(t.matches("  "));
         assert!(!t.matches("signup"));
+        let t = Ticket {
+            labels: vec!["UI".into()],
+            ..t
+        };
+        assert!(t.matches("label:ui"));
+        assert!(t.matches("label:ui login"));
+        assert!(!t.matches("label:ui signup"));
+        assert!(!t.matches("label:backend"));
+        assert!(t.matches("ui"));
+    }
+
+    #[test]
+    fn labels_parse_leniently() {
+        let t = Ticket::parse(
+            1,
+            p(),
+            "---\ntitle: X\nlabels: [' ui ', Back  end, UI, '', 7, [x]]\n---\n",
+        );
+        assert_eq!(t.labels, ["ui", "Back end", "7"]);
+        let t = Ticket::parse(1, p(), "---\ntitle: X\nlabels: ui, api\n---\n");
+        assert_eq!(t.labels, ["ui", "api"]);
+        assert_eq!(labels_from_text(" a,, b ,A"), ["a", "b"]);
+        assert!(!Ticket::default().serialize().contains("labels"));
+    }
+
+    #[test]
+    fn filters_combine() {
+        let t = Ticket {
+            priority: Priority::High,
+            labels: vec!["ui".into()],
+            run_count: 2,
+            ..Default::default()
+        };
+        assert!(!Filter::default().is_active());
+        assert!(Filter::default().matches(&t, false));
+        let by_priority = Filter {
+            priorities: vec![Priority::Low, Priority::High],
+            ..Default::default()
+        };
+        assert!(by_priority.matches(&t, false));
+        let by_label = Filter {
+            labels: vec!["API".into(), "UI".into()],
+            ..by_priority.clone()
+        };
+        assert!(by_label.matches(&t, false));
+        assert!(
+            !Filter {
+                blocked: true,
+                ..by_label.clone()
+            }
+            .matches(&t, false)
+        );
+        assert!(
+            Filter {
+                blocked: true,
+                ..by_label.clone()
+            }
+            .matches(&t, true)
+        );
+        assert!(
+            !Filter {
+                min_runs: 3,
+                ..by_label
+            }
+            .matches(&t, false)
+        );
+        let other = Filter {
+            priorities: vec![Priority::Low],
+            ..Default::default()
+        };
+        assert!(other.is_active() && !other.matches(&t, false));
     }
 
     #[test]
