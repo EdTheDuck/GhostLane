@@ -29,7 +29,8 @@ tempfile = "3.27.0"
 [build-dependencies]
 winresource = "0.1.31"
 
-# Installers for GitHub releases, built by `cargo packager` (see .github/workflows/release.yml).
+# Installers for GitHub releases, built by `cargo packager` (see .github/workflows/release.yml and
+# packaging/release-windows.ps1).
 [package.metadata.packager]
 product-name = "GhostLane"
 identifier = "com.edtheduck.ghostlane"
@@ -39,3 +40,6 @@ icons = ["assets/icons/*.png", "assets/icons/ghostlane.icns", "assets/icons/ghos
 before-packaging-command = "cargo build --release"
 binaries-dir = "target/release"
 out-dir = "dist"
+
+[package.metadata.packager.nsis]
+installer-icon = "assets/icons/ghostlane.ico"
