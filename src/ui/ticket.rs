@@ -129,7 +129,7 @@ pub fn view(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 for l in &t.labels {
-                    super::label_chip(ui, l);
+                    super::label_chip(ui, l, false);
                 }
             });
         }

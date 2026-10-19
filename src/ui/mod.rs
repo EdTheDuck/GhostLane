@@ -144,7 +144,8 @@ pub fn priority_color(p: Priority) -> Color32 {
 }
 
 /// A ticket label as a pill. Laid out on one line and sized to its text, so it never wraps or gets clipped.
-pub fn label_chip(ui: &mut Ui, label: &str) -> Response {
+/// `clickable` pills light up in the accent colour on hover.
+pub fn label_chip(ui: &mut Ui, label: &str, clickable: bool) -> Response {
     const PAD: egui::Vec2 = egui::vec2(10.0, 4.0);
     let galley = egui::WidgetText::from(RichText::new(label).small().color(theme::TEXT)).into_galley(
         ui,
@@ -152,13 +153,29 @@ pub fn label_chip(ui: &mut Ui, label: &str) -> Response {
         f32::INFINITY,
         egui::TextStyle::Small,
     );
-    let (rect, response) = ui.allocate_exact_size(galley.size() + PAD * 2.0, egui::Sense::hover());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, galley.text()));
+    let sense = if clickable {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(galley.size() + PAD * 2.0, sense);
+    let kind = if clickable {
+        egui::WidgetType::Button
+    } else {
+        egui::WidgetType::Label
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(kind, true, galley.text()));
     if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(rect, rect.height() / 2.0, theme::BORDER);
-        ui.painter().galley(rect.min + PAD, galley, theme::TEXT);
+        let hot = clickable && response.hovered();
+        let (fill, text) = if hot {
+            (theme::ACCENT, theme::ACCENT_TEXT)
+        } else {
+            (theme::BORDER, theme::TEXT)
+        };
+        ui.painter().rect_filled(rect, rect.height() / 2.0, fill);
+        ui.painter().galley(rect.min + PAD, galley, text);
     }
-    response
+    if clickable { pointer(response) } else { response }
 }
 
 pub fn priority_icon(p: Priority) -> RichText {

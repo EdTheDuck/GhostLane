@@ -116,6 +116,8 @@ pub enum Action {
     QuickOpen,
     ShowStats,
     ToggleFilter,
+    /// Open the filter bar with this label ticked, or untick it if it already is.
+    FilterByLabel(String),
     Export(ExportFormat),
     /// Switch Auto on or off for the column with this folder.
     ToggleAuto(String),
@@ -772,6 +774,16 @@ impl App {
             Action::TogglePause => {
                 if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
                     op.paused = !op.paused;
+                }
+            }
+            Action::FilterByLabel(label) => {
+                if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
+                    op.filter_open = true;
+                    let labels = &mut op.filter.labels;
+                    match labels.iter().position(|l| l.to_lowercase() == label.to_lowercase()) {
+                        Some(i) => _ = labels.remove(i),
+                        None => labels.push(label),
+                    }
                 }
             }
             Action::ToggleFilter => {

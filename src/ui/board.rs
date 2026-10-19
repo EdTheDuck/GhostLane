@@ -708,7 +708,12 @@ fn card_contents(
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                     for l in &t.labels {
-                        super::label_chip(ui, l);
+                        if super::label_chip(ui, l, true)
+                            .on_hover_text(format!("Show only tickets labelled {l}"))
+                            .clicked()
+                        {
+                            actions.push(Action::FilterByLabel(l.clone()));
+                        }
                     }
                 });
             }
@@ -1058,6 +1063,30 @@ mod tests {
         h.get_by_label(icon::X).click();
         h.run();
         assert!(h.state().1.iter().any(|a| matches!(a, Action::ToggleFilter)));
+    }
+
+    #[test]
+    fn clicking_a_label_filters_by_it_instead_of_opening_the_card() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness_with(d.path(), &["Tagged"]);
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        let mut t = p.find_ticket(1).unwrap().1.clone();
+        t.labels = vec!["ui".into()];
+        t.save().unwrap();
+        p.rescan().unwrap();
+        h.run();
+        h.get_by_label("ui").hover();
+        h.run();
+        assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::PointingHand);
+        h.get_by_label("ui").click();
+        h.run();
+        let actions = &h.state().1;
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::FilterByLabel(l) if l == "ui"))
+        );
+        assert!(!actions.iter().any(|a| matches!(a, Action::ViewTicket(_))));
     }
 
     #[test]

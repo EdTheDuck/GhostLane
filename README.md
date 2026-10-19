@@ -98,7 +98,7 @@ Every ticket has:
 - an optional **test scope**, so you and your AI agree on what "done" means
 - optional **notes** for anything else worth keeping with the ticket
 - a **run count** showing how many times the ticket has been sent to AI
-- optional **labels** such as `ui` or `backend`, shown as tags on the card
+- optional **labels** such as `ui` or `backend`, shown as pills on the card; click one to filter the board by it
 - an optional **Blocked by** list of tickets that have to be finished first
 - a **run history**: every time the AI worked on it, how long it took, where the ticket went, how it ended and, with Claude Code, how many tokens it used
 
