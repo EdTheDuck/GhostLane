@@ -391,6 +391,12 @@ fn column_ui(
     };
     let (column, tickets) = (&project.meta.columns[col], &project.tickets[col]);
     let auto_column = project.auto_target(col, AutoMove::AiWorking).is_some();
+    // The AI fills a column whose tickets leave on AI Complete, so new tickets don't start there.
+    let ai_fills = project.auto_target(col, AutoMove::AiComplete).is_some();
+    // Nothing to search in an empty column; a search left open there goes too.
+    if tickets.is_empty() {
+        search.remove(&column.folder);
+    }
     let mut prepared = Frame::new()
         .fill(theme::PANEL)
         .corner_radius(CornerRadius::same(8))
@@ -408,12 +414,13 @@ fn column_ui(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Visible gap between glyphs was 14 (30px button, 16px glyph) + 12 spacing; 75% of that.
                 ui.spacing_mut().item_spacing.x = 5.5;
-                if icon_button(ui, icon::PLUS, "Add ticket").clicked() {
+                if !ai_fills && icon_button(ui, icon::PLUS, "Add ticket").clicked() {
                     actions.push(Action::NewTicket(col));
                 }
                 let sort_btn = icon_button(ui, icon::ARROWS_DOWN_UP, "Sort");
                 Popup::menu(&sort_btn).show(|ui| sort_menu(ui, col, column.sort, actions));
-                if icon_button(ui, icon::MAGNIFYING_GLASS, "Search").clicked()
+                if !tickets.is_empty()
+                    && icon_button(ui, icon::MAGNIFYING_GLASS, "Search").clicked()
                     && search.remove(&column.folder).is_none()
                 {
                     search.insert(column.folder.clone(), String::new());
@@ -1285,6 +1292,20 @@ mod tests {
         h.get_all_by_label(icon::PLUS).nth(1).unwrap().click();
         h.run();
         assert!(h.state().1.iter().any(|a| matches!(a, Action::NewTicket(1))));
+    }
+
+    #[test]
+    fn empty_columns_have_no_search_and_ai_filled_ones_no_add() {
+        let d = tempfile::tempdir().unwrap();
+        // "Done" is empty.
+        let h = harness(d.path());
+        assert_eq!(h.get_all_by_label(icon::MAGNIFYING_GLASS).count(), 1);
+        assert_eq!(h.get_all_by_label(icon::PLUS).count(), 2);
+        // Tickets leave "To Do" on AI Complete.
+        let d = tempfile::tempdir().unwrap();
+        let h = harness_cols(d.path(), &["Hello"], AutoMove::AiComplete);
+        assert_eq!(h.get_all_by_label(icon::PLUS).count(), 1);
+        assert_eq!(h.get_all_by_label(icon::MAGNIFYING_GLASS).count(), 2);
     }
 
     #[test]

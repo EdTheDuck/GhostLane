@@ -192,9 +192,9 @@ Both know every column, its folder and how tickets move between them, and GhostL
 
 Each column header shows a live ticket count and three quick tools:
 
-- 🔍 **Search** filters the column as you type, matching on ID, title, labels, description, test scope and notes. Type `label:ui` to see only tickets with that label.
+- 🔍 **Search** filters the column as you type, matching on ID, title, labels, description, test scope and notes. Type `label:ui` to see only tickets with that label. Empty columns leave it out.
 - ⇅ **Sort** orders tickets by ID, priority or title, ascending or descending. GhostLane remembers your choice for each column.
-- ➕ **Add** creates a new ticket directly in that column.
+- ➕ **Add** creates a new ticket directly in that column. Columns the AI fills (their tickets move on when the AI completes) leave it out, since new work doesn't start there.
 
 Want to see just part of the board? The funnel in the title bar opens a filter bar: pick priorities, labels, only blocked tickets, or tickets that have needed a certain number of runs, and every column narrows down at once. Clicking a label on a card does the same for that label.
 
