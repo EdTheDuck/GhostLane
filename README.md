@@ -10,7 +10,7 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 
 **[⬇ Download the latest release](../../releases/latest)**
 
-![The GhostLane board: labelled tickets across five columns, locks on blocked tickets, a WIP limit on In Dev, and Claude Code ready in the terminal below](docs/screenshots/board.png)
+![The GhostLane board: epics with progress bars in the sidebar, labelled tickets with priority stripes across five columns, locks on blocked tickets, a WIP limit on In Dev, and Claude Code ready in the terminal beside the queue](docs/screenshots/board.png)
 
 ---
 
@@ -19,10 +19,11 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 - **Big changes become a queue of small prompts.** Break a feature into tickets, give each one a test scope, then hand them to your AI one at a time. You review ticket 3 while ticket 4 runs, and nothing gets lost in a scrollback.
 - **Your AI writes the tickets.** Describe what you want in a sentence. GhostLane asks the project's AI CLI to read the codebase and write a full ticket with a priority, a description and a test scope.
 - **One click to run.** The ▶ button on every card sends that ticket to your AI CLI. If the CLI is already open in the terminal, GhostLane types the prompt straight into it.
-- **Hands-free when you want it.** Queue up tickets while the AI is busy, or switch a column to Auto and let it work through the backlog by itself. Pause or stop it whenever you need to step in.
+- **Hands-free when you want it.** Queue up tickets while the AI is busy, switch a column to Auto and let it work through the backlog by itself, or schedule the queue to run overnight. Pause or stop it whenever you need to step in.
+- **Several tickets at once.** Turn on parallel runs and each ticket gets its own git worktree and terminal, so three AIs can work side by side and their work merges back when each ticket is done.
 - **Tickets move themselves.** Press ▶ on a To Do ticket and it slides into In Dev while the AI works, then on to Ready For Test when it's done. Testing works the same way, so a ticket can go from idea to Done with two clicks.
 - **A Developer and a Tester on call.** GhostLane sets up developer and tester sub agents for your AI CLI that know your columns, which tickets are theirs and where to move them next.
-- **A big backlog stays readable.** Labels, a filter bar, WIP limits and arrows between dependent tickets show what matters at a glance, and Ctrl+K jumps to any ticket or command.
+- **A big backlog stays readable.** Epics group tickets under a bigger goal with a progress bar, and labels, a filter bar, WIP limits and arrows between dependent tickets show what matters at a glance. Ctrl+K jumps to any ticket, epic or command.
 - **The AI can see the plan.** Tickets live in `tickets/` inside your project, so your AI can read past and upcoming work, and can create or edit tickets itself. The board picks up every change the moment the file changes.
 - **Bring your own AI.** Claude Code, OpenAI Codex, Gemini CLI, GitHub Copilot CLI, Cursor, opencode and Aider are built in. Each project picks its own.
 - **Plain files, no lock-in.** A ticket is a `.md` file with a short YAML header. Grep it, commit it, edit it in any editor. If you stop using GhostLane tomorrow, your plan is still readable.
@@ -107,6 +108,7 @@ Every ticket has:
 - a **run count** showing how many times the ticket has been sent to AI
 - optional **labels** such as `ui` or `backend`, shown as pills on the card; click one to filter the board by it (it stays lit while the filter is on) and click it again to stop
 - an optional **Blocked by** list of tickets that have to be finished first
+- an optional **epic**, the bigger goal it belongs to, shown as a purple pill on the card
 - a **run history**: every time the AI worked on it, how long it took, where the ticket went, how it ended and, with Claude Code, how many tokens it used
 
 Click a card to read it: the description, notes and run history on cards of their own, the test scope on its own tab, a card with its title and labels (click one to filter the board by it), and a sidebar with its priority, runs, tokens and the tickets it blocks or waits for. **Edit** at the bottom right opens it for changes and **Delete** at the bottom left throws it away. Right-click a card to **Edit**, **Duplicate** or **Delete** it. Deleted tickets go to your Recycle Bin or Trash, and **Ctrl+Z** puts them straight back.
@@ -138,6 +140,8 @@ With Claude Code and OpenAI Codex, GhostLane knows exactly when the AI has finis
 ### Epics for the bigger picture
 
 An epic groups the tickets working towards one goal, like "Payments rework". Epics live in a sidebar on the left of the board, each with a purple progress bar showing how many of its tickets are done. The queue button on an epic's card lines up all its unfinished tickets for the AI in one click. Click the card to open it: its tickets as small cards, its description, and what the AI has spent on it so far. From there, **Add ticket** makes a new ticket in the epic (by hand or written by your AI), **Queue all** lines up its unfinished tickets for the AI, and **Break into tickets** asks your AI to write the tickets for an epic from its description. Press **+** to make an epic yourself or have the AI write one, and the arrow tucks the sidebar away when you want the room.
+
+![An epic opened: its progress, its tickets as small cards, and buttons to add a ticket, queue them all or have the AI break the epic into tickets](docs/screenshots/epic.png)
 
 Every ticket in an epic carries a purple pill; click it (or the funnel on the epic's card) to see only that epic's tickets. Pick a ticket's epic in its **Epic** field, right-click a card and choose **Move to Epic**, or select several and use **Epic** in the selection bar. When the last ticket of an epic reaches Done, GhostLane tells you it's complete. An epic is a Markdown file in `epics/`, and your AI knows about them too, so it reads the bigger goal before working on a ticket.
 
@@ -182,13 +186,13 @@ Prefer the keyboard? With nothing else focused, the **arrow keys** walk between 
 
 ### See how it's going
 
-The chart icon in the title bar, next to the settings cog, opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, how many tokens the AI has used (with Claude Code), and which tickets needed the most runs.
+The chart icon in the title bar, next to the settings cog, opens the project's stats: tickets done each day for the last two weeks, how many AI runs there have been, how long a run takes on average, how many tickets passed on the first try, how many tokens the AI has used (with Claude Code), which tickets needed the most runs, and how far along each epic is.
 
-![Project stats: headline numbers, tickets done per day and the tickets that needed the most runs](docs/screenshots/stats.png)
+![Project stats: headline numbers, tickets done per day, the tickets that needed the most runs and each epic's progress](docs/screenshots/stats.png)
 
 ### Take the board with you
 
-The **Export** buttons in the project dialog (the pencil next to the project name) save the board as a **CSV file** of every ticket (number, title, column, priority, labels, runs, blockers and when it was done) for a spreadsheet, or as a **Markdown report** grouped by column, handy as a status update or a starting point for release notes.
+The **Export** buttons in the project dialog (the pencil next to the project name) save the board as a **CSV file** of every ticket (number, title, column, priority, labels, runs, blockers, epic and when it was done) for a spreadsheet, or as a **Markdown report** grouped by column, handy as a status update or a starting point for release notes.
 
 ### Your AI knows the board
 
@@ -205,15 +209,15 @@ Both know every column, its folder and how tickets move between them, and GhostL
 
 Each column header shows a live ticket count and three quick tools:
 
-- 🔍 **Search** filters the column as you type, matching on ID, title, labels, description, test scope and notes. Type `label:ui` to see only tickets with that label. Empty columns leave it out.
+- 🔍 **Search** filters the column as you type, matching on ID, title, labels, description, test scope and notes. Type `label:ui` to see only tickets with that label, or `epic:00005` for one epic's. Empty columns leave it out.
 - ⇅ **Sort** orders tickets by ID, priority or title, ascending or descending. GhostLane remembers your choice for each column.
 - ➕ **Add** creates a new ticket directly in that column. Columns the AI fills (their tickets move on when the AI completes) leave it out, since new work doesn't start there.
 
-Want to see just part of the board? The funnel in the title bar opens a filter bar: pick priorities, labels, only blocked tickets, or tickets that have needed a certain number of runs, and every column narrows down at once. Clicking a label on a card does the same for that label.
+Want to see just part of the board? The funnel in the title bar opens a filter bar: pick priorities, labels, epics, only blocked tickets, or tickets that have needed a certain number of runs, and every column narrows down at once. Clicking a label or epic pill on a card does the same for it.
 
 ![The filter bar narrowing the board to tickets labelled ui](docs/screenshots/filter.png)
 
-Looking for one ticket? Press **Ctrl+K** (Cmd+K on macOS) or the magnifying glass in the title bar, type a number or a few words, and jump straight to it from any column. The same box runs commands too: type `stats`, `auto` or `export`, or start with `>` to list them all, from adding a ticket to any column to switching projects or pausing the AI.
+Looking for one ticket? Press **Ctrl+K** (Cmd+K on macOS) or the magnifying glass in the title bar, type a number or a few words, and jump straight to it from any column. The same box runs commands and opens epics too: type `stats`, `auto` or an epic's name, or start with `>` to list them all, from adding a ticket to any column to making an epic, switching projects or pausing the AI.
 
 ![Ctrl+K listing commands](docs/screenshots/command-palette.png)
 
@@ -282,6 +286,7 @@ labels:
 - ui
 blocked_by:
 - '00002'
+epic: '00005'
 ---
 
 ## Description
