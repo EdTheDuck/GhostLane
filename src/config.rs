@@ -79,6 +79,87 @@ pub struct ProjectSettings {
     pub test_command: String,
 }
 
+/// When a project's queue works through its tickets by itself. Kept on this computer only, like `ProjectSettings`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Schedule {
+    pub enabled: bool,
+    /// Minutes after local midnight the window opens and closes. Closing before it opens runs past midnight;
+    /// the same time for both means all day.
+    pub start: u32,
+    pub end: u32,
+    /// Days the window opens on, Monday first.
+    pub days: [bool; 7],
+    /// Tokens one window may use before the queue stops. 0 = no limit.
+    pub token_budget: u64,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start: 22 * 60,
+            end: 7 * 60,
+            days: [true; 7],
+            token_budget: 0,
+        }
+    }
+}
+
+impl Schedule {
+    /// Is the window open at `minute` past midnight on `weekday` (0 = Monday)? A window past midnight belongs to
+    /// the day it opened on.
+    pub fn open_at(&self, weekday: usize, minute: u32) -> bool {
+        let day = |d: usize| self.days[d % 7];
+        let yesterday = weekday + 6;
+        match self.start.cmp(&self.end) {
+            std::cmp::Ordering::Equal => day(weekday),
+            std::cmp::Ordering::Less => day(weekday) && (self.start..self.end).contains(&minute),
+            std::cmp::Ordering::Greater => {
+                (day(weekday) && minute >= self.start) || (day(yesterday) && minute < self.end)
+            }
+        }
+    }
+
+    /// Is the window open right now, in local time?
+    pub fn open_now(&self) -> bool {
+        use chrono::{Datelike, Timelike};
+        let now = chrono::Local::now();
+        self.open_at(
+            now.weekday().num_days_from_monday() as usize,
+            now.hour() * 60 + now.minute(),
+        )
+    }
+
+    /// The days it opens on, in words: "every day", "weekdays", or like "Mon, Wed".
+    pub fn days_text(&self) -> String {
+        const NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        match self.days {
+            [true, true, true, true, true, true, true] => "every day".into(),
+            [true, true, true, true, true, false, false] => "weekdays".into(),
+            [false, false, false, false, false, true, true] => "weekends".into(),
+            [false, false, false, false, false, false, false] => "no days picked".into(),
+            days => NAMES
+                .iter()
+                .zip(days)
+                .filter(|(_, on)| *on)
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+}
+
+/// `22:00` for 1320 minutes past midnight.
+pub fn clock_time(minute: u32) -> String {
+    format!("{:02}:{:02}", minute / 60 % 24, minute % 60)
+}
+
+/// The local time now, like `06:41`.
+pub fn local_time() -> String {
+    chrono::Local::now().format("%H:%M").to_string()
+}
+
 impl Settings {
     /// Ticked AI CLIs, never empty.
     pub fn enabled_clis(&self) -> Vec<String> {
@@ -99,6 +180,8 @@ pub struct AppConfig {
     pub settings: Settings,
     /// Keyed by .ghost path.
     pub projects: HashMap<PathBuf, ProjectSettings>,
+    /// When each project's queue may run, keyed by .ghost path.
+    pub schedules: HashMap<PathBuf, Schedule>,
 }
 
 /// `<config_dir>/GhostLane`.
@@ -139,6 +222,7 @@ impl AppConfig {
         let before = self.clone();
         self.open_projects.retain(|p| p.is_file());
         self.projects.retain(|p, _| p.is_file());
+        self.schedules.retain(|p, _| p.is_file());
         if self
             .active_project
             .as_ref()
@@ -177,6 +261,43 @@ mod tests {
         assert_eq!(cfg.open_projects, std::slice::from_ref(&real));
         assert_eq!(cfg.active_project, Some(real));
         assert!(!cfg.prune_missing());
+    }
+
+    #[test]
+    fn schedules_open_on_their_days_and_run_past_midnight() {
+        let weekdays = Schedule {
+            enabled: true,
+            start: 9 * 60,
+            end: 17 * 60,
+            days: [true, true, true, true, true, false, false],
+            token_budget: 0,
+        };
+        assert!(weekdays.open_at(0, 9 * 60));
+        assert!(!weekdays.open_at(0, 17 * 60));
+        assert!(!weekdays.open_at(5, 12 * 60), "Saturday");
+        assert_eq!(weekdays.days_text(), "weekdays");
+
+        // Opens Friday night only, so it is still open early Saturday but not early Friday.
+        let mut night = Schedule {
+            days: [false, false, false, false, true, false, false],
+            ..Default::default()
+        };
+        assert!(night.open_at(4, 23 * 60));
+        assert!(night.open_at(5, 6 * 60 + 59));
+        assert!(!night.open_at(5, 7 * 60));
+        assert!(!night.open_at(4, 6 * 60));
+        assert_eq!(night.days_text(), "Fri");
+        // Sunday night runs into Monday.
+        night.days = [false, false, false, false, false, false, true];
+        assert!(night.open_at(0, 60));
+
+        let all_day = Schedule {
+            start: 0,
+            end: 0,
+            ..Default::default()
+        };
+        assert!(all_day.open_at(3, 0) && all_day.open_at(3, 23 * 60 + 59));
+        assert_eq!(clock_time(22 * 60 + 30), "22:30");
     }
 
     #[test]

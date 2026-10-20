@@ -694,6 +694,10 @@ fn card(
     }
     let response = super::pointer(response);
     response.context_menu(|ui| {
+        // Only tickets with a ▶ can go to the AI.
+        if play.is_some() && ui.button(format!("{}  Add to Queue", icon::QUEUE)).clicked() {
+            actions.push(Action::AddToQueue(t.id));
+        }
         if ui.button(format!("{}  Edit Ticket", icon::PENCIL_SIMPLE)).clicked() {
             actions.push(Action::EditTicket(t.id));
         }
@@ -983,6 +987,17 @@ mod tests {
         h.get_by_label_contains("Reset Run Count").click();
         h.run();
         assert!(h.state().1.iter().any(|a| matches!(a, Action::ResetRunCount(2))));
+    }
+
+    #[test]
+    fn right_click_adds_a_ticket_to_the_queue() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        h.get_by_label("Hello").click_secondary();
+        h.run();
+        h.get_by_label_contains("Add to Queue").click();
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::AddToQueue(1))));
     }
 
     #[test]

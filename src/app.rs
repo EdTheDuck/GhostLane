@@ -31,6 +31,10 @@ pub struct OpenProject {
     pub search: HashMap<String, String>,
     /// Tickets to hand to the AI once it finishes the current one, in order.
     pub queue: Vec<u32>,
+    /// The queue works through its tickets by itself (within its schedule, if it has one).
+    pub queue_auto: bool,
+    /// The scheduled window the queue is working in, while one is open.
+    window: Option<QueueWindow>,
     /// Folders of the columns set to Auto. Kept in memory only, so a cloned repo never starts the AI by itself.
     pub auto: HashSet<String>,
     /// Start nothing new from the queue or Auto columns; the ticket the AI is on still finishes.
@@ -63,6 +67,8 @@ impl OpenProject {
             project,
             search: HashMap::new(),
             queue: Vec::new(),
+            queue_auto: true,
+            window: None,
             auto: HashSet::new(),
             paused: false,
             show_archived: false,
@@ -90,6 +96,17 @@ impl OpenProject {
     }
 }
 
+/// A scheduled window a project's queue works in: when it opened and what it got done.
+struct QueueWindow {
+    /// Local time it opened, like `22:00`.
+    opened: String,
+    tokens: u64,
+    /// Ticket, title, how its run ended and whether that counts as failing.
+    runs: Vec<(u32, String, String, bool)>,
+    /// The token budget ran out (and the user was told).
+    spent: bool,
+}
+
 /// Things the UI asks for; applied after drawing so widgets never hold borrows across mutations.
 #[derive(Clone)]
 pub enum Action {
@@ -115,6 +132,8 @@ pub enum Action {
     RunAi(u32),
     /// Run the first now and queue the rest, like pressing ▶ on each in turn.
     QueueTickets(Vec<u32>),
+    /// Put a ticket at the end of the queue without starting anything.
+    AddToQueue(u32),
     SetPriority {
         ids: Vec<u32>,
         priority: Priority,
@@ -147,6 +166,8 @@ pub enum Modal {
     Stats,
     Settings(SettingsForm),
     Import(ImportForm),
+    /// What a scheduled queue window got done.
+    QueueSummary(ui::queue::Summary),
     /// A short notice with an OK button.
     Message {
         title: String,
@@ -318,6 +339,8 @@ pub struct App {
     checks: Vec<Check>,
     /// Card moves and deletes, newest last; each entry is undone in one go.
     undo: Vec<Vec<UndoStep>>,
+    /// Summaries of scheduled queue windows that closed, shown once GhostLane is in front.
+    summaries: Vec<ui::queue::Summary>,
     jobs_tx: Sender<Job>,
     jobs_rx: Receiver<Job>,
     toasts: Vec<(String, Instant)>,
@@ -371,6 +394,7 @@ impl App {
             checks: Vec::new(),
             terminal_tab: None,
             undo: Vec::new(),
+            summaries: Vec::new(),
             jobs_tx,
             jobs_rx,
             toasts: Vec::new(),
@@ -824,6 +848,17 @@ impl App {
                     }
                 }
             }
+            Action::AddToQueue(id) => {
+                if let Some(i) = self.active {
+                    if self.is_running(i, id) {
+                        self.toast(format!("{} is already with the AI", format_id(id)));
+                    } else if self.projects[i].queue.contains(&id) {
+                        self.toast(format!("{} is already queued", format_id(id)));
+                    } else {
+                        self.projects[i].queue.push(id);
+                    }
+                }
+            }
             Action::SetPriority { ids, priority } => {
                 for id in ids {
                     let Some(mut t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
@@ -1026,7 +1061,117 @@ impl App {
 
     /// Is project `i`'s AI as busy as it gets, or are tickets waiting for it? Play buttons queue then.
     fn ai_engaged(&self, i: usize) -> bool {
-        (self.next_queued(i).is_some() && !self.projects[i].paused) || self.ai_full(i)
+        (self.queue_runs(i) && self.next_queued(i).is_some() && !self.projects[i].paused) || self.ai_full(i)
+    }
+
+    /// Project `i`'s queue schedule, when it has one switched on.
+    fn schedule(&self, i: usize) -> Option<&crate::config::Schedule> {
+        let ghost = &self.projects[i].project.as_ref().ok()?.ghost_path;
+        self.config.schedules.get(ghost).filter(|s| s.enabled)
+    }
+
+    /// May project `i`'s queue start its next ticket? Its Auto switch is on and, with a schedule, a window is open
+    /// with tokens to spare.
+    fn queue_runs(&self, i: usize) -> bool {
+        let op = &self.projects[i];
+        op.queue_auto
+            && match self.schedule(i) {
+                Some(s) => op
+                    .window
+                    .as_ref()
+                    .is_some_and(|w| s.token_budget == 0 || w.tokens < s.token_budget),
+                None => true,
+            }
+    }
+
+    /// Where project `i`'s queue schedule is at, in a line; `None` without one.
+    fn queue_status(&self, i: usize) -> Option<String> {
+        let s = self.schedule(i)?;
+        let (from, to) = (crate::config::clock_time(s.start), crate::config::clock_time(s.end));
+        Some(match &self.projects[i].window {
+            Some(w) if w.spent => format!("Token budget used up until the next window ({from}–{to})"),
+            Some(w) if s.token_budget > 0 => format!(
+                "Working until {to} · {} of {} tokens",
+                crate::ticket::compact(w.tokens),
+                crate::ticket::compact(s.token_budget)
+            ),
+            Some(_) => format!("Working until {to}"),
+            None => format!("Works {from}–{to}, {}", s.days_text()),
+        })
+    }
+
+    /// Opens and closes scheduled queue windows as the clock passes their times. A window that closes after
+    /// running tickets leaves a summary.
+    fn update_windows(&mut self, ctx: &egui::Context) {
+        for i in 0..self.projects.len() {
+            let schedule = self.schedule(i).cloned();
+            if schedule.is_some() {
+                // Nothing else repaints an idle window when the time comes.
+                ctx.request_repaint_after(Duration::from_secs(20));
+            }
+            let open = schedule.as_ref().is_some_and(crate::config::Schedule::open_now);
+            let budget = schedule.map_or(0, |s| s.token_budget);
+            let name = self.projects[i].name();
+            let op = &mut self.projects[i];
+            match (&mut op.window, open) {
+                (None, true) => {
+                    op.window = Some(QueueWindow {
+                        opened: crate::config::local_time(),
+                        tokens: 0,
+                        runs: Vec::new(),
+                        spent: false,
+                    })
+                }
+                (Some(w), true) if budget > 0 && w.tokens >= budget && !w.spent => {
+                    w.spent = true;
+                    let msg = format!("{name}: the queue stopped, its token budget is used up");
+                    self.desktop_notify(ctx, &msg);
+                    self.toast(msg);
+                }
+                (Some(_), false) => {
+                    let w = op.window.take().expect("matched Some");
+                    if w.runs.is_empty() {
+                        continue;
+                    }
+                    let failed = w.runs.iter().filter(|r| r.3).count();
+                    self.desktop_notify(
+                        ctx,
+                        &format!("{name}: queue run finished, {} ran, {failed} failed", w.runs.len()),
+                    );
+                    self.summaries.push(ui::queue::Summary {
+                        title: format!(
+                            "{name} · {}–{} · {} tokens",
+                            w.opened,
+                            crate::config::local_time(),
+                            crate::ticket::compact(w.tokens)
+                        ),
+                        runs: w.runs,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Notes a run of ticket `id` in project `ghost` that ended as `outcome`, for its open scheduled window.
+    fn note_run(&mut self, ghost: &Path, id: u32, outcome: String, failed: bool, tokens: u64) {
+        let Some(op) = self
+            .projects
+            .iter_mut()
+            .find(|op| op.project.as_ref().is_ok_and(|p| p.ghost_path == ghost))
+        else {
+            return;
+        };
+        let title = op
+            .project
+            .as_ref()
+            .ok()
+            .and_then(|p| p.find_ticket(id))
+            .map_or_else(String::new, |(_, t)| t.title.replace(['\n', '\r'], " "));
+        if let Some(w) = &mut op.window {
+            w.tokens += tokens;
+            w.runs.push((id, title, outcome, failed));
+        }
     }
 
     /// Do project `i`'s tickets run in parallel, each in a worktree of its own?
@@ -1256,6 +1401,8 @@ impl App {
         let mut notices = Vec::new();
         let ended_ghosts: Vec<PathBuf> = ended.iter().map(|(run, _)| run.cli.ghost.clone()).collect();
         let mut failed = Vec::new();
+        // Run endings for scheduled queue windows: project, ticket, how it ended, failed, tokens.
+        let mut notes = Vec::new();
         for (run, end) in ended {
             let ghost = run.cli.ghost.clone();
             // The branch holds the ticket's work between runs and until it merges.
@@ -1277,7 +1424,11 @@ impl App {
             if let RunEnd::CliGone = end {
                 messages.push(format!("The AI CLI closed before it finished {id}"));
                 notices.push(messages[0].clone());
-                messages.extend(record_run(p, &run, seconds, RunResult::CliClosed).err());
+                let tokens = record_run(p, &run, seconds, RunResult::CliClosed).unwrap_or_else(|e| {
+                    messages.push(e);
+                    0
+                });
+                notes.push((ghost.clone(), run.id, "the AI CLI closed".to_string(), true, tokens));
                 self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
                 continue;
             }
@@ -1319,7 +1470,19 @@ impl App {
                 continue;
             }
             let result = moved(p, &run);
-            messages.extend(record_run(p, &run, seconds, result).err());
+            let tokens = record_run(p, &run, seconds, result).unwrap_or_else(|e| {
+                messages.push(e);
+                0
+            });
+            if let Some((col, _)) = p.find_ticket(run.id) {
+                let column = &p.meta.columns[col].name;
+                let outcome = match result {
+                    RunResult::MovedOn => format!("moved on to {column}"),
+                    RunResult::SentBack => format!("came back to {column}"),
+                    _ => format!("stayed in {column}"),
+                };
+                notes.push((ghost.clone(), run.id, outcome, result == RunResult::SentBack, tokens));
+            }
             if let Some((col, t)) = p.find_ticket(run.id) {
                 let (title, column) = (t.title.replace(['\n', '\r'], " "), &p.meta.columns[col].name);
                 notices.push(match result {
@@ -1342,6 +1505,9 @@ impl App {
             if arrived {
                 self.ticket_done(&ghost, run.id, ctx);
             }
+        }
+        for (ghost, id, outcome, failed, tokens) in notes {
+            self.note_run(&ghost, id, outcome, failed, tokens);
         }
         for (ghost, id) in failed {
             self.retry(&ghost, id);
@@ -1412,7 +1578,9 @@ impl App {
     /// when nothing started.
     fn start_one(&mut self, i: usize, order: crate::project::AutoOrder, run_limit: u32, ctx: &egui::Context) -> bool {
         // Queued tickets waiting for others stay queued until those are done.
-        while let Some(pos) = self.next_queued(i) {
+        while self.queue_runs(i)
+            && let Some(pos) = self.next_queued(i)
+        {
             let id = self.projects[i].queue.remove(pos);
             if self.run_ai(i, id, ctx) {
                 return true;
@@ -1527,8 +1695,12 @@ impl App {
             return;
         };
         let mut messages = Vec::new();
+        let tokens;
         if passed {
-            messages.extend(record_run(p, &check.run, check.seconds, RunResult::MovedOn).err());
+            tokens = record_run(p, &check.run, check.seconds, RunResult::MovedOn).unwrap_or_else(|e| {
+                messages.push(e);
+                0
+            });
         } else {
             let _ = p.rescan();
             if let Some((_, t)) = p.find_ticket(check.run.id) {
@@ -1537,7 +1709,10 @@ impl App {
                 let back = t.save().and_then(|()| p.move_ticket(&t.path, 0));
                 messages.extend(back.err().map(|e| format!("Couldn't send {} back: {e}", t.id_str())));
             }
-            messages.extend(record_run(p, &check.run, check.seconds, RunResult::TestsFailed).err());
+            tokens = record_run(p, &check.run, check.seconds, RunResult::TestsFailed).unwrap_or_else(|e| {
+                messages.push(e);
+                0
+            });
             let first = p.meta.columns.first().map_or_else(String::new, |c| c.name.clone());
             messages.push(format!(
                 "{} failed \"{}\" and went back to {first}",
@@ -1553,6 +1728,11 @@ impl App {
         for m in messages {
             self.toast(m);
         }
+        let outcome = match passed {
+            true => format!("passed \"{}\"", check.command),
+            false => format!("failed \"{}\"", check.command),
+        };
+        self.note_run(&ghost, check.run.id, outcome, !passed, tokens);
         if !passed {
             self.retry(&ghost, check.run.id);
         }
@@ -1791,6 +1971,7 @@ impl App {
             .filter(|t| tabs.iter().any(|(tab, ..)| tab == t))
             .unwrap_or_else(|| key.clone());
         let mut close_tab = None;
+        let queue_status = self.active.and_then(|i| self.queue_status(i));
         let (mut toggle_pause, mut stop) = (false, false);
         panel.frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1804,6 +1985,39 @@ impl App {
                     self.save_config();
                 }
                 ui.label(RichText::new(format!("{}  Terminal", icon::TERMINAL_WINDOW)).strong());
+                if let Some(i) = self.active {
+                    let running = self.ai_running(i);
+                    let op = &self.projects[i];
+                    let ghost = op.project.as_ref().ok().map(|p| p.ghost_path.clone());
+                    let checking = self.checks.iter().find(|c| Some(&c.run.cli.ghost) == ghost.as_ref());
+                    if op.paused {
+                        let resume = ui::glyph_button(ui, icon::PLAY, theme::ACCENT, theme::ACCENT, true)
+                            .on_hover_text("Resume: start queued and Auto tickets again");
+                        if resume.clicked() {
+                            toggle_pause = true;
+                        }
+                        ui.label(RichText::new("Paused").color(theme::ACCENT));
+                    } else if (running || !op.queue.is_empty() || !op.auto.is_empty())
+                        && icon_button(
+                            ui,
+                            icon::PAUSE,
+                            "Pause: let the AI finish this ticket, then start nothing new",
+                        )
+                        .clicked()
+                    {
+                        toggle_pause = true;
+                    }
+                    if running
+                        && ui::danger_icon_button(ui, icon::STOP, "Stop the AI now and pause the queue").clicked()
+                    {
+                        stop = true;
+                    }
+                    if let Some(c) = checking {
+                        let text = format!("Testing {}…", format_id(c.run.id));
+                        ui.label(RichText::new(text).color(theme::TEXT_MUTED))
+                            .on_hover_text(format!("Running \"{}\"", c.command));
+                    }
+                }
                 if !tabs.is_empty() {
                     ui.add_space(8.0);
                     if ui.selectable_label(shown == key, "Main").clicked() {
@@ -1842,38 +2056,6 @@ impl App {
                         self.config.queue_open = !queue_open;
                         self.save_config();
                     }
-                    let Some(i) = self.active else { return };
-                    let running = self.ai_running(i);
-                    let op = &self.projects[i];
-                    let ghost = op.project.as_ref().ok().map(|p| p.ghost_path.clone());
-                    let checking = self.checks.iter().find(|c| Some(&c.run.cli.ghost) == ghost.as_ref());
-                    if op.paused {
-                        let resume = ui::glyph_button(ui, icon::PLAY, theme::ACCENT, theme::ACCENT, true)
-                            .on_hover_text("Resume: start queued and Auto tickets again");
-                        if resume.clicked() {
-                            toggle_pause = true;
-                        }
-                        ui.label(RichText::new("Paused").color(theme::ACCENT));
-                    } else if (running || !op.queue.is_empty() || !op.auto.is_empty())
-                        && icon_button(
-                            ui,
-                            icon::PAUSE,
-                            "Pause: let the AI finish this ticket, then start nothing new",
-                        )
-                        .clicked()
-                    {
-                        toggle_pause = true;
-                    }
-                    if running
-                        && ui::danger_icon_button(ui, icon::STOP, "Stop the AI now and pause the queue").clicked()
-                    {
-                        stop = true;
-                    }
-                    if let Some(c) = checking {
-                        let text = format!("Testing {}…", format_id(c.run.id));
-                        ui.label(RichText::new(text).color(theme::TEXT_MUTED))
-                            .on_hover_text(format!("Running \"{}\"", c.command));
-                    }
                 });
             });
             if collapsed && !queue_open {
@@ -1901,9 +2083,23 @@ impl App {
                             .inner_margin(Margin::same(8))
                             .show(ui, |ui| {
                                 ui.set_min_size(ui.available_size());
-                                match self.active.and_then(|i| self.projects.get_mut(i)) {
-                                    Some(op) => ui::queue::show(ui, &mut op.queue, op.project.as_ref().ok()),
-                                    None => ui::queue::show(ui, &mut Vec::new(), None),
+                                let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) else {
+                                    return;
+                                };
+                                let ghost = op.project.as_ref().ok().map(|p| p.ghost_path.clone());
+                                let mut schedule = ghost
+                                    .as_ref()
+                                    .and_then(|g| self.config.schedules.get(g).cloned())
+                                    .unwrap_or_default();
+                                let controls = ui::queue::Controls {
+                                    auto: &mut op.queue_auto,
+                                    schedule: &mut schedule,
+                                    status: queue_status.clone(),
+                                };
+                                let changed = ui::queue::show(ui, &mut op.queue, op.project.as_ref().ok(), controls);
+                                if changed && let Some(ghost) = ghost {
+                                    self.config.schedules.insert(ghost, schedule);
+                                    self.save_config();
                                 }
                             });
                     });
@@ -2140,6 +2336,11 @@ impl App {
                 },
                 None => {}
             },
+            Some(Modal::QueueSummary(summary)) => {
+                if ui::queue::summary(ctx, summary) {
+                    self.modal = None;
+                }
+            }
             Some(Modal::Message { title, body }) => {
                 if ticket_ui::message(ctx, title, body) {
                     self.modal = None;
@@ -2564,10 +2765,11 @@ fn elapsed(run: &AiRun) -> u64 {
 }
 
 /// Adds `run` to its ticket's run history, with the column the ticket is in now.
-fn record_run(p: &mut Project, run: &AiRun, seconds: u64, result: RunResult) -> Result<(), String> {
+/// Writes `run` into its ticket's run history. Returns the tokens it used, 0 when unknown.
+fn record_run(p: &mut Project, run: &AiRun, seconds: u64, result: RunResult) -> Result<u64, String> {
     p.rescan().map_err(|e| format!("Couldn't reload project: {e}"))?;
     let Some((col, t)) = p.find_ticket(run.id) else {
-        return Ok(());
+        return Ok(0);
     };
     let mut t = t.clone();
     let from = p
@@ -2580,6 +2782,10 @@ fn record_run(p: &mut Project, run: &AiRun, seconds: u64, result: RunResult) -> 
         .started_at
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
+    let tokens = run
+        .marker
+        .as_deref()
+        .and_then(|m| terminal::run_tokens(m, run.started_at));
     t.record_run(RunRecord {
         started: crate::ticket::utc_timestamp(started),
         seconds,
@@ -2587,14 +2793,12 @@ fn record_run(p: &mut Project, run: &AiRun, seconds: u64, result: RunResult) -> 
         to: p.meta.columns[col].name.clone(),
         result,
         base: run.base.clone(),
-        tokens: run
-            .marker
-            .as_deref()
-            .and_then(|m| terminal::run_tokens(m, run.started_at)),
+        tokens,
     });
     t.save()
         .map_err(|e| format!("Couldn't save the run history of {}: {e}", t.id_str()))?;
-    p.rescan().map_err(|e| format!("Couldn't reload project: {e}"))
+    p.rescan().map_err(|e| format!("Couldn't reload project: {e}"))?;
+    Ok(tokens.map_or(0, |t| t.total()))
 }
 
 /// Where a finished run left its ticket. Staying in the column the play button moved it to counts as not moving.
@@ -2826,6 +3030,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_watcher();
         self.poll_generation();
+        self.update_windows(&ctx);
         self.poll_ai_runs(&ctx);
         self.poll_jobs(&ctx);
         if let Some(v) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -2895,6 +3100,10 @@ impl eframe::App for App {
             self.apply(action, &ctx);
         }
         self.open_dropped_document(&ctx);
+        // A queue window that closed while GhostLane was in the background shows its summary once it's in front.
+        if self.modal.is_none() && !self.summaries.is_empty() && ctx.input(|i| i.focused) {
+            self.modal = Some(Modal::QueueSummary(self.summaries.remove(0)));
+        }
         self.show_modal(&ctx);
         self.show_toasts(&ctx);
         ui::chrome::resize_edges(ui);

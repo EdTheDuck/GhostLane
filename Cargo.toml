@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 directories = "6.0.0"
 eframe = { version = "0.35", features = ["persistence"] }
 egui = "0.35"
