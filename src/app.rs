@@ -49,6 +49,8 @@ pub struct OpenProject {
     pub cursor: Option<u32>,
     /// Scroll the cursor's card into view on the next frame.
     pub scroll_to_cursor: bool,
+    /// Tries in a row the AI was handed a failed ticket again by itself, by ticket.
+    pub retries: HashMap<u32, u32>,
     /// Is the project in a git repository with a commit, so its tickets can run in worktrees? Looked up the first
     /// time parallel runs need to know.
     pub git_repo: Option<bool>,
@@ -70,6 +72,7 @@ impl OpenProject {
             filter_open: false,
             cursor: None,
             scroll_to_cursor: false,
+            retries: HashMap::new(),
             git_repo: None,
         }
     }
@@ -1009,6 +1012,7 @@ impl App {
     fn play(&mut self, id: u32, ctx: &egui::Context) {
         let Some(i) = self.active else { return };
         self.check_git(i);
+        self.projects[i].retries.remove(&id);
         if self.is_running(i, id) {
             self.toast(format!("{} is already with the AI", crate::ticket::format_id(id)));
         } else if !self.ai_engaged(i) {
@@ -1169,6 +1173,9 @@ impl App {
         if worktree.is_some() {
             prompt.push_str(&worktree_note(&ai_path));
         }
+        if self.projects[pi].retries.get(&id).is_some_and(|&n| n > 0) {
+            prompt.push_str(RETRY_NOTE);
+        }
         let started_at = std::time::SystemTime::now();
         // Takes milliseconds; outside a repository there is just nothing to show later.
         let base = crate::git::head(&cwd);
@@ -1248,6 +1255,7 @@ impl App {
         // Desktop notifications, shown while GhostLane is in the background.
         let mut notices = Vec::new();
         let ended_ghosts: Vec<PathBuf> = ended.iter().map(|(run, _)| run.cli.ghost.clone()).collect();
+        let mut failed = Vec::new();
         for (run, end) in ended {
             let ghost = run.cli.ghost.clone();
             // The branch holds the ticket's work between runs and until it merges.
@@ -1319,6 +1327,9 @@ impl App {
                     _ => format!("{id} {title} is in {column}"),
                 });
             }
+            if result == RunResult::SentBack {
+                failed.push((ghost.clone(), run.id));
+            }
             // A ticket that ends up left of where it started came back from testing.
             if settings.notify_failed
                 && result == RunResult::SentBack
@@ -1331,6 +1342,9 @@ impl App {
             if arrived {
                 self.ticket_done(&ghost, run.id, ctx);
             }
+        }
+        for (ghost, id) in failed {
+            self.retry(&ghost, id);
         }
         // A project whose AI is free starts its next queued ticket, or with an empty queue, the next one
         // from its Auto columns. Not while a ticket is being written: that prompt is still in flight.
@@ -1355,6 +1369,25 @@ impl App {
         for n in notices {
             self.desktop_notify(ctx, &n);
         }
+    }
+
+    /// Hands failed ticket `id` of project `ghost` straight back to the AI, at the front of its queue, unless it has
+    /// been retried as often in a row as Settings allow.
+    fn retry(&mut self, ghost: &Path, id: u32) {
+        let limit = self.config.settings.retry_failed;
+        let Some(op) = self
+            .projects
+            .iter_mut()
+            .find(|op| op.project.as_ref().is_ok_and(|p| p.ghost_path == ghost))
+        else {
+            return;
+        };
+        let Some(n) = next_try(&mut op.retries, id, limit) else {
+            return;
+        };
+        op.queue.retain(|&q| q != id);
+        op.queue.insert(0, id);
+        self.toast(format!("Trying {} again ({n} of {limit})", format_id(id)));
     }
 
     /// Pops up a desktop notification, unless they're switched off or GhostLane is in front.
@@ -1520,6 +1553,9 @@ impl App {
         for m in messages {
             self.toast(m);
         }
+        if !passed {
+            self.retry(&ghost, check.run.id);
+        }
         if passed {
             self.ticket_done(&ghost, check.run.id, ctx);
         } else if self.config.settings.notify_failed {
@@ -1533,6 +1569,13 @@ impl App {
     /// commits, then pushes, if the project asks for it.
     fn ticket_done(&mut self, ghost: &Path, id: u32, ctx: &egui::Context) {
         let settings = self.config.project(ghost);
+        if let Some(op) = self
+            .projects
+            .iter_mut()
+            .find(|op| op.project.as_ref().is_ok_and(|p| p.ghost_path == ghost))
+        {
+            op.retries.remove(&id);
+        }
         let Some(p) = self
             .projects
             .iter_mut()
@@ -2642,6 +2685,21 @@ fn load_changes(root: &Path, commit: Option<&str>, t: &Ticket) -> Result<crate::
 
 /// Writes the ticket guide into the instructions file the project's AI CLI reads (CLAUDE.md for
 /// Claude Code, AGENTS.md for Codex, ...), plus Developer and Tester sub agents where the CLI has them.
+/// Added to the prompt when the AI gets a failed ticket again by itself.
+const RETRY_NOTE: &str = " This is another try at this ticket: the last attempt didn't pass. Read the ticket's Notes \
+     for what went wrong and fix that first.";
+
+/// Counts one more automatic try at ticket `id` and returns its number, or `None` once `limit` tries in a row
+/// have been used (the count stays, so it doesn't start over until something resets it).
+fn next_try(retries: &mut HashMap<u32, u32>, id: u32, limit: u32) -> Option<u32> {
+    let tries = retries.entry(id).or_insert(0);
+    if *tries >= limit {
+        return None;
+    }
+    *tries += 1;
+    Some(*tries)
+}
+
 /// A short, stable-enough name for terminal key `key`, for files kept per terminal or project.
 fn key_name(key: &Path) -> String {
     use std::hash::{Hash, Hasher};
@@ -2938,6 +2996,17 @@ mod tests {
             run_session(Path::new("/p/p.ghost"), 7),
             PathBuf::from("/p/p.ghost#00007")
         );
+    }
+
+    #[test]
+    fn failed_tickets_are_retried_up_to_the_limit() {
+        let mut retries = HashMap::new();
+        assert_eq!(next_try(&mut retries, 7, 0), None, "off");
+        assert_eq!(next_try(&mut retries, 7, 2), Some(1));
+        assert_eq!(next_try(&mut retries, 7, 2), Some(2));
+        assert_eq!(next_try(&mut retries, 7, 2), None);
+        assert_eq!(next_try(&mut retries, 7, 2), None, "stays used up");
+        assert_eq!(next_try(&mut retries, 8, 2), Some(1), "counted per ticket");
     }
 
     #[test]

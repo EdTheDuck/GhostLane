@@ -11,6 +11,7 @@ const FONT_SIZES: std::ops::RangeInclusive<u8> = 10..=20;
 const RUN_LIMITS: std::ops::RangeInclusive<u32> = 1..=20;
 const ARCHIVE_DAYS: [u32; 6] = [0, 1, 3, 7, 14, 30];
 const PARALLEL_RUNS: std::ops::RangeInclusive<u32> = 2..=6;
+const RETRIES: std::ops::RangeInclusive<u32> = 0..=5;
 
 pub struct SettingsForm {
     ai_prompt: String,
@@ -21,6 +22,7 @@ pub struct SettingsForm {
     check_for_updates: bool,
     auto_order: AutoOrder,
     auto_run_limit: u32,
+    retry_failed: u32,
     notify_idle: bool,
     notify_failed: bool,
     notify_desktop: bool,
@@ -47,6 +49,7 @@ impl SettingsForm {
             check_for_updates: s.check_for_updates,
             auto_order: s.auto_order,
             auto_run_limit: s.auto_run_limit,
+            retry_failed: s.retry_failed,
             notify_idle: s.notify_idle,
             notify_failed: s.notify_failed,
             notify_desktop: s.notify_desktop,
@@ -136,6 +139,26 @@ impl SettingsForm {
                     .show_ui(ui, |ui| {
                         for n in std::iter::once(0).chain(RUN_LIMITS) {
                             ui.selectable_value(&mut self.auto_run_limit, n, label(n));
+                        }
+                    });
+                super::pointer(combo.response);
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Retry failed tickets").strong()).on_hover_text(
+                    "When a ticket comes back from testing or fails the test command, hand it straight back to the \
+                     AI, asking it to read the ticket's notes on what went wrong. Stops after this many tries in a \
+                     row; pressing ▶ yourself starts the count again.",
+                );
+                let label = |n: u32| match n {
+                    0 => "Never".to_string(),
+                    1 => "Once".to_string(),
+                    n => format!("Up to {n} times"),
+                };
+                let combo = ComboBox::from_id_salt("retry_failed")
+                    .selected_text(label(self.retry_failed))
+                    .show_ui(ui, |ui| {
+                        for n in RETRIES {
+                            ui.selectable_value(&mut self.retry_failed, n, label(n));
                         }
                     });
                 super::pointer(combo.response);
@@ -281,6 +304,7 @@ impl SettingsForm {
             check_for_updates: self.check_for_updates,
             auto_order: self.auto_order,
             auto_run_limit: self.auto_run_limit,
+            retry_failed: self.retry_failed,
             notify_idle: self.notify_idle,
             notify_failed: self.notify_failed,
             notify_desktop: self.notify_desktop,
@@ -323,6 +347,7 @@ mod tests {
             check_for_updates: false,
             auto_order: AutoOrder::IdAsc,
             auto_run_limit: 0,
+            retry_failed: 3,
             notify_idle: false,
             notify_failed: false,
             notify_desktop: false,
@@ -338,6 +363,7 @@ mod tests {
         assert!(s.check_for_updates);
         assert_eq!(s.auto_order, AutoOrder::PriorityDesc);
         assert_eq!(s.auto_run_limit, 6);
+        assert_eq!(s.retry_failed, 0);
         assert!(s.notify_idle && s.notify_failed && s.notify_desktop);
         assert_eq!(s.archive_after_days, 7);
         assert!(!s.parallel_runs);

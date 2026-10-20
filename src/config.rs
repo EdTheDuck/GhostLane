@@ -25,6 +25,9 @@ pub struct Settings {
     pub auto_order: AutoOrder,
     /// Auto skips tickets sent to the AI this many times. 0 = no limit.
     pub auto_run_limit: u32,
+    /// A ticket that fails (comes back from testing, or fails the test command) goes straight back to the AI, up
+    /// to this many times in a row. 0 = never.
+    pub retry_failed: u32,
     /// Ask for the user's attention when the AI runs out of work.
     pub notify_idle: bool,
     /// Ask for the user's attention when a ticket comes back to an earlier column.
@@ -49,6 +52,7 @@ impl Default for Settings {
             check_for_updates: true,
             auto_order: AutoOrder::default(),
             auto_run_limit: 6,
+            retry_failed: 0,
             notify_idle: true,
             notify_failed: true,
             notify_desktop: true,
