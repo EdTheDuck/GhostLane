@@ -169,18 +169,18 @@ pub fn view(
 
 const RADIUS: u8 = 6;
 
-/// Number, column and title on a dark band, with a stripe in the priority's colour down its left edge.
+/// Number, column and title on a dark band across the top of the modal, out to its edges so the close button sits
+/// wholly on it, with a stripe in the priority's colour down its left edge.
 fn header(ui: &mut Ui, t: &Ticket, column: &str) {
     const STRIPE: f32 = 4.0;
+    // Painted behind the contents once their size is known.
+    let background = ui.painter().add(egui::Shape::Noop);
     let band = egui::Frame::new()
-        .fill(theme::BG)
-        .corner_radius(RADIUS)
-        // Room on the right for the close button above the band's corner.
+        // Room on the right for the close button.
         .inner_margin(egui::Margin {
-            left: 20,
-            right: 36,
-            top: 14,
-            bottom: 14,
+            right: 16,
+            bottom: 16,
+            ..Default::default()
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -195,15 +195,26 @@ fn header(ui: &mut Ui, t: &Ticket, column: &str) {
             });
             ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
         });
+    // The modal's fill runs MODAL_PADDING past its contents, inside its border; the band covers that top part.
     let r = band.response.rect;
-    let stripe = egui::Rect::from_min_size(r.min, vec2(STRIPE, r.height()));
-    let corners = egui::CornerRadius {
-        nw: RADIUS,
-        sw: RADIUS,
+    let pad = super::MODAL_PADDING;
+    let rect = egui::Rect::from_min_max(r.min - vec2(pad, pad), egui::pos2(r.right() + pad, r.bottom()));
+    let visuals = ui.visuals();
+    let radius = (f32::from(visuals.menu_corner_radius.nw) - visuals.window_stroke.width).max(0.0) as u8;
+    let top = |nw, ne| egui::CornerRadius {
+        nw,
+        ne,
         ..Default::default()
     };
-    ui.painter()
-        .rect_filled(stripe, corners, super::priority_color(t.priority));
+    let stripe = egui::Rect::from_min_size(rect.min, vec2(STRIPE, rect.height()));
+    ui.painter().set(
+        background,
+        egui::Shape::Vec(vec![
+            egui::Shape::rect_filled(rect, top(radius, radius), theme::BG),
+            egui::Shape::rect_filled(stripe, top(radius, 0), super::priority_color(t.priority)),
+        ]),
+    );
+    ui.add_space(6.0);
 }
 
 /// Priority, runs, tokens, when it was done, labels and linked tickets, down the right of the view.
