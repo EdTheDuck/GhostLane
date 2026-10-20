@@ -275,6 +275,17 @@ pub fn label_chip(ui: &mut Ui, label: &str, picked: Option<bool>) -> Response {
     if picked.is_some() { pointer(response) } else { response }
 }
 
+/// A bar in `color` down the left edge of the card in `rect`, following its 6px rounded corners.
+pub fn stripe(ui: &Ui, rect: egui::Rect, color: Color32) {
+    let bar = egui::Rect::from_min_size(rect.min, egui::vec2(4.0, rect.height()));
+    let corners = egui::CornerRadius {
+        nw: 6,
+        sw: 6,
+        ..Default::default()
+    };
+    ui.painter().rect_filled(bar, corners, color);
+}
+
 pub fn priority_icon(p: Priority) -> RichText {
     let glyph = match p {
         Priority::Low => icon::CARET_DOWN,

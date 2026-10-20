@@ -271,20 +271,7 @@ fn title_card(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<ViewO
                 });
             }
         });
-    stripe(ui, card.response.rect, super::priority_color(t.priority));
-}
-
-const STRIPE: f32 = 4.0;
-
-/// A bar in `color` down the left edge of the card in `rect`, following its rounded corners.
-fn stripe(ui: &Ui, rect: egui::Rect, color: egui::Color32) {
-    let bar = egui::Rect::from_min_size(rect.min, vec2(STRIPE, rect.height()));
-    let corners = egui::CornerRadius {
-        nw: RADIUS,
-        sw: RADIUS,
-        ..Default::default()
-    };
-    ui.painter().rect_filled(bar, corners, color);
+    super::stripe(ui, card.response.rect, super::priority_color(t.priority));
 }
 
 /// Priority, runs, tokens, when it was done and linked tickets, down the right of the view.
@@ -396,7 +383,7 @@ fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
             ui.add(egui::Label::new(RichText::new(&d.title).color(color)).wrap());
         });
     let bar = d.priority.map_or(theme::BORDER, super::priority_color);
-    stripe(ui, card.response.rect, bar);
+    super::stripe(ui, card.response.rect, bar);
     let sense = if open {
         egui::Sense::click()
     } else {

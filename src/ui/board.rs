@@ -652,10 +652,17 @@ fn card(
             let rect = Frame::new()
                 .fill(fill)
                 .corner_radius(CornerRadius::same(6))
-                .inner_margin(Margin::same(12))
+                // A little extra on the left for the priority stripe.
+                .inner_margin(Margin {
+                    left: 14,
+                    right: 12,
+                    top: 12,
+                    bottom: 12,
+                })
                 .show(ui, |ui| card_contents(ui, t, play, marks, actions))
                 .response
                 .rect;
+            super::stripe(ui, rect, super::priority_color(t.priority));
             // Rings go inside the card: outside it, the column's scroll area clips them at the top and sides.
             let mut ring = rect;
             if selected {
