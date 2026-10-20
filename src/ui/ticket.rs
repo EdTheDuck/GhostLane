@@ -38,6 +38,8 @@ pub enum ViewOutcome {
     Revert(String),
     /// Show this other ticket instead.
     Open(u32),
+    /// Filter the board by this label (or stop filtering by it) and close the view.
+    FilterByLabel(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -86,11 +88,12 @@ pub struct Dependency {
     pub waiting: Option<bool>,
 }
 
-/// The tickets the shown one waits for, and those waiting for it.
+/// The tickets the shown one waits for, those waiting for it, and the labels the board is filtered by.
 #[derive(Default)]
 pub struct Links {
     pub blocked_by: Vec<Dependency>,
     pub blocks: Vec<Dependency>,
+    pub filtered: Vec<String>,
 }
 
 /// `column`: where the ticket is. `done`: that's the last column (`last` is its name).
@@ -191,7 +194,9 @@ fn header(ui: &mut Ui, t: &Ticket, column: &str) {
                         .size(16.0)
                         .color(theme::TEXT_MUTED),
                 );
-                super::label_chip(ui, column, None);
+                // Not a pill, so it doesn't read as a label.
+                let text = format!("{}  {column}", icon::KANBAN);
+                ui.label(RichText::new(text).color(theme::TEXT_MUTED));
             });
             ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
         });
@@ -265,7 +270,15 @@ fn sidebar_fields(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<V
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             for l in &t.labels {
-                super::label_chip(ui, l, None);
+                let picked = links.filtered.iter().any(|f| f.to_lowercase() == l.to_lowercase());
+                let tip = if picked {
+                    format!("Stop filtering by {l}")
+                } else {
+                    format!("Show only tickets labelled {l}")
+                };
+                if super::label_chip(ui, l, Some(picked)).on_hover_text(tip).clicked() {
+                    *outcome = Some(ViewOutcome::FilterByLabel(l.clone()));
+                }
             }
         });
     }
@@ -1302,6 +1315,7 @@ mod tests {
                     Some(ViewOutcome::Approve) => out.push("approve".into()),
                     Some(ViewOutcome::Edit) => out.push("edit".into()),
                     Some(ViewOutcome::Delete) => out.push("delete".into()),
+                    Some(ViewOutcome::FilterByLabel(l)) => out.push(format!("filter {l}")),
                     Some(ViewOutcome::Reject(note)) => out.push(format!("reject {note}")),
                     Some(ViewOutcome::Revert(c)) => out.push(format!("revert {c}")),
                     _ => {}
@@ -1327,6 +1341,16 @@ mod tests {
         h.get_by_label("Delete").click();
         h.run();
         assert_eq!(h.state().3, ["delete"]);
+    }
+
+    #[test]
+    fn clicking_a_label_filters_by_it() {
+        let mut h = view_harness(TicketView::new(5, None), false);
+        h.state_mut().1.labels = vec!["ui".into()];
+        h.run();
+        h.get_by_label("ui").click();
+        h.run();
+        assert_eq!(h.state().3, ["filter ui"]);
     }
 
     #[test]
@@ -1423,6 +1447,7 @@ mod tests {
                 dep(9, "00009 (missing)", None),
             ],
             blocks: vec![dep(7, "00007 Logout (Done)", Some(false))],
+            ..Default::default()
         };
         let mut h = Harness::new_ui_state(
             |ui, (view_state, opened): &mut (TicketView, Option<u32>)| {

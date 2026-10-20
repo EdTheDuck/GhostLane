@@ -1813,6 +1813,10 @@ impl App {
                         self.reject(id, &note);
                     }
                     Some(ViewOutcome::Open(other)) => self.open_ticket(other),
+                    Some(ViewOutcome::FilterByLabel(label)) => {
+                        self.modal = None;
+                        self.apply(Action::FilterByLabel(label), ctx);
+                    }
                     Some(ViewOutcome::Revert(commit)) => {
                         self.modal = None;
                         self.revert(id, commit, ctx);
@@ -1939,6 +1943,10 @@ impl App {
         ticket_ui::Links {
             blocked_by: t.blocked_by.iter().map(|&b| dep(b)).collect(),
             blocks: p.dependents(t.id).into_iter().map(dep).collect(),
+            filtered: self
+                .active
+                .map(|i| self.projects[i].filter.labels.clone())
+                .unwrap_or_default(),
         }
     }
 
