@@ -1931,12 +1931,14 @@ impl App {
         let dep = |id: u32| match p.find_ticket(id) {
             Some((c, dep)) => ticket_ui::Dependency {
                 id,
-                label: format!("{} {} ({})", dep.id_str(), dep.title, p.meta.columns[c].name),
+                title: dep.title.clone(),
+                priority: Some(dep.priority),
                 waiting: Some(c != p.last_col()),
             },
             None => ticket_ui::Dependency {
                 id,
-                label: format!("{} (missing)", format_id(id)),
+                title: "(missing)".into(),
+                priority: None,
                 waiting: None,
             },
         };

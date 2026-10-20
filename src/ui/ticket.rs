@@ -82,8 +82,9 @@ impl TicketView {
 /// A ticket linked to the one shown, through `blocked_by`.
 pub struct Dependency {
     pub id: u32,
-    /// Number, title and column.
-    pub label: String,
+    pub title: String,
+    /// `None`: the ticket is missing.
+    pub priority: Option<Priority>,
     /// Not in the last column yet. `None`: the ticket is missing.
     pub waiting: Option<bool>,
 }
@@ -342,21 +343,55 @@ fn sidebar_fields(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<V
         }
         caption(ui, &format!("{glyph}  {text}"), color);
         for d in deps {
-            let color = if d.waiting == Some(true) {
-                theme::TEXT
-            } else {
-                theme::TEXT_MUTED
-            };
-            if d.waiting.is_none() {
-                ui.add(egui::Label::new(RichText::new(&d.label).color(color)).wrap());
-                continue;
-            }
-            let link = egui::Label::new(RichText::new(&d.label).color(color).underline()).wrap();
-            if super::pointer(ui.add(link.sense(egui::Sense::click()))).clicked() {
+            if mini_card(ui, d).clicked() {
                 *outcome = Some(ViewOutcome::Open(d.id));
             }
         }
     }
+}
+
+/// A linked ticket as a small card: priority, number and title. Click it to open it; a missing one can't be.
+/// Finished tickets are greyed out.
+fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
+    let id = ui.id().with(("linked", d.id));
+    let open = d.waiting.is_some();
+    let hovered = open && ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+    let color = if d.waiting == Some(true) {
+        theme::TEXT
+    } else {
+        theme::TEXT_MUTED
+    };
+    let card = egui::Frame::new()
+        .fill(if hovered { theme::CARD_HOVER } else { theme::CARD })
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(RADIUS)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if let Some(p) = d.priority {
+                    ui.label(priority_icon(p))
+                        .on_hover_text(format!("{} priority", p.label()));
+                }
+                ui.label(RichText::new(format_id(d.id)).monospace().color(theme::TEXT_MUTED));
+                ui.add(egui::Label::new(RichText::new(&d.title).color(color)).wrap());
+            });
+        });
+    let sense = if open {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let response = ui.interact(card.response.rect, id, sense);
+    let kind = if open {
+        egui::WidgetType::Button
+    } else {
+        egui::WidgetType::Label
+    };
+    let label = format!("{} {}", format_id(d.id), d.title);
+    response.widget_info(|| egui::WidgetInfo::labeled(kind, true, &label));
+    if open { super::pointer(response) } else { response }
 }
 
 /// A section of the ticket on a lighter card, its heading in the accent colour.
@@ -1477,17 +1512,15 @@ mod tests {
             title: "Login".into(),
             ..Default::default()
         };
-        let dep = |id, label: &str, waiting| Dependency {
+        let dep = |id, title: &str, waiting: Option<bool>| Dependency {
             id,
-            label: label.into(),
+            title: title.into(),
+            priority: waiting.map(|_| Priority::High),
             waiting,
         };
         let links = Links {
-            blocked_by: vec![
-                dep(2, "00002 Schema (To Do)", Some(true)),
-                dep(9, "00009 (missing)", None),
-            ],
-            blocks: vec![dep(7, "00007 Logout (Done)", Some(false))],
+            blocked_by: vec![dep(2, "Schema", Some(true)), dep(9, "(missing)", None)],
+            blocks: vec![dep(7, "Logout", Some(false))],
             ..Default::default()
         };
         let mut h = Harness::new_ui_state(
@@ -1510,7 +1543,7 @@ mod tests {
         h.set_size(vec2(1200.0, 800.0));
         h.run_steps(3);
         assert!(h.query_by_label_contains("Blocks").is_some());
-        h.get_by_label("00007 Logout (Done)").click();
+        h.get_by_label("00007 Logout").click();
         h.run();
         assert_eq!(h.state().1, Some(7));
         h.get_by_label("00009 (missing)").click();
