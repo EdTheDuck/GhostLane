@@ -104,7 +104,8 @@ fn epic_card(ui: &mut Ui, p: &Project, e: &Epic, filter: &Filter, actions: &mut 
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    let width = ui.available_width() - FUNNEL - 4.0;
+                    // Exactly what's left beside the funnel: any more and the sidebar grows to fit, every frame.
+                    let width = ui.available_width() - FUNNEL - ui.spacing().item_spacing.x;
                     ui.horizontal_top(|ui| {
                         ui.scope(|ui| {
                             ui.set_width(width);
@@ -527,6 +528,27 @@ mod tests {
         h.get_by_label("00001 Payments").click();
         h.run();
         assert!(matches!(h.state()[..], [Action::ViewEpic(1)]));
+    }
+
+    #[test]
+    fn the_sidebar_keeps_its_width() {
+        let d = tempfile::tempdir().unwrap();
+        let p = project(d.path());
+        let widths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = widths.clone();
+        let mut h = Harness::new_ui(move |ui| {
+            let shown = egui::Panel::left("epics")
+                .resizable(true)
+                .default_size(250.0)
+                .frame(egui::Frame::new().inner_margin(egui::Margin::same(10)))
+                .show(ui, |ui| sidebar(ui, &p, &Filter::default(), &mut Vec::new()));
+            seen.lock().unwrap().push(shown.response.rect.width());
+        });
+        theme::apply(&h.ctx);
+        h.set_size(vec2(1000.0, 500.0));
+        h.run_steps(6);
+        let widths = widths.lock().unwrap();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]), "{widths:?}");
     }
 
     #[test]
