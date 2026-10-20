@@ -152,6 +152,8 @@ pub enum Action {
     TogglePause,
     NewEpic,
     ViewEpic(u32),
+    /// Add the epic's unfinished tickets to the queue.
+    QueueEpic(u32),
     /// Open the filter bar with this epic ticked, or untick it if it already is.
     FilterByEpic(u32),
     /// Put the tickets in this epic, or take them out of theirs.
@@ -896,6 +898,7 @@ impl App {
                 }
             }
             Action::ViewEpic(id) => self.modal = Some(Modal::ViewEpic(EpicView::new(id))),
+            Action::QueueEpic(id) => self.queue_epic(id),
             Action::FilterByEpic(id) => {
                 if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
                     op.filter_open = true;

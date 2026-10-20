@@ -78,11 +78,14 @@ pub fn collapsed(ui: &mut Ui, actions: &mut Vec<Action>) {
     });
 }
 
-/// One epic in the sidebar: title, progress and its filter funnel.
+/// One epic in the sidebar: title, progress, a button that queues its unfinished tickets, and its filter funnel.
 fn epic_card(ui: &mut Ui, p: &Project, e: &Epic, filter: &Filter, actions: &mut Vec<Action>) {
-    const FUNNEL: f32 = 30.0;
+    const BUTTON: f32 = 30.0;
     let filtering = filter.epics.contains(&e.id);
     let (done, total) = p.epic_progress(e.id);
+    // Only offered while it has tickets left to do.
+    let queue = done < total;
+    let buttons = if queue { 2.0 } else { 1.0 };
     // The whole card is clickable underneath its funnel, which takes its own clicks.
     let builder = egui::UiBuilder::new()
         .id_salt(("epic_card", e.id))
@@ -104,8 +107,8 @@ fn epic_card(ui: &mut Ui, p: &Project, e: &Epic, filter: &Filter, actions: &mut 
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    // Exactly what's left beside the funnel: any more and the sidebar grows to fit, every frame.
-                    let width = ui.available_width() - FUNNEL - ui.spacing().item_spacing.x;
+                    // Exactly what's left beside the buttons: any more and the sidebar grows to fit, every frame.
+                    let width = ui.available_width() - buttons * (BUTTON + ui.spacing().item_spacing.x);
                     ui.horizontal_top(|ui| {
                         ui.scope(|ui| {
                             ui.set_width(width);
@@ -115,6 +118,13 @@ fn epic_card(ui: &mut Ui, p: &Project, e: &Epic, filter: &Filter, actions: &mut 
                                     .selectable(false),
                             );
                         });
+                        if queue
+                            && super::glyph_button(ui, icon::QUEUE, theme::TEXT_MUTED, theme::EPIC, true)
+                                .on_hover_text("Add its unfinished tickets to the queue")
+                                .clicked()
+                        {
+                            actions.push(Action::QueueEpic(e.id));
+                        }
                         let tip = if filtering {
                             "Stop filtering by this epic"
                         } else {
@@ -533,6 +543,10 @@ mod tests {
         h.get_by_label(icon::FUNNEL).click();
         h.run();
         assert!(matches!(h.state()[..], [Action::FilterByEpic(1)]));
+        h.state_mut().clear();
+        h.get_by_label(icon::QUEUE).click();
+        h.run();
+        assert!(matches!(h.state()[..], [Action::QueueEpic(1)]));
         h.state_mut().clear();
         h.get_by_label("00001 Payments").click();
         h.run();
