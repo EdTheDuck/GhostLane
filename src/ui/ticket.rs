@@ -83,6 +83,8 @@ impl TicketView {
 pub struct Dependency {
     pub id: u32,
     pub title: String,
+    /// Empty when the ticket is missing.
+    pub column: String,
     /// `None`: the ticket is missing.
     pub priority: Option<Priority>,
     /// Not in the last column yet. `None`: the ticket is missing.
@@ -235,7 +237,6 @@ fn top_bar(ui: &mut Ui, t: &Ticket, column: &str) -> bool {
 /// Priority icon, title and labels on a card with a stripe in the priority's colour down its left edge. Clicking a
 /// label filters the board by it.
 fn title_card(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<ViewOutcome>) {
-    const STRIPE: f32 = 4.0;
     let card = egui::Frame::new()
         .fill(theme::CARD)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -270,15 +271,20 @@ fn title_card(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<ViewO
                 });
             }
         });
-    let r = card.response.rect;
-    let stripe = egui::Rect::from_min_size(r.min, vec2(STRIPE, r.height()));
+    stripe(ui, card.response.rect, super::priority_color(t.priority));
+}
+
+const STRIPE: f32 = 4.0;
+
+/// A bar in `color` down the left edge of the card in `rect`, following its rounded corners.
+fn stripe(ui: &Ui, rect: egui::Rect, color: egui::Color32) {
+    let bar = egui::Rect::from_min_size(rect.min, vec2(STRIPE, rect.height()));
     let corners = egui::CornerRadius {
         nw: RADIUS,
         sw: RADIUS,
         ..Default::default()
     };
-    ui.painter()
-        .rect_filled(stripe, corners, super::priority_color(t.priority));
+    ui.painter().rect_filled(bar, corners, color);
 }
 
 /// Priority, runs, tokens, when it was done and linked tickets, down the right of the view.
@@ -350,7 +356,8 @@ fn sidebar_fields(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<V
     }
 }
 
-/// A linked ticket as a small card: priority, number and title. Click it to open it; a missing one can't be.
+/// A linked ticket as a small card: priority, number and column over its title, with a stripe in the priority's
+/// colour down its left edge. Click it to open it; a missing one can't be.
 /// Finished tickets are greyed out.
 fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
     let id = ui.id().with(("linked", d.id));
@@ -365,9 +372,15 @@ fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
         .fill(if hovered { theme::CARD_HOVER } else { theme::CARD })
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
         .corner_radius(RADIUS)
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .inner_margin(egui::Margin {
+            left: 14,
+            right: 10,
+            top: 8,
+            bottom: 8,
+        })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if let Some(p) = d.priority {
@@ -375,9 +388,15 @@ fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
                         .on_hover_text(format!("{} priority", p.label()));
                 }
                 ui.label(RichText::new(format_id(d.id)).monospace().color(theme::TEXT_MUTED));
-                ui.add(egui::Label::new(RichText::new(&d.title).color(color)).wrap());
+                if !d.column.is_empty() {
+                    let text = format!("{}  {}", icon::KANBAN, d.column);
+                    ui.label(RichText::new(text).size(12.0).color(theme::TEXT_MUTED));
+                }
             });
+            ui.add(egui::Label::new(RichText::new(&d.title).color(color)).wrap());
         });
+    let bar = d.priority.map_or(theme::BORDER, super::priority_color);
+    stripe(ui, card.response.rect, bar);
     let sense = if open {
         egui::Sense::click()
     } else {
@@ -1515,6 +1534,7 @@ mod tests {
         let dep = |id, title: &str, waiting: Option<bool>| Dependency {
             id,
             title: title.into(),
+            column: waiting.map(|_| "To Do".into()).unwrap_or_default(),
             priority: waiting.map(|_| Priority::High),
             waiting,
         };

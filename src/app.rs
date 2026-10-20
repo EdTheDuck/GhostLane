@@ -1932,12 +1932,14 @@ impl App {
             Some((c, dep)) => ticket_ui::Dependency {
                 id,
                 title: dep.title.clone(),
+                column: p.meta.columns[c].name.clone(),
                 priority: Some(dep.priority),
                 waiting: Some(c != p.last_col()),
             },
             None => ticket_ui::Dependency {
                 id,
                 title: "(missing)".into(),
+                column: String::new(),
                 priority: None,
                 waiting: None,
             },
