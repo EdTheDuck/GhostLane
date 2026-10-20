@@ -1059,9 +1059,10 @@ impl App {
         }
     }
 
-    /// Is project `i`'s AI as busy as it gets, or are tickets waiting for it? Play buttons queue then.
+    /// Is project `i` paused, its AI as busy as it gets, or are tickets waiting for it? Play buttons queue then.
     fn ai_engaged(&self, i: usize) -> bool {
-        (self.queue_runs(i) && self.next_queued(i).is_some() && !self.projects[i].paused) || self.ai_full(i)
+        let op = &self.projects[i];
+        op.paused || (self.queue_runs(i) && self.next_queued(i).is_some()) || self.ai_full(i)
     }
 
     /// Project `i`'s queue schedule, when it has one switched on.
@@ -1997,15 +1998,19 @@ impl App {
                             toggle_pause = true;
                         }
                         ui.label(RichText::new("Paused").color(theme::ACCENT));
-                    } else if (running || !op.queue.is_empty() || !op.auto.is_empty())
-                        && icon_button(
-                            ui,
-                            icon::PAUSE,
-                            "Pause: let the AI finish this ticket, then start nothing new",
-                        )
-                        .clicked()
-                    {
-                        toggle_pause = true;
+                    } else {
+                        // Always there, but only pauses while the AI is on something.
+                        let (idle, tip) = match running {
+                            true => (
+                                theme::TEXT,
+                                "Pause: let the AI finish this ticket, then start nothing new",
+                            ),
+                            false => (theme::TEXT_MUTED, "Pause: nothing is running right now"),
+                        };
+                        let pause = ui::glyph_button(ui, icon::PAUSE, idle, theme::ACCENT, false).on_hover_text(tip);
+                        if pause.clicked() && running {
+                            toggle_pause = true;
+                        }
                     }
                     if running
                         && ui::danger_icon_button(ui, icon::STOP, "Stop the AI now and pause the queue").clicked()
