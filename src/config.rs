@@ -72,6 +72,9 @@ pub struct ProjectSettings {
     pub commit: bool,
     /// Push after each of those commits.
     pub push: bool,
+    /// Instead of pushing to the current branch, push each ticket to a `ghostlane/<id>` branch and open a pull
+    /// request for it.
+    pub pull_request: bool,
     /// Runs when the AI finishes a ticket in the last column; the ticket only stays there if it exits 0.
     pub test_command: String,
 }

@@ -151,6 +151,7 @@ When a ticket reaches the last column:
 
 - **Commit when ticket is done** commits everything in the project's git repository, with the ticket's number and title as the message (`00012: Add a logout button`). Every ticket becomes one tidy, revertable commit.
 - **Push when commit is made** (shown once committing is on) pushes each of those commits straight away.
+- **Open a pull request instead** (shown once pushing is on) pushes each done ticket to a branch of its own, `ghostlane/<number>`, and opens a pull request for it with the [GitHub CLI](https://cli.github.com), leaving the current branch alone. With parallel runs each pull request holds exactly one ticket's work; without them it also carries any earlier commits you haven't pushed yet.
 - **Test command**, such as `cargo test` or `npm test`, runs in the project folder whenever the AI finishes a ticket in the last column. The ticket only stays there if the command passes. If it fails, the ticket goes back to the first column with the command's output in its notes, so the next run knows exactly what broke. A hard check on top of the AI tester's judgement.
 
 Committing, pushing and the test command stay on your computer instead of in the project file, so opening someone else's repo never commits, pushes or runs a command by itself.

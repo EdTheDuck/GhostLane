@@ -516,8 +516,9 @@ impl ProjectForm {
         let s = &self.settings;
         ProjectSettings {
             commit: s.commit,
-            // Only offered while committing is on.
+            // Only offered while committing (and for pull requests, pushing) is on.
             push: s.commit && s.push,
+            pull_request: s.commit && s.push && s.pull_request,
             test_command: s.test_command.trim().to_string(),
         }
     }
@@ -576,6 +577,16 @@ fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings, git_excluded: &mut bool) {
         ui.horizontal(|ui| {
             ui.add_space(26.0);
             super::pointer(ui.checkbox(&mut s.push, "Push when commit is made"));
+        });
+    }
+    if s.commit && s.push {
+        ui.horizontal(|ui| {
+            ui.add_space(52.0);
+            super::pointer(ui.checkbox(&mut s.pull_request, "Open a pull request instead")).on_hover_text(
+                "Push each done ticket to a branch of its own (ghostlane/<number>) and open a pull request for it with \
+                 the GitHub CLI (gh), instead of pushing to the current branch. With parallel runs each pull request \
+                 holds just its ticket; otherwise it also holds earlier commits that aren't pushed yet.",
+            );
         });
     }
     ui.horizontal(|ui| {
@@ -827,13 +838,17 @@ mod tests {
         assert!(h.query_by_label("Push when commit is made").is_none());
         h.get_by_label("Commit when ticket is done").click();
         h.run();
+        assert!(h.query_by_label("Open a pull request instead").is_none());
         h.get_by_label("Push when commit is made").click();
         h.run();
+        h.get_by_label("Open a pull request instead").click();
+        h.run();
         let s = &h.state().0.settings;
-        assert!(s.commit && s.push);
+        assert!(s.commit && s.push && s.pull_request);
         h.get_by_label("Commit when ticket is done").click();
         h.run();
         assert!(h.query_by_label("Push when commit is made").is_none());
+        assert!(h.query_by_label("Open a pull request instead").is_none());
         let form = &mut h.state_mut().0;
         form.location = Some(PathBuf::from("/p"));
         form.settings.test_command = "  cargo test ".into();
@@ -845,6 +860,7 @@ mod tests {
             ProjectSettings {
                 commit: false,
                 push: false,
+                pull_request: false,
                 test_command: "cargo test".into()
             }
         );

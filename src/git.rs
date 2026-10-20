@@ -190,6 +190,11 @@ pub fn prefix(root: &Path) -> Result<String, String> {
     Ok(stdout(git(root, &["rev-parse", "--show-prefix"])?))
 }
 
+/// The branch checked out at `root`. Fails on a detached HEAD.
+pub fn current_branch(root: &Path) -> Result<String, String> {
+    Ok(stdout(git(root, &["symbolic-ref", "--short", "-q", "HEAD"])?))
+}
+
 /// Top folder of the worktree that has `branch` checked out, if one does.
 pub fn worktree_of(root: &Path, branch: &str) -> Option<PathBuf> {
     let list = stdout(git(root, &["worktree", "list", "--porcelain"]).ok()?);
@@ -292,10 +297,63 @@ pub fn merge_base(dir: &Path, other: &str) -> Result<String, String> {
     Ok(base)
 }
 
+/// Turns the work on the worktree's branch into one commit named `message` on top of where it last took in the
+/// main checkout's commit `main`. False when it changed nothing.
+pub fn squash_worktree(dir: &Path, main: &str, message: &str) -> Result<bool, String> {
+    let base = merge_base(dir, main)?;
+    git(dir, &["reset", "-q", "--soft", &base])?;
+    if git(dir, &["diff", "--cached", "--quiet"]).is_ok() {
+        return Ok(false);
+    }
+    git(dir, &["commit", "-q", "-m", message])?;
+    Ok(true)
+}
+
 /// Deletes the worktree at `dir` and its `branch`.
 pub fn remove_worktree(root: &Path, dir: &Path, branch: &str) -> Result<(), String> {
     git(root, &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
     git(root, &["branch", "-q", "-D", branch])?;
+    Ok(())
+}
+
+/// Pushes `local` (a branch, or `HEAD`) to `branch` on origin, replacing what was there, and opens a pull request
+/// from it into `base` with the GitHub CLI, unless one is open already (the push updated it).
+// ponytail: always pushes to "origin"; read the base branch's remote if other remote names turn up.
+pub fn open_pull_request(
+    root: &Path,
+    local: &str,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    git(
+        root,
+        &[
+            "push",
+            "-q",
+            "--force",
+            "origin",
+            &format!("{local}:refs/heads/{branch}"),
+        ],
+    )?;
+    let gh = |args: &[&str]| -> Result<String, String> {
+        let out = run("gh", root, args, None).map_err(|e| format!("{e} (is the GitHub CLI installed?)"))?;
+        checked("gh", args, out).map(stdout)
+    };
+    let head = format!("--head={branch}");
+    let open = gh(&["pr", "list", &head, "--state=open", "--json=number", "--jq=.[].number"])?;
+    if open.is_empty() {
+        // Ticket text goes in as the values of `--flag=` arguments, never through a shell.
+        gh(&[
+            "pr",
+            "create",
+            &head,
+            &format!("--base={base}"),
+            &format!("--title={title}"),
+            &format!("--body={body}"),
+        ])?;
+    }
     Ok(())
 }
 
@@ -494,6 +552,41 @@ mod tests {
         assert_eq!(head(root).unwrap(), before);
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "main\n");
         assert!(stdout(git(root, &["status", "--porcelain"]).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn a_worktrees_commits_squash_into_one() {
+        let d = repo();
+        let root = d.path();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        commit(root, "setup", false).unwrap();
+        let main = head(root).unwrap();
+        let dirs = tempfile::tempdir().unwrap();
+        let wt = prepare_worktree(root, &dirs.path().join("wt"), &ticket_branch("00003")).unwrap();
+        for n in 1..=2 {
+            std::fs::write(wt.join("a.txt"), format!("run {n}\n")).unwrap();
+            save_worktree(&wt, "Work on 00003").unwrap();
+        }
+        assert!(squash_worktree(&wt, &main, "00003: Thing").unwrap());
+        let log = stdout(git(&wt, &["log", "--format=%s", &format!("{main}..HEAD")]).unwrap());
+        assert_eq!(log, "00003: Thing");
+        assert!(!squash_worktree(&wt, &head(&wt).unwrap(), "x").unwrap());
+    }
+
+    #[test]
+    fn pull_requests_push_the_branch_first() {
+        let d = repo();
+        let root = d.path();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]).unwrap();
+        git(root, &["remote", "add", "origin", &remote.path().to_string_lossy()]).unwrap();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        commit(root, "00004: Thing", false).unwrap();
+        // No GitHub here, so gh fails (or isn't installed), but only after the branch is up.
+        let base = current_branch(root).unwrap();
+        assert!(open_pull_request(root, "HEAD", "ghostlane/00004", &base, "00004: Thing", "--body").is_err());
+        let pushed = git(remote.path(), &["rev-parse", "refs/heads/ghostlane/00004"]).unwrap();
+        assert_eq!(stdout(pushed), head(root).unwrap());
     }
 
     #[test]

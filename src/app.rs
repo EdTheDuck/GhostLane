@@ -1604,21 +1604,22 @@ impl App {
             return;
         }
         let message = format!("{}: {}", t.id_str(), t.title.replace(['\n', '\r'], " "));
+        let body = t.description.clone();
         let (tx, ctx, ghost) = (self.jobs_tx.clone(), ctx.clone(), ghost.to_path_buf());
         // ponytail: commits in the background, so a ticket Auto starts next could slip edits in; it starts
         // seconds later, and the git commands take milliseconds.
         std::thread::spawn(move || {
             let job = match worktree {
-                Some(top) => match finish_worktree(&root, &top, &branch, &message, &settings) {
+                Some(top) => match finish_worktree(&root, &top, &branch, (&message, &body), &settings) {
                     Ok(()) => None,
                     Err(crate::git::MergeError::Conflicts(files)) => Some(Job::MergeConflict { ghost, id, files }),
                     Err(crate::git::MergeError::Failed(e)) => {
                         Some(Job::GitFailed(format!("Couldn't merge {}: {e}", format_id(id))))
                     }
                 },
-                None => crate::git::commit(&root, &message, settings.push)
+                None => commit_done(&root, &branch, (&message, &body), &settings)
                     .err()
-                    .map(|e| Job::GitFailed(format!("Couldn't commit {}: {e}", format_id(id)))),
+                    .map(|e| Job::GitFailed(format!("{e} ({})", format_id(id)))),
             };
             if let Some(job) = job {
                 let _ = tx.send(job);
@@ -2744,22 +2745,50 @@ fn worktree_note(ticket: &Path) -> String {
     )
 }
 
-/// Brings a done ticket's worktree (top folder `top`, on `branch`) back into the main checkout at `root`: its work
-/// merged as staged changes, committed (and pushed) as `message` if the project commits, then the worktree goes.
+/// Commits a done ticket's work in the main checkout at `root` as `message`, then pushes it, or with pull requests
+/// on, pushes it to `branch` and opens one with `body`.
+fn commit_done(
+    root: &Path,
+    branch: &str,
+    (message, body): (&str, &str),
+    settings: &crate::config::ProjectSettings,
+) -> Result<(), String> {
+    let committed = crate::git::commit(root, message, settings.push && !settings.pull_request)
+        .map_err(|e| format!("Couldn't commit: {e}"))?;
+    if committed && settings.pull_request {
+        let base = crate::git::current_branch(root).map_err(|e| format!("Couldn't open a pull request: {e}"))?;
+        crate::git::open_pull_request(root, "HEAD", branch, &base, message, body)
+            .map_err(|e| format!("Couldn't open a pull request: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Brings a done ticket's worktree (top folder `top`, on `branch`) back: its work merged into the main checkout at
+/// `root` as staged changes and committed (and pushed) as `message` if the project commits, or with pull requests
+/// on, squashed into one commit and opened as a pull request with `body`. Then the worktree goes.
 fn finish_worktree(
     root: &Path,
     top: &Path,
     branch: &str,
-    message: &str,
+    (message, body): (&str, &str),
     settings: &crate::config::ProjectSettings,
 ) -> Result<(), crate::git::MergeError> {
     use crate::git::MergeError::Failed;
     let dir = project_dir(top, &crate::git::prefix(root).map_err(Failed)?);
     let id = branch.rsplit('/').next().unwrap_or(branch);
     crate::git::save_worktree(&dir, &format!("Work on {id}")).map_err(Failed)?;
-    crate::git::squash_merge(root, branch)?;
-    if settings.commit {
-        crate::git::commit(root, message, settings.push).map_err(Failed)?;
+    if settings.pull_request {
+        let main = crate::git::head(root).ok_or_else(|| Failed("The main checkout has no commit".into()))?;
+        let base = crate::git::current_branch(root).map_err(Failed)?;
+        if crate::git::squash_worktree(&dir, &main, message).map_err(Failed)? {
+            crate::git::open_pull_request(&dir, branch, branch, &base, message, body)
+                .map_err(|e| Failed(format!("couldn't open a pull request: {e}")))?;
+        }
+    } else {
+        crate::git::squash_merge(root, branch)?;
+        if settings.commit {
+            crate::git::commit(root, message, settings.push).map_err(Failed)?;
+        }
     }
     crate::git::remove_worktree(root, top, branch).map_err(Failed)
 }
@@ -2985,7 +3014,7 @@ mod tests {
             commit: true,
             ..Default::default()
         };
-        finish_worktree(&root, &top, &branch, "00001: Thing", &settings).unwrap();
+        finish_worktree(&root, &top, &branch, ("00001: Thing", ""), &settings).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "done");
         assert!(!top.exists());
         assert!(crate::git::ticket_commit(&root, "00001", crate::ticket::now_secs()).is_some());
@@ -2996,6 +3025,52 @@ mod tests {
             run_session(Path::new("/p/p.ghost"), 7),
             PathBuf::from("/p/p.ghost#00007")
         );
+    }
+
+    #[test]
+    fn with_pull_requests_a_worktree_pushes_one_commit_and_stays_out_of_main() {
+        let d = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let root = d.path();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Test"],
+            &["config", "user.email", "test@example.com"],
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        ] {
+            git(root, args);
+        }
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        crate::git::commit(root, "setup", false).unwrap();
+        let main = crate::git::head(root).unwrap();
+        let branch = crate::git::ticket_branch("00002");
+        let worktrees = tempfile::tempdir().unwrap();
+        let top = crate::git::prepare_worktree(root, &worktrees.path().join("wt"), &branch).unwrap();
+        std::fs::write(top.join("a.txt"), "first try").unwrap();
+        crate::git::save_worktree(&top, "Work on 00002").unwrap();
+        std::fs::write(top.join("a.txt"), "done").unwrap();
+        let settings = crate::config::ProjectSettings {
+            commit: true,
+            push: true,
+            pull_request: true,
+            ..Default::default()
+        };
+        // No GitHub here, so opening the pull request itself fails, after the push.
+        assert!(finish_worktree(root, &top, &branch, ("00002: Thing", "Body"), &settings).is_err());
+        let pushed = git(remote.path(), &["log", "--format=%s", &format!("{main}..{branch}")]);
+        assert_eq!(pushed, "00002: Thing");
+        assert_eq!(crate::git::head(root).unwrap(), main, "main is left alone");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
     }
 
     #[test]
