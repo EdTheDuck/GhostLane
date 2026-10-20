@@ -49,7 +49,7 @@ Prefer to write it yourself? The **Manual** tab is always one click away.
 
 ### Tickets from a spec or plan
 
-Already have a technical spec, design doc or project plan? Click the upload icon next to the project name and choose the file, or just drop it anywhere on the window. Press **Generate Tickets** and your AI reads the document and writes a ticket for each piece of work into the first column, skipping anything that already has a ticket. The new tickets appear on the board as they're written.
+Already have a technical spec, design doc or project plan? Click the upload icon next to the project name and choose the file, or just drop it anywhere on the window. Press **Generate Tickets** and your AI reads the document and writes a ticket for each piece of work into the first column, skipping anything that already has a ticket. They all land in a new epic named after the document, with the AI's one-paragraph summary as its description, so a big import arrives as one tidy group. The new tickets appear on the board as they're written.
 
 ![Choosing a document to turn into tickets](docs/screenshots/import.png)
 
@@ -134,6 +134,12 @@ Between each pair of columns is a dropdown that decides when tickets move on wit
 New projects come set up as **To Do →** *AI Working* **→ In Dev →** *AI Complete* **→ Ready For Test →** *AI Working* **→ In Test →** *AI Complete* **→ Done**.
 
 With Claude Code and OpenAI Codex, GhostLane knows exactly when the AI has finished: it starts them with a small completion hook, so a ticket waits patiently while the CLI asks you for permission. Other CLIs count as finished once the terminal goes quiet, so if one stops to ask for permission, approve it promptly or the ticket may move on early. Nothing is written into your project for this; the hook lives in GhostLane's own settings folder.
+
+### Epics for the bigger picture
+
+An epic groups the tickets working towards one goal, like "Payments rework". Epics live in a sidebar on the left of the board, each with a purple progress bar showing how many of its tickets are done. Click one to open it: its tickets as small cards, its description, and what the AI has spent on it so far. From there, **Queue all** lines up its unfinished tickets for the AI, and **Break into tickets** asks your AI to write the tickets for an epic from its description. Press **+** to make an epic yourself or have the AI write one, and the arrow tucks the sidebar away when you want the room.
+
+Every ticket in an epic carries a purple pill; click it (or the funnel on the epic's card) to see only that epic's tickets. Pick a ticket's epic in its **Epic** field, right-click a card and choose **Move to Epic**, or select several and use **Epic** in the selection bar. When the last ticket of an epic reaches Done, GhostLane tells you it's complete. An epic is a Markdown file in `epics/`, and your AI knows about them too, so it reads the bigger goal before working on a ticket.
 
 ### Work in the right order
 
@@ -250,6 +256,8 @@ my-project/
 ├── my_project.ghost        ← project settings (YAML)
 ├── CLAUDE.md               ← ticket guide for your AI CLI
 ├── .claude/agents/         ← Developer and Tester sub agents
+├── epics/
+│   └── 00005.md            ← an epic: title and the goal it works towards
 └── tickets/
     ├── to_do/
     │   ├── 00001.md

@@ -135,6 +135,8 @@ pub struct Ticket {
     pub labels: Vec<String>,
     /// Tickets that must reach the last column before Auto or the queue start this one.
     pub blocked_by: Vec<u32>,
+    /// The epic it belongs to, by number.
+    pub epic: Option<u32>,
     /// When the ticket last arrived in the last column, in seconds since 1970.
     pub done_at: Option<u64>,
     /// Oldest first.
@@ -158,6 +160,8 @@ struct FrontOut<'a> {
     labels: &'a [String],
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocked_by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     done_at: Option<String>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -252,18 +256,21 @@ impl Ticket {
         limit > 0 && self.run_count >= limit
     }
 
-    /// Does the ticket match a search? `label:name` words need that label; the rest is looked for in the
-    /// number, title, labels and text.
+    /// Does the ticket match a search? `label:name` words need that label and `epic:00040` that epic; the rest
+    /// is looked for in the number, title, labels and text.
     pub fn matches(&self, query: &str) -> bool {
         let mut words = Vec::new();
         for word in query.split_whitespace() {
-            match word.strip_prefix("label:") {
-                Some(label) => {
-                    if !self.has_label(label) {
-                        return false;
-                    }
+            if let Some(label) = word.strip_prefix("label:") {
+                if !self.has_label(label) {
+                    return false;
                 }
-                None => words.push(word),
+            } else if let Some(epic) = word.strip_prefix("epic:") {
+                if epic.parse::<u32>().ok().is_none_or(|e| self.epic != Some(e)) {
+                    return false;
+                }
+            } else {
+                words.push(word);
             }
         }
         let q = words.join(" ").to_lowercase();
@@ -312,6 +319,9 @@ impl Ticket {
                 t.labels = get("labels").map(parse_labels).unwrap_or_default();
                 t.blocked_by = get("blocked_by").map(parse_ids).unwrap_or_default();
                 t.blocked_by.retain(|&b| b != id);
+                t.epic = get("epic")
+                    .and_then(|v| parse_ids(v).first().copied())
+                    .filter(|&e| e != id);
                 t.done_at = get("done_at").and_then(|v| v.as_str()).and_then(parse_utc);
                 t.runs = get("runs")
                     .and_then(|v| serde_yaml_ng::from_value(v.clone()).ok())
@@ -339,6 +349,7 @@ impl Ticket {
             run_count: self.run_count,
             labels: &self.labels,
             blocked_by: self.blocked_by.iter().map(|&b| format_id(b)).collect(),
+            epic: self.epic.map(format_id),
             done_at: self.done_at.map(utc_timestamp),
             runs: &self.runs,
         };
@@ -393,6 +404,88 @@ impl Ticket {
     }
 
     /// Atomic write: temp file then rename over the target.
+    pub fn save(&self) -> io::Result<()> {
+        write_atomic(&self.path, &self.serialize())
+    }
+}
+
+/// A group of tickets working towards one goal. Its file is `epics/<id>.md`: front matter with `id`, `title` and
+/// an optional `source` (the document it was imported from), then `## Description`. Progress is never stored; it
+/// comes from where its tickets are.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Epic {
+    pub id: u32,
+    pub path: PathBuf,
+    pub title: String,
+    pub source: Option<String>,
+    pub description: String,
+    /// Front matter was missing or unreadable.
+    pub malformed: bool,
+}
+
+#[derive(Serialize)]
+struct EpicFrontOut<'a> {
+    id: String,
+    title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
+}
+
+impl Epic {
+    pub fn id_str(&self) -> String {
+        format_id(self.id)
+    }
+
+    pub fn parse(id: u32, path: PathBuf, text: &str) -> Epic {
+        let text = text.replace("\r\n", "\n");
+        let mut e = Epic {
+            id,
+            path,
+            ..Default::default()
+        };
+        let front = split_frontmatter(&text)
+            .and_then(|(yaml, body)| Some((serde_yaml_ng::from_str::<serde_yaml_ng::Mapping>(yaml).ok()?, body)));
+        let body = match front {
+            Some((map, body)) => {
+                match map.get("title").and_then(|v| v.as_str()) {
+                    Some(title) if !title.trim().is_empty() => e.title = title.to_string(),
+                    _ => e.malformed = true,
+                }
+                e.source = map.get("source").and_then(|v| v.as_str()).map(str::to_string);
+                body
+            }
+            None => {
+                e.malformed = true;
+                text.as_str()
+            }
+        };
+        if e.title.is_empty() {
+            e.title = format_id(id);
+        }
+        e.description = split_body(body)[0].clone();
+        e
+    }
+
+    pub fn serialize(&self) -> String {
+        let front = EpicFrontOut {
+            id: self.id_str(),
+            title: &self.title,
+            source: self.source.as_deref(),
+        };
+        let yaml = serde_yaml_ng::to_string(&front).expect("epic frontmatter serializes");
+        let desc = self.description.trim();
+        let mut out = format!("---\n{yaml}---\n\n## Description\n");
+        if !desc.is_empty() {
+            out.push_str(&format!("\n{desc}\n"));
+        }
+        out
+    }
+
+    pub fn load(path: &Path) -> io::Result<Option<Epic>> {
+        let Some(id) = id_from_path(path) else { return Ok(None) };
+        Ok(Some(Epic::parse(id, path.to_path_buf(), &fs::read_to_string(path)?)))
+    }
+
     pub fn save(&self) -> io::Result<()> {
         write_atomic(&self.path, &self.serialize())
     }
@@ -455,6 +548,8 @@ pub struct Filter {
     pub blocked: bool,
     /// Only tickets sent to the AI at least this often. 0 = any.
     pub min_runs: u32,
+    /// In any of these epics; empty = any epic or none.
+    pub epics: Vec<u32>,
 }
 
 impl Filter {
@@ -468,6 +563,7 @@ impl Filter {
             && (self.labels.is_empty() || self.labels.iter().any(|l| t.has_label(l)))
             && (!self.blocked || blocked)
             && t.run_count >= self.min_runs
+            && (self.epics.is_empty() || t.epic.is_some_and(|e| self.epics.contains(&e)))
     }
 }
 
@@ -547,6 +643,37 @@ pub fn sort(tickets: &mut [Ticket], by: SortBy, dir: SortDir) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn epics_round_trip_and_tickets_point_at_one() {
+        let e = Epic {
+            id: 40,
+            path: PathBuf::from("/p/epics/00040.md"),
+            title: "Payments rework".into(),
+            source: Some("docs/spec.md".into()),
+            description: "Make checkout safe.\n\n- idempotent".into(),
+            malformed: false,
+        };
+        assert_eq!(Epic::parse(40, e.path.clone(), &e.serialize()), e);
+        let bare = Epic::parse(41, PathBuf::new(), "just text");
+        assert!(bare.malformed);
+        assert_eq!((bare.title.as_str(), bare.description.as_str()), ("00041", "just text"));
+
+        let t = Ticket::parse(7, PathBuf::new(), "---\ntitle: T\nepic: '00040'\n---\n");
+        assert_eq!(t.epic, Some(40));
+        assert!(t.serialize().contains("epic: '00040'"));
+        assert_eq!(Ticket::parse(7, PathBuf::new(), &t.serialize()).epic, Some(40));
+        for junk in ["epic: nope", "epic: '00007'", "epic: [1, 2]"] {
+            let t = Ticket::parse(7, PathBuf::new(), &format!("---\ntitle: T\n{junk}\n---\n"));
+            assert_eq!(t.epic, if junk.contains('[') { Some(1) } else { None }, "{junk}");
+        }
+        assert!(t.matches("epic:00040") && t.matches("epic:40 t") && !t.matches("epic:41"));
+        let filter = Filter {
+            epics: vec![41],
+            ..Default::default()
+        };
+        assert!(!filter.matches(&t, false));
+    }
+
     fn p() -> PathBuf {
         PathBuf::from("00001.md")
     }
@@ -575,6 +702,7 @@ mod tests {
             notes: "Spoke to *design*.".into(),
             labels: vec!["ui".into(), "Back end".into()],
             blocked_by: vec![2, 5],
+            epic: Some(40),
             done_at: Some(1_709_210_096),
             runs: vec![RunRecord {
                 started: "2024-02-29T12:00:00Z".into(),

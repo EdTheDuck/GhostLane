@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ticket::{self, Ticket, write_atomic};
+use crate::ticket::{self, Epic, Ticket, write_atomic};
 
 pub const DEFAULT_COLUMNS: [&str; 5] = ["To Do", "In Dev", "Ready For Test", "In Test", "Done"];
 /// Index-aligned with `DEFAULT_COLUMNS`.
@@ -167,6 +167,8 @@ pub struct Project {
     pub meta: GhostFile,
     /// Index-aligned with `meta.columns`.
     pub tickets: Vec<Vec<Ticket>>,
+    /// By number.
+    pub epics: Vec<Epic>,
 }
 
 fn err(msg: impl Into<String>) -> io::Error {
@@ -237,6 +239,7 @@ impl Project {
             root,
             meta,
             tickets: Vec::new(),
+            epics: Vec::new(),
         };
         p.rescan()?;
         Ok(p)
@@ -282,6 +285,7 @@ impl Project {
             root: dir.to_path_buf(),
             meta,
             tickets: Vec::new(),
+            epics: Vec::new(),
         };
         for i in 0..p.meta.columns.len() {
             fs::create_dir_all(p.column_dir(i))?;
@@ -296,6 +300,11 @@ impl Project {
 
     pub fn column_dir(&self, col: usize) -> PathBuf {
         self.tickets_dir().join(&self.meta.columns[col].folder)
+    }
+
+    /// Where epics live, beside `tickets/` so it can never clash with a column folder. Only made once one is.
+    pub fn epics_dir(&self) -> PathBuf {
+        self.root.join("epics")
     }
 
     pub fn save_meta(&self) -> io::Result<()> {
@@ -332,8 +341,71 @@ impl Project {
             all.push(tickets);
         }
         self.tickets = all;
+        // Epics count from the same numbers, so a number always means one thing.
+        let mut epics = Vec::new();
+        if let Ok(entries) = fs::read_dir(self.epics_dir()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                match Epic::load(&path) {
+                    Ok(Some(e)) if path.is_file() => {
+                        max_id = max_id.max(e.id);
+                        epics.push(e);
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("skipping {}: {e}", path.display()),
+                }
+            }
+        }
+        epics.sort_by_key(|e| e.id);
+        self.epics = epics;
         self.meta.next_ticket_id = self.meta.next_ticket_id.max(max_id + 1);
         Ok(())
+    }
+
+    pub fn find_epic(&self, id: u32) -> Option<&Epic> {
+        self.epics.iter().find(|e| e.id == id)
+    }
+
+    /// (column, ticket) of epic `id`'s tickets, in board order.
+    pub fn epic_tickets(&self, id: u32) -> Vec<(usize, &Ticket)> {
+        self.tickets
+            .iter()
+            .enumerate()
+            .flat_map(|(c, ts)| ts.iter().map(move |t| (c, t)))
+            .filter(|(_, t)| t.epic == Some(id))
+            .collect()
+    }
+
+    /// (done, total) tickets of epic `id`; done = in the last column.
+    pub fn epic_progress(&self, id: u32) -> (usize, usize) {
+        let tickets = self.epic_tickets(id);
+        let done = tickets.iter().filter(|(c, _)| *c == self.last_col()).count();
+        (done, tickets.len())
+    }
+
+    /// The first number no ticket or epic file uses yet, from `next_ticket_id` on.
+    fn free_id(&self) -> u32 {
+        let name = |id| format!("{}.md", ticket::format_id(id));
+        let mut id = self.meta.next_ticket_id;
+        while (0..self.meta.columns.len()).any(|c| self.column_dir(c).join(name(id)).exists())
+            || self.epics_dir().join(name(id)).exists()
+        {
+            id += 1;
+        }
+        id
+    }
+
+    /// Writes a new epic with the next free number. Returns the saved epic.
+    pub fn add_epic(&mut self, mut e: Epic) -> io::Result<Epic> {
+        let id = self.free_id();
+        e.id = id;
+        e.path = self.epics_dir().join(format!("{}.md", ticket::format_id(id)));
+        e.malformed = false;
+        e.save()?;
+        self.meta.next_ticket_id = id + 1;
+        self.save_meta()?;
+        self.rescan()?;
+        Ok(e)
     }
 
     pub fn set_sort(&mut self, col: usize, sort: Sort) -> io::Result<()> {
@@ -447,13 +519,9 @@ impl Project {
 
     /// Writes a new ticket into `col` with the next free ID. Returns the saved ticket.
     pub fn add_ticket(&mut self, col: usize, mut t: Ticket) -> io::Result<Ticket> {
-        let mut id = self.meta.next_ticket_id;
-        let name = |id| format!("{}.md", ticket::format_id(id));
-        while (0..self.meta.columns.len()).any(|c| self.column_dir(c).join(name(id)).exists()) {
-            id += 1;
-        }
+        let id = self.free_id();
         t.id = id;
-        t.path = self.column_dir(col).join(name(id));
+        t.path = self.column_dir(col).join(format!("{}.md", ticket::format_id(id)));
         t.malformed = false;
         t.save()?;
         self.meta.next_ticket_id = id + 1;
@@ -612,10 +680,15 @@ Anything else worth keeping, such as why a test failed.
 - `priority` is one of `low`, `medium`, `high` or `highest`.
 - Optional `labels` lists short tags for grouping and filtering, for example `labels: [ui, backend]`.
 - Optional `blocked_by` lists the IDs of tickets that must reach the last column first, for example `blocked_by: ['00012', '00015']`. GhostLane won't start a blocked ticket from its queue or an Auto column.
+- Optional `epic` names the epic the ticket belongs to, for example `epic: '00040'`. A ticket belongs to at most one epic.
 - `## Test Scope` and `## Notes` are optional; leave a section out when it is empty.
 - Leave `id`, `run_count`, `done_at` and `runs` as they are; GhostLane maintains them.
 - To add a note, append it under `## Notes` (create the section if it is missing) rather than changing the description.
 - Don't edit `{ghost}`; it holds the board's columns and settings.
+
+### Epics
+
+An epic groups tickets working towards one bigger goal. Each is a file in `epics/` named with its ID, which comes from the same numbers as tickets (so never reuse a ticket's ID): front matter with `id` and `title`, then a `## Description` of the goal. Read a ticket's epic for the bigger picture before working on it. Progress is worked out from where its tickets are, so don't record it in the epic.
 "#
         )
     }
@@ -750,6 +823,8 @@ pub struct Stats {
     /// Tokens used by the runs that reported them.
     pub tokens: ticket::Tokens,
     pub runs_with_tokens: usize,
+    /// (id, title, done, total, tokens) of each epic.
+    pub epics: Vec<(u32, String, usize, usize, u64)>,
 }
 
 impl Project {
@@ -785,6 +860,21 @@ impl Project {
             .take(5)
             .map(|t| (t.id, t.title.clone(), t.run_count))
             .collect();
+        s.epics = self
+            .epics
+            .iter()
+            .map(|e| {
+                let (done, total) = self.epic_progress(e.id);
+                let tokens = self
+                    .epic_tickets(e.id)
+                    .iter()
+                    .flat_map(|(_, t)| &t.runs)
+                    .filter_map(|r| r.tokens)
+                    .map(|t| t.total())
+                    .sum();
+                (e.id, e.title.clone(), done, total, tokens)
+            })
+            .collect();
         s
     }
 }
@@ -792,7 +882,7 @@ impl Project {
 impl Project {
     /// Every ticket as a CSV row, in board order, with a header row.
     pub fn export_csv(&self) -> String {
-        let mut out = String::from("id,title,column,priority,labels,run_count,blocked_by,done_at\r\n");
+        let mut out = String::from("id,title,column,priority,labels,run_count,blocked_by,epic,done_at\r\n");
         for (col, tickets) in self.tickets.iter().enumerate() {
             for t in tickets {
                 let blocked: Vec<String> = t.blocked_by.iter().map(|&b| ticket::format_id(b)).collect();
@@ -804,6 +894,7 @@ impl Project {
                     t.labels.join("; "),
                     t.run_count.to_string(),
                     blocked.join("; "),
+                    t.epic.map(ticket::format_id).unwrap_or_default(),
                     t.done_at.map(ticket::utc_timestamp).unwrap_or_default(),
                 ];
                 let row: Vec<String> = row.iter().map(|f| csv_field(f)).collect();
@@ -832,6 +923,9 @@ impl Project {
                 let mut line = format!("- **{}** {} · {}", t.id_str(), one_line(&t.title), t.priority.label());
                 for l in &t.labels {
                     line.push_str(&format!(" `{}`", l.replace('`', "")));
+                }
+                if let Some(e) = t.epic.and_then(|e| self.find_epic(e)) {
+                    line.push_str(&format!(" · epic {} {}", e.id_str(), one_line(&e.title)));
                 }
                 let blockers: Vec<String> = self.blockers(t).iter().map(|&b| ticket::format_id(b)).collect();
                 if !blockers.is_empty() {
@@ -873,6 +967,39 @@ pub fn find_ghost_file(dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epics_share_ticket_numbers_and_count_progress() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = Project::create(d.path(), "P", &s(&["To Do", "Done"])).unwrap();
+        assert!(!p.epics_dir().exists(), "made only once an epic is");
+        let e = p
+            .add_epic(Epic {
+                title: "Big goal".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(e.id, 1);
+        let mut t = Ticket {
+            title: "Part".into(),
+            epic: Some(e.id),
+            ..Default::default()
+        };
+        let a = p.add_ticket(0, t.clone()).unwrap();
+        assert_eq!(a.id, 2, "numbers are shared");
+        t.title = "Other part".into();
+        let b = p.add_ticket(0, t).unwrap();
+        p.move_ticket(&b.path, 1).unwrap();
+        assert_eq!(p.epic_progress(e.id), (1, 2));
+        assert_eq!(p.epic_tickets(e.id).len(), 2);
+
+        // An epic file written by hand is picked up, and its number is never handed out again.
+        std::fs::write(p.epics_dir().join("00009.md"), "---\ntitle: By hand\n---\n").unwrap();
+        p.rescan().unwrap();
+        assert_eq!(p.find_epic(9).map(|e| e.title.as_str()), Some("By hand"));
+        assert_eq!(p.meta.next_ticket_id, 10);
+        assert!(p.ai_guide().contains("### Epics"));
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -1200,10 +1327,13 @@ mod tests {
 
         let csv = p.export_csv();
         let lines: Vec<&str> = csv.split("\r\n").collect();
-        assert_eq!(lines[0], "id,title,column,priority,labels,run_count,blocked_by,done_at");
-        assert_eq!(lines[1], "00001,\"Cart, \"\"quick\"\" view\",To Do,Medium,ui; web,0,,");
-        assert_eq!(lines[2], "00002,\"'=HYPERLINK(\"\"x\"\")\",To Do,Medium,,0,00001,");
-        assert_eq!(lines[3], "00003,Login,Done,Medium,,0,,2024-02-29T12:34:56Z");
+        assert_eq!(
+            lines[0],
+            "id,title,column,priority,labels,run_count,blocked_by,epic,done_at"
+        );
+        assert_eq!(lines[1], "00001,\"Cart, \"\"quick\"\" view\",To Do,Medium,ui; web,0,,,");
+        assert_eq!(lines[2], "00002,\"'=HYPERLINK(\"\"x\"\")\",To Do,Medium,,0,00001,,");
+        assert_eq!(lines[3], "00003,Login,Done,Medium,,0,,,2024-02-29T12:34:56Z");
 
         let md = p.export_markdown(1_709_210_096);
         assert!(md.starts_with("# Shop\n\nExported 2024-02-29 12:34 UTC.\n"), "{md}");

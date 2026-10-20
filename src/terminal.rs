@@ -170,10 +170,35 @@ pub fn ticket_update_prompt(request: &str, path: &Path, id: &str) -> String {
     )
 }
 
+/// The epic new tickets go in: its number and file, and whether the AI should write its description too.
+pub struct EpicLink<'a> {
+    pub id: u32,
+    pub path: &'a Path,
+    pub describe: bool,
+}
+
 /// Prompt asking the AI CLI to break the document at `doc` into new ticket files in `dir`, numbered from
-/// `first_id`, on one line.
-pub fn tickets_from_document_prompt(doc: &Path, dir: &Path, tickets: &Path, first_id: u32) -> String {
+/// `first_id`, on one line. With `epic`, every ticket goes in that epic.
+pub fn tickets_from_document_prompt(
+    doc: &Path,
+    dir: &Path,
+    tickets: &Path,
+    first_id: u32,
+    epic: Option<EpicLink>,
+) -> String {
     let line = |p: &Path| p.display().to_string().replace(['\n', '\r'], " ");
+    let epic = epic.map_or_else(String::new, |e| {
+        let id = crate::ticket::format_id(e.id);
+        let describe = match e.describe {
+            true => format!(
+                " Also fill in the '## Description' section of the epic file at {} with one paragraph on what the \
+                 document sets out to achieve, changing nothing else in that file.",
+                line(e.path)
+            ),
+            false => String::new(),
+        };
+        format!(" Add epic: '{id}' to the front matter of every ticket you write, since they all belong to epic {id}.{describe}")
+    });
     format!(
         "Read the document at {doc} (a technical spec, design document or project plan) and break the work it \
          describes into tickets for this project. Look through the project files and the existing tickets under \
@@ -185,11 +210,24 @@ pub fn tickets_from_document_prompt(doc: &Path, dir: &Path, tickets: &Path, firs
          start once other new tickets are finished, also add blocked_by: a list of their ids in single quotes. After \
          the front matter add a '## Description' section explaining what needs doing and why, then a '## Test Scope' \
          section listing how to check it is done. Keep each ticket a piece of work small enough to finish in one \
-         sitting, and number them in the order they should be done.",
+         sitting, and number them in the order they should be done.{epic}",
         doc = line(doc),
         dir = line(dir),
         tickets = line(tickets),
         first = crate::ticket::format_id(first_id),
+    )
+}
+
+/// Prompt asking the AI CLI to write a new epic file at `path` for `request`, on one line.
+pub fn epic_request_prompt(request: &str, path: &Path, id: &str) -> String {
+    let request = request.replace(['\n', '\r'], " ");
+    format!(
+        "Create a new epic for this project: a bigger goal that tickets will work towards. The request is: {request} \
+         -- Look through the project files for context first, then write the epic to {path} and change nothing else; \
+         don't write any tickets. The file must be Markdown that starts with a YAML front matter block between two \
+         lines of three dashes, containing: id: '{id}' and title: a short title. After the front matter add a \
+         '## Description' section saying what the goal is, why it matters and what done looks like.",
+        path = path.display().to_string().replace(['\n', '\r'], " ")
     )
 }
 
@@ -860,12 +898,22 @@ mod tests {
 
     #[test]
     fn document_prompt_is_one_line_with_paths_and_first_id() {
+        let epic = Path::new("/p/epics/00011.md");
+        let link = EpicLink {
+            id: 11,
+            path: epic,
+            describe: true,
+        };
         let p = tickets_from_document_prompt(
             Path::new("/docs/spec\nv2.md"),
             Path::new("/p/tickets/to_do"),
             Path::new("/p/tickets"),
             12,
+            Some(link),
         );
+        assert!(p.contains("epic: '00011'") && p.contains("epic file at /p/epics/00011.md"));
+        let e = epic_request_prompt("Pay\nonline", epic, "00011");
+        assert!(!e.contains('\n') && e.contains("Pay online") && e.contains("id: '00011'"));
         assert!(!p.contains('\n'));
         assert!(p.contains("/docs/spec v2.md"));
         assert!(p.contains("in /p/tickets/to_do,"));

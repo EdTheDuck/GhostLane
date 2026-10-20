@@ -11,7 +11,7 @@ use super::{icon_button, priority_icon};
 use crate::app::{Action, OpenProject};
 use crate::project::{AutoMove, Project, Sort, SortBy, SortDir};
 use crate::theme;
-use crate::ticket::{Filter, Priority, Ticket};
+use crate::ticket::{Epic, Filter, Priority, Ticket};
 
 const MIN_COLUMN_WIDTH: f32 = 300.0;
 const COLUMN_GAP: f32 = 12.0;
@@ -255,6 +255,28 @@ fn selection(p: &Project, selected: &HashSet<u32>) -> Vec<u32> {
         .collect()
 }
 
+/// Epics to put `ids` in, ticked where `current` already is, plus None to take them out of theirs.
+fn epic_menu(ui: &mut Ui, epics: &[Epic], current: Option<u32>, ids: Vec<u32>, actions: &mut Vec<Action>) {
+    if ui.radio(current.is_none(), "No epic").clicked() {
+        actions.push(Action::SetEpic {
+            ids: ids.clone(),
+            epic: None,
+        });
+    }
+    for e in epics {
+        let text = format!("{} {}", e.id_str(), e.title);
+        if ui.radio(current == Some(e.id), text).clicked() {
+            actions.push(Action::SetEpic {
+                ids: ids.clone(),
+                epic: Some(e.id),
+            });
+        }
+    }
+    if epics.is_empty() {
+        ui.label(RichText::new("No epics yet").color(theme::TEXT_MUTED));
+    }
+}
+
 /// What to do with all the selected tickets at once.
 fn selection_bar(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
     let Ok(project) = &op.project else { return };
@@ -280,6 +302,9 @@ fn selection_bar(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
                     });
                 }
             }
+        });
+        ui.menu_button(format!("{}  Epic", icon::FLAG), |ui| {
+            epic_menu(ui, &project.epics, None, ids.clone(), actions);
         });
         ui.menu_button(format!("{}  Priority", icon::CARET_UP), |ui| {
             for p in Priority::ALL {
@@ -343,6 +368,24 @@ fn filter_bar(ui: &mut Ui, op: &mut OpenProject, actions: &mut Vec<Action>) {
                 }
             }
         });
+        if !project.epics.is_empty() {
+            let text = match f.epics.len() {
+                0 => format!("{}  Epics", icon::FLAG),
+                n => format!("{}  Epics ({n})", icon::FLAG),
+            };
+            ui.menu_button(text, |ui| {
+                for e in &project.epics {
+                    let mut on = f.epics.contains(&e.id);
+                    if super::pointer(ui.checkbox(&mut on, format!("{} {}", e.id_str(), e.title))).changed() {
+                        if on {
+                            f.epics.push(e.id);
+                        } else {
+                            f.epics.retain(|&x| x != e.id);
+                        }
+                    }
+                }
+            });
+        }
         super::pointer(ui.checkbox(&mut f.blocked, "Blocked only"));
         ui.add_space(4.0);
         ui.label("Runs at least");
@@ -503,10 +546,16 @@ fn column_ui(
                     let dragging = if picked { selected.len() } else { 1 };
                     let at = *cursor == Some(t.id);
                     let blockers = project.blockers(t);
+                    let epic = t
+                        .epic
+                        .and_then(|e| project.find_epic(e))
+                        .map(|e| (e, filter.epics.contains(&e.id)));
                     let marks = Marks {
                         flagged,
                         blockers: &blockers,
                         filtered: &filter.labels,
+                        epic,
+                        epics: &project.epics,
                     };
                     let card = card(ui, t, play, marks, (picked, dragging, at), actions);
                     if at && *scroll_to_cursor {
@@ -632,6 +681,10 @@ struct Marks<'a> {
     blockers: &'a [u32],
     /// Labels the board is filtered by; their pills show as picked.
     filtered: &'a [String],
+    /// The ticket's epic and whether the board is filtered by it.
+    epic: Option<(&'a Epic, bool)>,
+    /// The project's epics, offered in the card's menu.
+    epics: &'a [Epic],
 }
 
 /// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along. `cursor`: the arrow
@@ -701,6 +754,9 @@ fn card(
         if ui.button(format!("{}  Edit Ticket", icon::PENCIL_SIMPLE)).clicked() {
             actions.push(Action::EditTicket(t.id));
         }
+        ui.menu_button(format!("{}  Move to Epic", icon::FLAG), |ui| {
+            epic_menu(ui, marks.epics, t.epic, vec![t.id], actions);
+        });
         if ui.button(format!("{}  Duplicate Ticket", icon::COPY)).clicked() {
             actions.push(Action::DuplicateTicket(t.id));
         }
@@ -730,6 +786,8 @@ fn card_contents(
         flagged,
         blockers,
         filtered,
+        epic,
+        ..
     }: Marks,
     actions: &mut Vec<Action>,
 ) {
@@ -775,9 +833,19 @@ fn card_contents(
                 }
             });
             ui.label(title_job(ui, &t.title, width));
-            if !t.labels.is_empty() {
+            if !t.labels.is_empty() || epic.is_some() {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    if let Some((e, picked)) = epic {
+                        let tip = if picked {
+                            format!("Stop filtering by epic {}", e.id_str())
+                        } else {
+                            format!("Epic {}: show only its tickets", e.id_str())
+                        };
+                        if super::epic_chip(ui, &e.title, picked).on_hover_text(tip).clicked() {
+                            actions.push(Action::FilterByEpic(e.id));
+                        }
+                    }
                     for l in &t.labels {
                         let picked = filtered.iter().any(|f| f.to_lowercase() == l.to_lowercase());
                         let tip = if picked {
@@ -998,6 +1066,39 @@ mod tests {
         h.get_by_label_contains("Add to Queue").click();
         h.run();
         assert!(h.state().1.iter().any(|a| matches!(a, Action::AddToQueue(1))));
+    }
+
+    #[test]
+    fn cards_show_their_epic_and_clicking_it_filters() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        let p = h.state_mut().0.project.as_mut().unwrap();
+        let e = p
+            .add_epic(Epic {
+                title: "Payments".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut t = p.find_ticket(1).unwrap().1.clone();
+        t.epic = Some(e.id);
+        t.save().unwrap();
+        p.rescan().unwrap();
+        h.run();
+        h.get_by_label("Payments").click();
+        h.run();
+        assert!(h.state().1.iter().any(|a| matches!(a, Action::FilterByEpic(2))));
+        h.get_by_label("Hello").click_secondary();
+        h.run();
+        h.get_by_label_contains("Move to Epic").click();
+        h.run();
+        h.get_by_label("No epic").click();
+        h.run();
+        assert!(
+            h.state()
+                .1
+                .iter()
+                .any(|a| matches!(a, Action::SetEpic { epic: None, .. }))
+        );
     }
 
     #[test]

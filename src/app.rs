@@ -17,6 +17,7 @@ use crate::project::{AutoMove, Project, Sort};
 use crate::terminal::{self, Terminals};
 use crate::theme;
 use crate::ticket::{Filter, Priority, RunRecord, RunResult, Ticket, format_id};
+use crate::ui::epics::{EpicForm, EpicFormOutcome, EpicOutcome, EpicView};
 use crate::ui::import::{ImportForm, ImportOutcome};
 use crate::ui::project::{ProjectForm, ProjectOutcome};
 use crate::ui::quick_open::{QuickOpen, QuickOutcome};
@@ -149,6 +150,17 @@ pub enum Action {
     ToggleAuto(String),
     /// Pause or resume the AI queue and Auto.
     TogglePause,
+    NewEpic,
+    ViewEpic(u32),
+    /// Open the filter bar with this epic ticked, or untick it if it already is.
+    FilterByEpic(u32),
+    /// Put the tickets in this epic, or take them out of theirs.
+    SetEpic {
+        ids: Vec<u32>,
+        epic: Option<u32>,
+    },
+    /// Collapse or bring back the epics sidebar.
+    ToggleEpics,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +173,8 @@ pub enum Modal {
     Project(ProjectForm),
     ViewTicket(TicketView),
     EditTicket(Box<TicketForm>),
+    ViewEpic(EpicView),
+    EditEpic(Box<EpicForm>),
     ConfirmDelete(Vec<u32>),
     QuickOpen(QuickOpen),
     Stats,
@@ -222,10 +236,15 @@ pub struct Generation {
 
 impl Generation {
     fn title(&self) -> &'static str {
-        if self.baseline.is_some() {
-            "Updating ticket…"
-        } else {
-            "Generating ticket…"
+        let epic = self
+            .path
+            .parent()
+            .and_then(|d| d.file_name())
+            .is_some_and(|n| n == "epics");
+        match (self.baseline.is_some(), epic) {
+            (true, _) => "Updating ticket…",
+            (false, true) => "Generating epic…",
+            (false, false) => "Generating ticket…",
         }
     }
 
@@ -298,12 +317,14 @@ enum Job {
 enum UndoStep {
     /// Ticket `id` was moved out of the column with this folder.
     Move { ghost: PathBuf, id: u32, folder: String },
-    /// A ticket file was sent to the trash; it is written back from what it held.
+    /// A ticket or epic file was sent to the trash; it is written back from what it held.
     Delete {
         ghost: PathBuf,
         path: PathBuf,
         contents: String,
     },
+    /// Ticket `id` was changed; its file gets back what it held, wherever it is now.
+    Edit { ghost: PathBuf, id: u32, contents: String },
 }
 
 /// Undo steps kept; older ones are dropped.
@@ -350,6 +371,8 @@ pub struct App {
     /// .ghost files handed over by later launches (see `instance`).
     handed_rx: Option<Receiver<PathBuf>>,
     watcher: Option<Watcher>,
+    /// The watcher covers the project's epics folder too (it is watched once it exists).
+    epics_watched: bool,
     watch_tx: Sender<DebounceEventResult>,
     watch_rx: Receiver<DebounceEventResult>,
 }
@@ -402,6 +425,7 @@ impl App {
             update_rx: None,
             handed_rx: None,
             watcher: None,
+            epics_watched: false,
             watch_tx,
             watch_rx,
         };
@@ -517,6 +541,7 @@ impl App {
                 .map(|t| (t.id, t.priority, t.title.clone()))
                 .collect();
             form.tickets.sort_by_key(|(id, _, _)| *id);
+            form.epics = p.epics.iter().map(|e| (e.id, e.title.clone())).collect();
         }
         Modal::EditTicket(Box::new(form))
     }
@@ -534,6 +559,10 @@ impl App {
         if let Ok(p) = &op.project {
             for (col, column) in p.meta.columns.iter().enumerate() {
                 c.push((format!("New ticket in {}", column.name), Action::NewTicket(col)));
+            }
+            c.push(("New epic".to_string(), Action::NewEpic));
+            for e in &p.epics {
+                c.push((format!("Epic {} {}", e.id_str(), e.title), Action::ViewEpic(e.id)));
             }
             for (col, column) in p.meta.columns.iter().enumerate() {
                 if p.auto_target(col, AutoMove::AiWorking).is_some() {
@@ -632,7 +661,9 @@ impl App {
     fn watch_active(&mut self, ctx: &egui::Context) {
         self.watcher = None;
         let Some(p) = self.active_project() else { return };
-        let (tickets, root) = (p.tickets_dir(), p.root.clone());
+        let (tickets, root, epics) = (p.tickets_dir(), p.root.clone(), p.epics_dir());
+        self.epics_watched = epics.is_dir();
+        let watch_epics = self.epics_watched;
         let tx = self.watch_tx.clone();
         let ctx = ctx.clone();
         let handler = move |res: DebounceEventResult| {
@@ -642,6 +673,9 @@ impl App {
         let result = new_debouncer(Duration::from_millis(200), None, handler).and_then(|mut w| {
             w.watch(&tickets, RecursiveMode::Recursive)?;
             w.watch(&root, RecursiveMode::NonRecursive)?;
+            if watch_epics {
+                w.watch(&epics, RecursiveMode::Recursive)?;
+            }
             Ok(w)
         });
         match result {
@@ -650,7 +684,11 @@ impl App {
         }
     }
 
-    fn poll_watcher(&mut self) {
+    fn poll_watcher(&mut self, ctx: &egui::Context) {
+        // An epics folder made since the watcher started gets watched too.
+        if !self.epics_watched && self.active_project().is_some_and(|p| p.epics_dir().is_dir()) {
+            self.watch_active(ctx);
+        }
         let mut changed = false;
         while let Ok(res) = self.watch_rx.try_recv() {
             let relevant = |p: &Path| {
@@ -847,6 +885,41 @@ impl App {
                         self.play(id, ctx);
                     }
                 }
+            }
+            Action::NewEpic => {
+                if let Some(p) = self.active_project() {
+                    let e = crate::ticket::Epic {
+                        id: p.meta.next_ticket_id,
+                        ..Default::default()
+                    };
+                    self.modal = Some(Modal::EditEpic(Box::new(EpicForm::create(e))));
+                }
+            }
+            Action::ViewEpic(id) => self.modal = Some(Modal::ViewEpic(EpicView::new(id))),
+            Action::FilterByEpic(id) => {
+                if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
+                    op.filter_open = true;
+                    match op.filter.epics.iter().position(|&e| e == id) {
+                        Some(i) => _ = op.filter.epics.remove(i),
+                        None => op.filter.epics.push(id),
+                    }
+                }
+            }
+            Action::SetEpic { ids, epic } => {
+                for id in ids {
+                    let Some(mut t) = self.find_ticket(id).map(|(_, t)| t.clone()) else {
+                        continue;
+                    };
+                    t.epic = epic;
+                    if let Err(e) = t.save() {
+                        self.toast(format!("Couldn't update {}: {e}", t.id_str()));
+                    }
+                }
+                self.reload_active();
+            }
+            Action::ToggleEpics => {
+                self.config.epics_closed = !self.config.epics_closed;
+                self.save_config();
             }
             Action::AddToQueue(id) => {
                 if let Some(i) = self.active {
@@ -1769,8 +1842,23 @@ impl App {
         };
         let root = p.root.clone();
         t.done_at = Some(crate::ticket::now_secs());
-        if let Err(e) = t.save().and_then(|()| p.rescan()) {
+        let saved = t.save().and_then(|()| p.rescan());
+        // The last of its epic's tickets to get here finishes the epic.
+        let complete = t.epic.and_then(|e| {
+            let (done, total) = p.epic_progress(e);
+            let e = p.find_epic(e).filter(|_| total > 0 && done == total)?;
+            Some(format!(
+                "Epic {} {} is complete",
+                e.id_str(),
+                e.title.replace(['\n', '\r'], " ")
+            ))
+        });
+        if let Err(e) = saved {
             self.toast(format!("Couldn't update {}: {e}", t.id_str()));
+        }
+        if let Some(msg) = complete {
+            self.desktop_notify(ctx, &msg);
+            self.toast(msg);
         }
         // A ticket that ran in parallel brings its worktree's work back now; its terminal has done its job.
         let branch = crate::git::ticket_branch(&t.id_str());
@@ -1858,8 +1946,8 @@ impl App {
         Ok(())
     }
 
-    /// Asks the AI CLI to break the document at `doc` into new tickets in the first column. They show up on
-    /// the board as the AI writes them.
+    /// Asks the AI CLI to break the document at `doc` into new tickets in the first column, all in a new epic
+    /// named after it whose description the AI writes too. They show up on the board as the AI writes them.
     fn start_import(&mut self, doc: &Path, ctx: &egui::Context) -> Result<(), String> {
         if !doc.is_file() {
             return Err(format!("{} isn't a file", doc.display()));
@@ -1869,10 +1957,126 @@ impl App {
             return Err("Add a column to the project first".into());
         }
         let cli = self.project_cli(p)?;
-        let prompt =
-            terminal::tickets_from_document_prompt(doc, &p.column_dir(0), &p.tickets_dir(), p.meta.next_ticket_id);
+        let title = doc
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .replace(['_', '-'], " ");
+        let epic = crate::ticket::Epic {
+            title: title.trim().to_string(),
+            source: Some(doc.display().to_string()),
+            ..Default::default()
+        };
+        let p = self.active_project_mut().ok_or("No project is open")?;
+        let epic = p
+            .add_epic(epic)
+            .map_err(|e| format!("Couldn't create an epic for it: {e}"))?;
+        let link = terminal::EpicLink {
+            id: epic.id,
+            path: &epic.path,
+            describe: true,
+        };
+        let prompt = terminal::tickets_from_document_prompt(
+            doc,
+            &p.column_dir(0),
+            &p.tickets_dir(),
+            p.meta.next_ticket_id,
+            Some(link),
+        );
         let (key, root) = (p.ghost_path.clone(), p.root.clone());
         self.send_to_cli(&key, &root, cli, &prompt, None, ctx).map(|_| ())
+    }
+
+    /// Asks the AI CLI to write tickets for epic `e` from its description, in the first column.
+    fn start_breakdown(&mut self, e: &crate::ticket::Epic, ctx: &egui::Context) -> Result<(), String> {
+        let p = self.active_project().ok_or("No project is open")?;
+        if p.meta.columns.is_empty() {
+            return Err("Add a column to the project first".into());
+        }
+        let cli = self.project_cli(p)?;
+        let link = terminal::EpicLink {
+            id: e.id,
+            path: &e.path,
+            describe: false,
+        };
+        let prompt = terminal::tickets_from_document_prompt(
+            &e.path,
+            &p.column_dir(0),
+            &p.tickets_dir(),
+            p.meta.next_ticket_id,
+            Some(link),
+        );
+        let (key, root) = (p.ghost_path.clone(), p.root.clone());
+        self.send_to_cli(&key, &root, cli, &prompt, None, ctx).map(|_| ())
+    }
+
+    /// Asks the AI CLI to write a new epic for `request` and waits for its file.
+    fn start_epic_generation(&mut self, request: &str, ctx: &egui::Context) -> Result<(), String> {
+        let p = self.active_project().ok_or("No project is open")?;
+        let id = format_id(p.meta.next_ticket_id);
+        let dir = p.epics_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+        let path = dir.join(format!("{id}.md"));
+        let prompt = terminal::epic_request_prompt(request, &path, &id);
+        self.start_writing(path, &prompt, None, ctx)
+    }
+
+    /// Sends epic `e` to the trash, and with `clear` takes it off its tickets too; Ctrl+Z puts it all back.
+    fn delete_epic(&mut self, e: &crate::ticket::Epic, clear: bool) {
+        let Some(p) = self.active_project() else { return };
+        let ghost = p.ghost_path.clone();
+        let tickets: Vec<Ticket> = match clear {
+            true => p.epic_tickets(e.id).into_iter().map(|(_, t)| t.clone()).collect(),
+            false => Vec::new(),
+        };
+        let mut undo = Vec::new();
+        let mut errors = Vec::new();
+        for mut t in tickets {
+            let contents = std::fs::read_to_string(&t.path);
+            t.epic = None;
+            match (t.save(), contents) {
+                (Ok(()), Ok(contents)) => undo.push(UndoStep::Edit {
+                    ghost: ghost.clone(),
+                    id: t.id,
+                    contents,
+                }),
+                (Ok(()), Err(_)) => {}
+                (Err(err), _) => errors.push(format!("Couldn't update {}: {err}", t.id_str())),
+            }
+        }
+        let contents = std::fs::read_to_string(&e.path);
+        match trash::delete(&e.path) {
+            Ok(()) => undo.extend(contents.ok().map(|contents| UndoStep::Delete {
+                ghost,
+                path: e.path.clone(),
+                contents,
+            })),
+            Err(err) => errors.push(format!("Couldn't delete epic {}: {err}", e.id_str())),
+        }
+        for err in errors {
+            self.toast(err);
+        }
+        self.push_undo(undo);
+        self.reload_active();
+    }
+
+    /// Adds epic `id`'s unfinished tickets to the queue, lowest number first. Those the AI already has, or that sit
+    /// in a column it fills by itself, stay out.
+    fn queue_epic(&mut self, id: u32) {
+        let Some(i) = self.active else { return };
+        let Ok(p) = &self.projects[i].project else { return };
+        let mut ids: Vec<u32> = p
+            .epic_tickets(id)
+            .into_iter()
+            .filter(|(c, _)| *c != p.last_col() && p.meta.columns[*c].auto_move != AutoMove::AiWorking)
+            .map(|(_, t)| t.id)
+            .collect();
+        ids.sort_unstable();
+        ids.retain(|&t| !self.is_running(i, t) && !self.projects[i].queue.contains(&t));
+        if ids.is_empty() {
+            self.toast("Nothing of this epic is waiting to be queued");
+        }
+        self.projects[i].queue.extend(ids);
     }
 
     /// A file dropped on the window opens the document import with it (the import modal reads the drop itself).
@@ -2335,6 +2539,58 @@ impl App {
                     Ok(()) => self.modal = None,
                     Err(e) => {
                         if let Some(Modal::Import(form)) = &mut self.modal {
+                            form.error = Some(e);
+                        }
+                    }
+                },
+                None => {}
+            },
+            Some(Modal::ViewEpic(view)) => {
+                let project = self.active.and_then(|i| self.projects[i].project.as_ref().ok());
+                let Some((p, e)) = project.and_then(|p| Some((p, p.find_epic(view.id)?.clone()))) else {
+                    self.modal = None;
+                    return;
+                };
+                match ui::epics::view(ctx, view, p, &e, &mut self.md_cache) {
+                    Some(EpicOutcome::Close) => self.modal = None,
+                    Some(EpicOutcome::Edit) => self.modal = Some(Modal::EditEpic(Box::new(EpicForm::edit(&e)))),
+                    Some(EpicOutcome::Delete { clear }) => {
+                        self.modal = None;
+                        self.delete_epic(&e, clear);
+                    }
+                    Some(EpicOutcome::QueueAll) => self.queue_epic(e.id),
+                    Some(EpicOutcome::Breakdown) => {
+                        self.modal = None;
+                        if let Err(err) = self.start_breakdown(&e, ctx) {
+                            self.toast(err);
+                        }
+                    }
+                    Some(EpicOutcome::Open(id)) => self.open_ticket(id),
+                    None => {}
+                }
+            }
+            Some(Modal::EditEpic(form)) => match form.show(ctx) {
+                Some(EpicFormOutcome::Close) => self.modal = None,
+                Some(EpicFormOutcome::Save) => {
+                    let (epic, editing) = (form.epic.clone(), form.editing());
+                    let saved = match self.active_project_mut() {
+                        Some(p) if editing => epic.save().and_then(|()| p.rescan()).map(|()| epic.id),
+                        Some(p) => p.add_epic(epic).map(|e| e.id),
+                        None => Err(std::io::Error::other("no project is open")),
+                    };
+                    match saved {
+                        Ok(id) => self.modal = Some(Modal::ViewEpic(EpicView::new(id))),
+                        Err(e) => {
+                            if let Some(Modal::EditEpic(form)) = &mut self.modal {
+                                form.error = Some(format!("Couldn't save the epic: {e}"));
+                            }
+                        }
+                    }
+                }
+                Some(EpicFormOutcome::Generate(request)) => match self.start_epic_generation(&request, ctx) {
+                    Ok(()) => self.modal = None,
+                    Err(e) => {
+                        if let Some(Modal::EditEpic(form)) = &mut self.modal {
                             form.error = Some(e);
                         }
                     }
@@ -2836,7 +3092,7 @@ fn with_failure_note(notes: &str, command: &str, output: &str, when: u64) -> Str
 /// Puts back one card move or delete. Steps for projects that have been closed since are skipped.
 fn undo_step(projects: &mut [OpenProject], step: UndoStep) -> Result<(), String> {
     let ghost = match &step {
-        UndoStep::Move { ghost, .. } | UndoStep::Delete { ghost, .. } => ghost.clone(),
+        UndoStep::Move { ghost, .. } | UndoStep::Delete { ghost, .. } | UndoStep::Edit { ghost, .. } => ghost.clone(),
     };
     let Some(p) = projects
         .iter_mut()
@@ -2853,6 +3109,14 @@ fn undo_step(projects: &mut [OpenProject], step: UndoStep) -> Result<(), String>
                 (_, None) => Err("it's gone".to_string()),
             };
             result.map_err(|e| format!("Couldn't move {} back: {e}", format_id(id)))
+        }
+        UndoStep::Edit { id, contents, .. } => {
+            let Some(path) = p.find_ticket(id).map(|(_, t)| t.path.clone()) else {
+                return Err(format!("Couldn't restore {}: it's gone", format_id(id)));
+            };
+            crate::ticket::write_atomic(&path, &contents)
+                .and_then(|()| p.rescan())
+                .map_err(|e| format!("Couldn't restore {}: {e}", format_id(id)))
         }
         UndoStep::Delete { path, contents, .. } => {
             let result = if path.exists() {
@@ -3033,7 +3297,7 @@ fn strip_unc(p: PathBuf) -> PathBuf {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_watcher();
+        self.poll_watcher(&ctx);
         self.poll_generation();
         self.update_windows(&ctx);
         self.poll_ai_runs(&ctx);
@@ -3072,6 +3336,24 @@ impl eframe::App for App {
         let busy = self.ai_busy();
         self.top_bar(ui, &mut actions, busy);
         self.terminal_panel(ui);
+        if let Some(op) = self.active.and_then(|i| self.projects.get(i))
+            && let Ok(p) = &op.project
+        {
+            if self.config.epics_closed {
+                egui::Panel::left("epics_collapsed")
+                    .exact_size(ui::epics::COLLAPSED_WIDTH)
+                    .resizable(false)
+                    .frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(0, 10)))
+                    .show(ui, |ui| ui::epics::collapsed(ui, &mut actions));
+            } else {
+                egui::Panel::left("epics")
+                    .resizable(true)
+                    .default_size(250.0)
+                    .size_range(180.0..=420.0)
+                    .frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::same(10)))
+                    .show(ui, |ui| ui::epics::sidebar(ui, p, &op.filter, &mut actions));
+            }
+        }
 
         let central = Frame::new().fill(theme::BG).inner_margin(Margin::same(12));
         let board = egui::CentralPanel::default()

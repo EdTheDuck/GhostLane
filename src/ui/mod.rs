@@ -1,5 +1,6 @@
 pub mod board;
 pub mod chrome;
+pub mod epics;
 pub mod generating;
 pub mod import;
 pub mod project;
@@ -284,6 +285,38 @@ pub fn stripe(ui: &Ui, rect: egui::Rect, color: Color32) {
         ..Default::default()
     };
     ui.painter().rect_filled(bar, corners, color);
+}
+
+/// An epic as a pill on a card: outlined in the epic colour with a flag, so it never reads as a label. It fills in
+/// on hover, and stays filled while the board is filtered by it (`picked`). Long titles are cut short.
+pub fn epic_chip(ui: &mut Ui, title: &str, picked: bool) -> Response {
+    const PAD: egui::Vec2 = egui::vec2(8.0, 3.0);
+    let max = (ui.available_width() - PAD.x * 2.0).max(40.0);
+    let mut job = egui::text::LayoutJob::single_section(
+        format!("{}  {title}", icon::FLAG),
+        egui::TextFormat::simple(egui::TextStyle::Small.resolve(ui.style()), theme::EPIC),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max);
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let (rect, response) = ui.allocate_exact_size(galley.size() + PAD * 2.0, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title));
+    if ui.is_rect_visible(rect) {
+        let (fill, text) = if picked || response.hovered() {
+            (theme::EPIC, theme::ACCENT_TEXT)
+        } else {
+            (Color32::TRANSPARENT, theme::EPIC)
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            rect.height() / 2.0,
+            fill,
+            egui::Stroke::new(1.0, theme::EPIC),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley_with_override_text_color(rect.min + PAD, galley, text);
+    }
+    pointer(response)
 }
 
 pub fn priority_icon(p: Priority) -> RichText {

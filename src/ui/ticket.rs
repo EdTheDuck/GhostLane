@@ -8,12 +8,12 @@ use super::{accent_button, icon_button, priority_icon};
 use crate::theme;
 use crate::ticket::{Priority, RunRecord, Ticket, format_id, labels_from_text};
 
-fn modal_size(ctx: &egui::Context) -> egui::Vec2 {
+pub(super) fn modal_size(ctx: &egui::Context) -> egui::Vec2 {
     let screen = ctx.content_rect().size();
     vec2((screen.x * 0.8).min(1400.0), screen.y * 0.8)
 }
 
-fn markdown(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
+pub(super) fn markdown(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
     if text.trim().is_empty() {
         ui.label(RichText::new("Nothing here yet.").italics().color(theme::TEXT_MUTED));
     } else {
@@ -109,16 +109,7 @@ pub fn view(
     cache: &mut CommonMarkCache,
 ) -> Option<ViewOutcome> {
     let mut outcome = None;
-    let size = modal_size(ctx);
-    let modal = super::show_modal(ctx, "view_ticket", |ui| {
-        ui.set_width(size.x);
-        ui.set_height(size.y);
-        // Like the app: a bar on top, everything below it on the darker background.
-        let background = ui.painter().add(egui::Shape::Noop);
-        if top_bar(ui, t, column) {
-            outcome = Some(ViewOutcome::Close);
-        }
-        let below = ui.max_rect().top() - super::MODAL_PADDING + super::chrome::BAR_HEIGHT;
+    let (closed, modal) = sheet(ctx, "view_ticket", &t.id_str(), (icon::KANBAN, column), |ui| {
         title_card(ui, t, links, &mut outcome);
         // Footer first, from the bottom up, so the body above gets whatever height is left.
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
@@ -159,22 +150,10 @@ pub fn view(
                 });
             });
         });
-        // The modal's fill runs MODAL_PADDING past its contents, inside its border.
-        let pad = super::MODAL_PADDING;
-        let max = ui.max_rect();
-        let body = egui::Rect::from_min_max(
-            egui::pos2(max.left() - pad, below),
-            egui::pos2(max.right() + pad, max.bottom() + pad),
-        );
-        let r = inner_radius(ui);
-        let corners = egui::CornerRadius {
-            sw: r,
-            se: r,
-            ..Default::default()
-        };
-        ui.painter()
-            .set(background, egui::Shape::rect_filled(body, corners, theme::BG));
     });
+    if closed {
+        outcome = Some(ViewOutcome::Close);
+    }
     if state.confirm_revert {
         let commit = state.commit.clone().unwrap_or_default();
         let msg = format!(
@@ -191,7 +170,45 @@ pub fn view(
     outcome
 }
 
-const RADIUS: u8 = 6;
+/// A large dialog laid out like the app: a bar across the top with `number`, where it is (a glyph and words) and a
+/// close button, then `add`'s contents on the darker background below. True when the close button is clicked.
+pub(super) fn sheet(
+    ctx: &egui::Context,
+    id: &str,
+    number: &str,
+    place: (&str, &str),
+    add: impl FnOnce(&mut Ui),
+) -> (bool, egui::ModalResponse<()>) {
+    let size = modal_size(ctx);
+    let mut closed = false;
+    let modal = super::show_modal(ctx, id, |ui| {
+        ui.set_width(size.x);
+        ui.set_height(size.y);
+        // Like the app: a bar on top, everything below it on the darker background.
+        let background = ui.painter().add(egui::Shape::Noop);
+        closed = top_bar(ui, number, place);
+        let below = ui.max_rect().top() - super::MODAL_PADDING + super::chrome::BAR_HEIGHT;
+        add(ui);
+        // The modal's fill runs MODAL_PADDING past its contents, inside its border.
+        let pad = super::MODAL_PADDING;
+        let max = ui.max_rect();
+        let body = egui::Rect::from_min_max(
+            egui::pos2(max.left() - pad, below),
+            egui::pos2(max.right() + pad, max.bottom() + pad),
+        );
+        let r = inner_radius(ui);
+        let corners = egui::CornerRadius {
+            sw: r,
+            se: r,
+            ..Default::default()
+        };
+        ui.painter()
+            .set(background, egui::Shape::rect_filled(body, corners, theme::BG));
+    });
+    (closed, modal)
+}
+
+pub(super) const RADIUS: u8 = 6;
 
 /// Corner radius of the modal's fill, inside its border.
 fn inner_radius(ui: &Ui) -> u8 {
@@ -201,7 +218,7 @@ fn inner_radius(ui: &Ui) -> u8 {
 
 /// Number, column and a close button on a bar across the top of the modal, out to its edges, like the app's top
 /// bar. True when the close button is clicked.
-fn top_bar(ui: &mut Ui, t: &Ticket, column: &str) -> bool {
+fn top_bar(ui: &mut Ui, number: &str, (glyph, place): (&str, &str)) -> bool {
     let pad = super::MODAL_PADDING;
     let max = ui.max_rect();
     let bar = egui::Rect::from_min_max(
@@ -218,15 +235,9 @@ fn top_bar(ui: &mut Ui, t: &Ticket, column: &str) -> bool {
     ui.allocate_space(vec2(max.width(), bar.bottom() - max.top() + gap));
     let ui = &mut child;
     ui.add_space(pad);
-    ui.label(
-        RichText::new(t.id_str())
-            .monospace()
-            .size(16.0)
-            .color(theme::TEXT_MUTED),
-    );
+    ui.label(RichText::new(number).monospace().size(16.0).color(theme::TEXT_MUTED));
     // Not a pill, so it doesn't read as a label.
-    let text = format!("{}  {column}", icon::KANBAN);
-    ui.label(RichText::new(text).color(theme::TEXT_MUTED));
+    ui.label(RichText::new(format!("{glyph}  {place}")).color(theme::TEXT_MUTED));
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.add_space(inset);
         super::icon_button(ui, icon::X, "Close").clicked()
@@ -346,7 +357,7 @@ fn sidebar_fields(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<V
 /// A linked ticket as a small card: priority, number and column over its title, with a stripe in the priority's
 /// colour down its left edge. Click it to open it; a missing one can't be.
 /// Finished tickets are greyed out.
-fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
+pub(super) fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
     let id = ui.id().with(("linked", d.id));
     let open = d.waiting.is_some();
     let hovered = open && ui.ctx().read_response(id).is_some_and(|r| r.hovered());
@@ -401,7 +412,7 @@ fn mini_card(ui: &mut Ui, d: &Dependency) -> egui::Response {
 }
 
 /// A section of the ticket on a lighter card, its heading in the accent colour.
-fn card(ui: &mut Ui, heading: &str, add: impl FnOnce(&mut Ui)) {
+pub(super) fn card(ui: &mut Ui, heading: &str, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(theme::CARD)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -737,6 +748,8 @@ pub struct TicketForm {
     blocked_refocus: bool,
     /// The project's tickets, offered in the Blocked by dropdown.
     pub tickets: Vec<(u32, Priority, String)>,
+    /// The project's epics (number, title), offered in the Epic dropdown.
+    pub epics: Vec<(u32, String)>,
     /// Comma-separated labels, as typed.
     labels: String,
     confirm_discard: bool,
@@ -778,6 +791,7 @@ impl TicketForm {
             blocked_list: None,
             blocked_refocus: false,
             tickets: Vec::new(),
+            epics: Vec::new(),
             labels: ticket.labels.join(", "),
             original: ticket.clone(),
             ticket,
@@ -793,6 +807,7 @@ impl TicketForm {
             || a.title != b.title
             || a.priority != b.priority
             || a.run_count != b.run_count
+            || a.epic != b.epic
             || parse_blocked(&self.blocked, a.id).ok().as_ref() != Some(&b.blocked_by)
             || labels_from_text(&self.labels) != b.labels
             || self.description.changed()
@@ -908,6 +923,28 @@ impl TicketForm {
                     ui.label("Runs");
                 });
             });
+            let t = &mut self.ticket;
+            if !self.epics.is_empty() || t.epic.is_some() {
+                ui.horizontal(|ui| {
+                    ui.label("Epic");
+                    let name = |id: u32| {
+                        self.epics.iter().find(|(e, _)| *e == id).map_or_else(
+                            || format!("{} (missing)", format_id(id)),
+                            |(_, title)| format!("{} {title}", format_id(id)),
+                        )
+                    };
+                    let combo = ComboBox::from_id_salt("epic")
+                        .selected_text(t.epic.map_or_else(|| "None".to_string(), name))
+                        .width(320.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut t.epic, None, "None");
+                            for (id, _) in &self.epics {
+                                ui.selectable_value(&mut t.epic, Some(*id), name(*id));
+                            }
+                        });
+                    super::pointer(combo.response).on_hover_text("The bigger goal this ticket works towards");
+                });
+            }
             let t = &mut self.ticket;
             let blocked = parse_blocked(&self.blocked, t.id);
 
@@ -1049,7 +1086,7 @@ fn optional_section(ui: &mut Ui, label: &str, open: &mut bool, editor: &mut Rich
 }
 
 /// Underlined tab strip.
-fn tabs<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, items: &[(T, &str)]) {
+pub(super) fn tabs<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, items: &[(T, &str)]) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 24.0;
         for &(tab, label) in items {
@@ -1101,11 +1138,26 @@ pub fn message(ctx: &egui::Context, title: &str, body: &str) -> bool {
 
 /// Small yes/no modal. Returns Some(true) on confirm, Some(false) on cancel.
 pub fn confirm(ctx: &egui::Context, id: &str, message: &str, cancel: &str, ok: &str) -> Option<bool> {
+    confirm_with(ctx, id, message, None, cancel, ok)
+}
+
+/// `confirm`, with a checkbox (its text and value) under the message when `check` is given.
+pub fn confirm_with(
+    ctx: &egui::Context,
+    id: &str,
+    message: &str,
+    check: Option<(&str, &mut bool)>,
+    cancel: &str,
+    ok: &str,
+) -> Option<bool> {
     let mut result = None;
     let danger = matches!(ok, "Delete" | "Discard" | "Revert");
     let modal = super::show_modal(ctx, ("confirm", id), |ui| {
         ui.set_width(360.0);
         ui.label(RichText::new(message).size(16.0));
+        if let Some((text, on)) = check {
+            super::pointer(ui.checkbox(on, text));
+        }
         ui.add_space(12.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let ok_btn = if danger {

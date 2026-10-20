@@ -27,6 +27,8 @@ pub mod theme {
     pub const ACCENT: Color32 = Color32::from_rgb(0xA8, 0xE6, 0xA1);
     pub const ACCENT_TEXT: Color32 = BG;
     pub const DANGER: Color32 = Color32::from_rgb(0xE0, 0x5A, 0x5A);
+    /// Epics: their chips, sidebar cards and stripes.
+    pub const EPIC: Color32 = Color32::from_rgb(0xB4, 0x8E, 0xDE);
 
     /// Font family holding the filled Phosphor icons (same codepoints as the regular set).
     pub const ICON_FILL: &str = "phosphor-fill";

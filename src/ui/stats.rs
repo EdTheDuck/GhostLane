@@ -59,6 +59,31 @@ pub fn show(ctx: &egui::Context, name: &str, s: &Stats, today: u64) -> bool {
                 ui.end_row();
             }
         });
+        if !s.epics.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Epics").strong());
+            egui::Grid::new("epic_stats").spacing([16.0, 4.0]).show(ui, |ui| {
+                for (id, title, done, total, tokens) in &s.epics {
+                    ui.label(
+                        RichText::new(crate::ticket::format_id(*id))
+                            .monospace()
+                            .color(theme::EPIC),
+                    );
+                    ui.scope(|ui| {
+                        ui.set_width(460.0);
+                        ui.add(egui::Label::new(title).truncate());
+                    });
+                    ui.label(RichText::new(format!("{done} / {total} done")).color(theme::TEXT_MUTED));
+                    let tokens = if *tokens > 0 {
+                        format!("{} tokens", crate::ticket::compact(*tokens))
+                    } else {
+                        String::new()
+                    };
+                    ui.label(RichText::new(tokens).color(theme::TEXT_MUTED));
+                    ui.end_row();
+                }
+            });
+        }
         close
     });
     modal.inner || modal.should_close()

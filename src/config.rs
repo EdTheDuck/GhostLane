@@ -178,6 +178,8 @@ pub struct AppConfig {
     pub terminal_collapsed: bool,
     /// The queue beside the terminal is hidden; it shows by default.
     pub queue_closed: bool,
+    /// The epics sidebar is collapsed to its button; it shows by default.
+    pub epics_closed: bool,
     pub settings: Settings,
     /// Keyed by .ghost path.
     pub projects: HashMap<PathBuf, ProjectSettings>,
