@@ -41,6 +41,7 @@ pub enum ViewOutcome {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ViewTab {
     Details,
+    TestScope,
     Changes,
 }
 
@@ -168,7 +169,11 @@ pub fn view(
         tabs(
             ui,
             &mut state.tab,
-            &[(ViewTab::Details, "Details"), (ViewTab::Changes, "Changes")],
+            &[
+                (ViewTab::Details, "Details"),
+                (ViewTab::TestScope, "Test Scope"),
+                (ViewTab::Changes, "Changes"),
+            ],
         );
         if state.tab != before {
             // The app loads the changes on the next frame.
@@ -180,12 +185,10 @@ pub fn view(
                 outcome = Some(ViewOutcome::Edit);
             }
             ui.separator();
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                if state.tab == ViewTab::Changes {
-                    changes_tab(ui, state, done, last, &mut outcome);
-                } else {
-                    details_tab(ui, state, t, cache);
-                }
+            ui.with_layout(Layout::top_down(Align::Min), |ui| match state.tab {
+                ViewTab::Details => details_tab(ui, state, t, cache),
+                ViewTab::TestScope => test_scope_tab(ui, t, cache),
+                ViewTab::Changes => changes_tab(ui, state, done, last, &mut outcome),
             });
         });
     });
@@ -205,14 +208,13 @@ pub fn view(
     outcome
 }
 
-/// Description, test scope, notes and run history.
+/// Description, notes and run history.
 fn details_tab(ui: &mut Ui, state: &TicketView, t: &Ticket, cache: &mut CommonMarkCache) {
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        // Description always shows; the optional sections only when they have text.
-        let sections = [("Test Scope", &t.test_scope), ("Notes", &t.notes)];
-        let shown = sections.into_iter().filter(|(_, text)| !text.trim().is_empty());
+        // Description always shows; notes only when they have text.
+        let notes = Some(("Notes", &t.notes)).filter(|(_, text)| !text.trim().is_empty());
         for (i, (heading, text)) in std::iter::once(("Description", &t.description))
-            .chain(shown)
+            .chain(notes)
             .enumerate()
         {
             if i > 0 {
@@ -235,6 +237,16 @@ fn details_tab(ui: &mut Ui, state: &TicketView, t: &Ticket, cache: &mut CommonMa
                 });
             }
             run_history(ui, &t.runs);
+        }
+    });
+}
+
+fn test_scope_tab(ui: &mut Ui, t: &Ticket, cache: &mut CommonMarkCache) {
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        if t.test_scope.trim().is_empty() {
+            ui.label(RichText::new("No test scope yet.").color(theme::TEXT_MUTED));
+        } else {
+            markdown(ui, cache, &t.test_scope);
         }
     });
 }
@@ -1188,6 +1200,17 @@ mod tests {
         h.set_size(vec2(1200.0, 800.0));
         h.run_steps(3);
         h
+    }
+
+    #[test]
+    fn test_scope_has_its_own_tab() {
+        let mut h = view_harness(TicketView::new(5, None), false);
+        h.state_mut().1.test_scope = "valid login works".into();
+        h.run();
+        assert!(h.query_by_label("valid login works").is_none());
+        h.get_by_label("Test Scope").click();
+        h.run();
+        assert!(h.query_by_label("valid login works").is_some());
     }
 
     #[test]
