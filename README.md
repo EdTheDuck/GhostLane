@@ -103,7 +103,7 @@ Every ticket has:
 - an optional **Blocked by** list of tickets that have to be finished first
 - a **run history**: every time the AI worked on it, how long it took, where the ticket went, how it ended and, with Claude Code, how many tokens it used
 
-Click a card to read it: the description, notes and run history on cards of their own, the test scope on its own tab, and a sidebar with its priority, runs, tokens, labels (click one to filter the board by it) and the tickets it blocks or waits for. **Edit** at the bottom right opens it for changes and **Delete** at the bottom left throws it away. Right-click a card to **Edit**, **Duplicate** or **Delete** it. Deleted tickets go to your Recycle Bin or Trash, and **Ctrl+Z** puts them straight back.
+Click a card to read it: the description, notes and run history on cards of their own, the test scope on its own tab, a card with its title and labels (click one to filter the board by it), and a sidebar with its priority, runs, tokens and the tickets it blocks or waits for. **Edit** at the bottom right opens it for changes and **Delete** at the bottom left throws it away. Right-click a card to **Edit**, **Duplicate** or **Delete** it. Deleted tickets go to your Recycle Bin or Trash, and **Ctrl+Z** puts them straight back.
 
 ![A ticket opened for reading, with its labels, the ticket it blocks and a run history with token counts](docs/screenshots/ticket-view.png)
 

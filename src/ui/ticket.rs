@@ -110,10 +110,13 @@ pub fn view(
     let modal = super::show_modal(ctx, "view_ticket", |ui| {
         ui.set_width(size.x);
         ui.set_height(size.y);
-        if super::modal_close(ui, "Close") {
+        // Like the app: a bar on top, everything below it on the darker background.
+        let background = ui.painter().add(egui::Shape::Noop);
+        if top_bar(ui, t, column) {
             outcome = Some(ViewOutcome::Close);
         }
-        header(ui, t, column);
+        let below = ui.max_rect().top() - super::MODAL_PADDING + super::chrome::BAR_HEIGHT;
+        title_card(ui, t, links, &mut outcome);
         // Footer first, from the bottom up, so the body above gets whatever height is left.
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.horizontal(|ui| {
@@ -153,6 +156,21 @@ pub fn view(
                 });
             });
         });
+        // The modal's fill runs MODAL_PADDING past its contents, inside its border.
+        let pad = super::MODAL_PADDING;
+        let max = ui.max_rect();
+        let body = egui::Rect::from_min_max(
+            egui::pos2(max.left() - pad, below),
+            egui::pos2(max.right() + pad, max.bottom() + pad),
+        );
+        let r = inner_radius(ui);
+        let corners = egui::CornerRadius {
+            sw: r,
+            se: r,
+            ..Default::default()
+        };
+        ui.painter()
+            .set(background, egui::Shape::rect_filled(body, corners, theme::BG));
     });
     if state.confirm_revert {
         let commit = state.commit.clone().unwrap_or_default();
@@ -172,63 +190,103 @@ pub fn view(
 
 const RADIUS: u8 = 6;
 
-/// Number, column and title on a dark band across the top of the modal, out to its edges so the close button sits
-/// wholly on it, with a stripe in the priority's colour down its left edge.
-fn header(ui: &mut Ui, t: &Ticket, column: &str) {
+/// Corner radius of the modal's fill, inside its border.
+fn inner_radius(ui: &Ui) -> u8 {
+    let visuals = ui.visuals();
+    (f32::from(visuals.menu_corner_radius.nw) - visuals.window_stroke.width).max(0.0) as u8
+}
+
+/// Number, column and a close button on a bar across the top of the modal, out to its edges, like the app's top
+/// bar. True when the close button is clicked.
+fn top_bar(ui: &mut Ui, t: &Ticket, column: &str) -> bool {
+    let pad = super::MODAL_PADDING;
+    let max = ui.max_rect();
+    let bar = egui::Rect::from_min_max(
+        max.min - vec2(pad, pad),
+        egui::pos2(max.right() + pad, max.top() - pad + super::chrome::BAR_HEIGHT),
+    );
+    // The close button as far from the right edge as from the top and bottom.
+    let inset = (super::chrome::BAR_HEIGHT - 30.0) / 2.0;
+    let layout = Layout::left_to_right(Align::Center);
+    // A child the parent doesn't grow around: the bar sticks out above the contents, into the modal's padding.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(layout));
+    // Below it, the same gap as at the sides.
+    let gap = pad - ui.spacing().item_spacing.y;
+    ui.allocate_space(vec2(max.width(), bar.bottom() - max.top() + gap));
+    let ui = &mut child;
+    ui.add_space(pad);
+    ui.label(
+        RichText::new(t.id_str())
+            .monospace()
+            .size(16.0)
+            .color(theme::TEXT_MUTED),
+    );
+    // Not a pill, so it doesn't read as a label.
+    let text = format!("{}  {column}", icon::KANBAN);
+    ui.label(RichText::new(text).color(theme::TEXT_MUTED));
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.add_space(inset);
+        super::icon_button(ui, icon::X, "Close").clicked()
+    })
+    .inner
+}
+
+/// Priority icon, title and labels on a card with a stripe in the priority's colour down its left edge. Clicking a
+/// label filters the board by it.
+fn title_card(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<ViewOutcome>) {
     const STRIPE: f32 = 4.0;
-    // Painted behind the contents once their size is known.
-    let background = ui.painter().add(egui::Shape::Noop);
-    let band = egui::Frame::new()
-        // Room on the right for the close button.
+    let card = egui::Frame::new()
+        .fill(theme::CARD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(RADIUS)
         .inner_margin(egui::Margin {
+            left: 20,
             right: 16,
-            bottom: 16,
-            ..Default::default()
+            top: 14,
+            bottom: 14,
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t.id_str())
-                        .monospace()
-                        .size(16.0)
-                        .color(theme::TEXT_MUTED),
-                );
-                // Not a pill, so it doesn't read as a label.
-                let text = format!("{}  {column}", icon::KANBAN);
-                ui.label(RichText::new(text).color(theme::TEXT_MUTED));
+                ui.label(priority_icon(t.priority).size(22.0))
+                    .on_hover_text(format!("{} priority", t.priority.label()));
+                ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
             });
-            ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
+            if !t.labels.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for l in &t.labels {
+                        let picked = links.filtered.iter().any(|f| f.to_lowercase() == l.to_lowercase());
+                        let tip = if picked {
+                            format!("Stop filtering by {l}")
+                        } else {
+                            format!("Show only tickets labelled {l}")
+                        };
+                        if super::label_chip(ui, l, Some(picked)).on_hover_text(tip).clicked() {
+                            *outcome = Some(ViewOutcome::FilterByLabel(l.clone()));
+                        }
+                    }
+                });
+            }
         });
-    // The modal's fill runs MODAL_PADDING past its contents, inside its border; the band covers that top part.
-    let r = band.response.rect;
-    let pad = super::MODAL_PADDING;
-    let rect = egui::Rect::from_min_max(r.min - vec2(pad, pad), egui::pos2(r.right() + pad, r.bottom()));
-    let visuals = ui.visuals();
-    let radius = (f32::from(visuals.menu_corner_radius.nw) - visuals.window_stroke.width).max(0.0) as u8;
-    let top = |nw, ne| egui::CornerRadius {
-        nw,
-        ne,
+    let r = card.response.rect;
+    let stripe = egui::Rect::from_min_size(r.min, vec2(STRIPE, r.height()));
+    let corners = egui::CornerRadius {
+        nw: RADIUS,
+        sw: RADIUS,
         ..Default::default()
     };
-    let stripe = egui::Rect::from_min_size(rect.min, vec2(STRIPE, rect.height()));
-    ui.painter().set(
-        background,
-        egui::Shape::Vec(vec![
-            egui::Shape::rect_filled(rect, top(radius, radius), theme::BG),
-            egui::Shape::rect_filled(stripe, top(radius, 0), super::priority_color(t.priority)),
-        ]),
-    );
-    ui.add_space(6.0);
+    ui.painter()
+        .rect_filled(stripe, corners, super::priority_color(t.priority));
 }
 
-/// Priority, runs, tokens, when it was done, labels and linked tickets, down the right of the view.
+/// Priority, runs, tokens, when it was done and linked tickets, down the right of the view.
 fn sidebar(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<ViewOutcome>) {
     const WIDTH: f32 = 260.0;
     const MARGIN: i8 = 16;
     let height = ui.available_height() - 2.0 * f32::from(MARGIN);
     egui::Frame::new()
-        .fill(theme::BG)
+        .fill(theme::PANEL)
         .corner_radius(RADIUS)
         .inner_margin(MARGIN)
         .show(ui, |ui| {
@@ -264,23 +322,6 @@ fn sidebar_fields(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<V
     if let Some(done) = t.done_at {
         caption(ui, "Done", theme::TEXT_MUTED);
         ui.label(crate::ticket::readable_utc(&crate::ticket::utc_timestamp(done)));
-    }
-    if !t.labels.is_empty() {
-        caption(ui, "Labels", theme::TEXT_MUTED);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-            for l in &t.labels {
-                let picked = links.filtered.iter().any(|f| f.to_lowercase() == l.to_lowercase());
-                let tip = if picked {
-                    format!("Stop filtering by {l}")
-                } else {
-                    format!("Show only tickets labelled {l}")
-                };
-                if super::label_chip(ui, l, Some(picked)).on_hover_text(tip).clicked() {
-                    *outcome = Some(ViewOutcome::FilterByLabel(l.clone()));
-                }
-            }
-        });
     }
     let waiting = links.blocked_by.iter().any(|d| d.waiting == Some(true));
     let lock = if waiting {
