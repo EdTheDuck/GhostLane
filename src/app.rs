@@ -49,6 +49,9 @@ pub struct OpenProject {
     pub cursor: Option<u32>,
     /// Scroll the cursor's card into view on the next frame.
     pub scroll_to_cursor: bool,
+    /// Is the project in a git repository with a commit, so its tickets can run in worktrees? Looked up the first
+    /// time parallel runs need to know.
+    pub git_repo: Option<bool>,
 }
 
 impl OpenProject {
@@ -67,6 +70,7 @@ impl OpenProject {
             filter_open: false,
             cursor: None,
             scroll_to_cursor: false,
+            git_repo: None,
         }
     }
 
@@ -147,9 +151,11 @@ pub enum Modal {
     },
 }
 
-/// The AI CLI that work was handed to, in the terminal of the project with .ghost `ghost`.
+/// The AI CLI that work was handed to, for the project with .ghost `ghost`.
 struct CliWatch {
     ghost: PathBuf,
+    /// Key of the terminal it runs in: the project's own, or a ticket's when tickets run in parallel.
+    session: PathBuf,
     program: &'static str,
     started: Instant,
     next_alive_check: Instant,
@@ -159,6 +165,7 @@ impl CliWatch {
     fn new(ghost: PathBuf, program: &'static str) -> Self {
         let now = Instant::now();
         CliWatch {
+            session: ghost.clone(),
             ghost,
             program,
             started: now,
@@ -173,7 +180,7 @@ impl CliWatch {
             return false;
         }
         self.next_alive_check = now + Duration::from_secs(2);
-        !terminals.runs(&self.ghost, self.program)
+        !terminals.runs(&self.session, self.program)
     }
 }
 
@@ -220,6 +227,8 @@ struct AiRun {
     /// The CLI's completion hook touches this when it finishes. `None` = the CLI has no hook, so a quiet
     /// terminal counts as finished.
     marker: Option<PathBuf>,
+    /// The project folder inside the ticket's own worktree, when tickets run in parallel.
+    worktree: Option<PathBuf>,
 }
 
 /// How a run ended.
@@ -247,6 +256,12 @@ enum Job {
         output: String,
     },
     GitFailed(String),
+    /// Ticket `id`'s branch clashes with the main checkout in these files, so it wasn't merged.
+    MergeConflict {
+        ghost: PathBuf,
+        id: u32,
+        files: Vec<String>,
+    },
     /// Reverting ticket `id`'s commit in project `ghost` finished.
     Reverted {
         ghost: PathBuf,
@@ -283,6 +298,8 @@ pub struct App {
     md_cache: CommonMarkCache,
     terminals: Terminals,
     terminal_focused: bool,
+    /// The terminal shown: a parallel run's, or `None` for the project's own.
+    terminal_tab: Option<PathBuf>,
     generating: Option<Generation>,
     /// Is the active project's AI CLI running in its terminal? Refreshed every couple of seconds.
     cli_running: bool,
@@ -349,6 +366,7 @@ impl App {
             ai_request: None,
             ai_runs: Vec::new(),
             checks: Vec::new(),
+            terminal_tab: None,
             undo: Vec::new(),
             jobs_tx,
             jobs_rx,
@@ -906,10 +924,7 @@ impl App {
     /// Completion hook files for the project with .ghost `key`, with the Claude Code settings written.
     /// `None` when they can't be set up; runs then finish once the terminal goes quiet.
     fn done_hook(key: &Path) -> Option<terminal::DoneHook> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::hash::DefaultHasher::new();
-        key.hash(&mut hasher);
-        let name = format!("{:016x}", hasher.finish());
+        let name = key_name(key);
         let dir = crate::config::config_dir()?.join("hooks");
         let hook = terminal::DoneHook {
             exe: std::env::current_exe().ok().map(strip_unc)?,
@@ -924,29 +939,41 @@ impl App {
         Some(hook)
     }
 
-    /// Shell command that starts `cli`, with its completion hook when it has one, and `prompt`.
-    /// Also returns the hook's marker file.
-    fn cli_launch(&self, key: &Path, cli: &'static terminal::AiCli, prompt: Option<&str>) -> (String, Option<PathBuf>) {
+    /// Shell command that starts `cli`, with its completion hook when it has one, and `prompt`; `extra_dir` is
+    /// one more folder it may work in. Also returns the hook's marker file.
+    fn cli_launch(
+        &self,
+        key: &Path,
+        cli: &'static terminal::AiCli,
+        prompt: Option<&str>,
+        extra_dir: Option<&Path>,
+    ) -> (String, Option<PathBuf>) {
         let shell = terminal::detect_shell(self.config.settings.shell.as_deref()).0;
         let hook = Self::done_hook(key);
         let args = hook.as_ref().and_then(|h| terminal::done_hook_args(cli, h, &shell));
         let marker = hook.filter(|_| args.is_some()).map(|h| h.marker);
+        let dir_args = extra_dir.and_then(|d| terminal::add_dir_args(cli, d, &shell));
+        let args = match (args, dir_args) {
+            (Some(a), Some(d)) => Some(format!("{a} {d}")),
+            (a, d) => a.or(d),
+        };
         (terminal::cli_command(cli, args.as_deref(), prompt, &shell), marker)
     }
 
-    /// Hands `prompt` to the project's AI CLI in its terminal: typed into the CLI when it is already
-    /// running there, otherwise run as a command that starts the CLI with the prompt. Returns the marker
-    /// file the CLI's completion hook touches, if it was started with one.
+    /// Hands `prompt` to the AI CLI in terminal `key`: typed into the CLI when it is already running there,
+    /// otherwise run as a command that starts the CLI with the prompt (and `extra_dir` to work in too). Returns the
+    /// marker file the CLI's completion hook touches, if it was started with one.
     fn send_to_cli(
         &mut self,
         key: &Path,
         root: &Path,
         cli: &'static terminal::AiCli,
         prompt: &str,
+        extra_dir: Option<&Path>,
         ctx: &egui::Context,
     ) -> Result<Option<PathBuf>, String> {
         let shell = self.config.settings.shell.clone();
-        let (command, mut marker) = self.cli_launch(key, cli, Some(prompt));
+        let (command, mut marker) = self.cli_launch(key, cli, Some(prompt), extra_dir);
         if self.config.terminal_collapsed {
             self.config.terminal_collapsed = false;
             self.save_config();
@@ -981,7 +1008,10 @@ impl App {
     /// Play button: hands ticket `id` to the AI now, or queues it while the AI is on another ticket.
     fn play(&mut self, id: u32, ctx: &egui::Context) {
         let Some(i) = self.active else { return };
-        if !self.ai_engaged(i) {
+        self.check_git(i);
+        if self.is_running(i, id) {
+            self.toast(format!("{} is already with the AI", crate::ticket::format_id(id)));
+        } else if !self.ai_engaged(i) {
             self.run_ai(i, id, ctx);
         } else if self.projects[i].queue.contains(&id) {
             self.toast(format!("{} is already queued", crate::ticket::format_id(id)));
@@ -990,9 +1020,49 @@ impl App {
         }
     }
 
-    /// Is project `i`'s AI on a ticket from the play button, or are tickets waiting for it? Play buttons queue then.
+    /// Is project `i`'s AI as busy as it gets, or are tickets waiting for it? Play buttons queue then.
     fn ai_engaged(&self, i: usize) -> bool {
-        (self.next_queued(i).is_some() && !self.projects[i].paused) || self.ai_running(i)
+        (self.next_queued(i).is_some() && !self.projects[i].paused) || self.ai_full(i)
+    }
+
+    /// Do project `i`'s tickets run in parallel, each in a worktree of its own?
+    fn parallel(&self, i: usize) -> bool {
+        self.config.settings.parallel_runs && self.projects[i].git_repo == Some(true)
+    }
+
+    /// Looks up whether project `i` is in a git repository, the first time parallel runs need to know.
+    fn check_git(&mut self, i: usize) {
+        let op = &mut self.projects[i];
+        if self.config.settings.parallel_runs
+            && op.git_repo.is_none()
+            && let Ok(p) = &op.project
+        {
+            op.git_repo = Some(crate::git::head(&p.root).is_some());
+        }
+    }
+
+    /// Can project `i` start no more tickets? It runs one at a time, or with parallel runs, up to the limit.
+    fn ai_full(&self, i: usize) -> bool {
+        let Ok(p) = &self.projects[i].project else {
+            return true;
+        };
+        let ours = |run: &AiRun| run.cli.ghost == p.ghost_path;
+        let running =
+            self.ai_runs.iter().filter(|r| ours(r)).count() + self.checks.iter().filter(|c| ours(&c.run)).count();
+        let limit = match self.parallel(i) {
+            true => self.config.settings.max_parallel_runs.max(1) as usize,
+            false => 1,
+        };
+        running >= limit
+    }
+
+    /// Is ticket `id` of project `i` with the AI, or being checked by its test command?
+    fn is_running(&self, i: usize, id: u32) -> bool {
+        let Ok(p) = &self.projects[i].project else {
+            return false;
+        };
+        let it = |run: &AiRun| run.cli.ghost == p.ghost_path && run.id == id;
+        self.ai_runs.iter().any(it) || self.checks.iter().any(|c| it(&c.run))
     }
 
     /// Position in project `i`'s queue of the first ticket not waiting for others.
@@ -1023,8 +1093,10 @@ impl App {
             .partition(|c| c.run.cli.ghost == key);
         self.checks = others;
         let mut errors = Vec::new();
+        let mut sessions = Vec::new();
         for run in stopped.iter().chain(checks.iter().map(|c| &c.run)) {
             errors.extend(record_run(p, run, elapsed(run), RunResult::Stopped).err());
+            sessions.push(run.cli.session.clone());
         }
         for e in errors {
             self.toast(e);
@@ -1037,8 +1109,10 @@ impl App {
         else {
             return;
         };
-        if let Some(session) = self.terminals.live_mut(&key) {
-            session.interrupt(cli.interrupt);
+        for key in sessions {
+            if let Some(session) = self.terminals.live_mut(&key) {
+                session.interrupt(cli.interrupt);
+            }
         }
     }
 
@@ -1050,6 +1124,9 @@ impl App {
         let Some((col, t)) = p.find_ticket(id) else {
             return false;
         };
+        if self.is_running(pi, id) {
+            return false;
+        }
         let (key, root, mut t) = (p.ghost_path.clone(), p.root.clone(), t.clone());
         let from = p.meta.columns[col].folder.clone();
         let cli = match self.project_cli(p) {
@@ -1069,17 +1146,34 @@ impl App {
             (Some(to), Some(file)) => p.column_dir(to).join(file),
             _ => t.path.clone(),
         };
-        let prompt = match terminal::fill_prompt(&template, &ai_path, &t.id_str(), &root) {
+        let mut prompt = match terminal::fill_prompt(&template, &ai_path, &t.id_str(), &root) {
             Ok(prompt) => prompt,
             Err(e) => {
                 self.toast(e);
                 return false;
             }
         };
+        // In parallel, the ticket works in a worktree and a terminal of its own.
+        // ponytail: sets the worktree up on the UI thread; move it to a background job if big repos make it lag.
+        let (session, cwd, worktree) = if self.parallel(pi) {
+            match ticket_worktree(&key, &root, id) {
+                Ok(dir) => (run_session(&key, id), dir.clone(), Some(dir)),
+                Err(e) => {
+                    self.toast(format!("Couldn't set up a worktree for {}: {e}", t.id_str()));
+                    return false;
+                }
+            }
+        } else {
+            (key.clone(), root.clone(), None)
+        };
+        if worktree.is_some() {
+            prompt.push_str(&worktree_note(&ai_path));
+        }
         let started_at = std::time::SystemTime::now();
         // Takes milliseconds; outside a repository there is just nothing to show later.
-        let base = crate::git::head(&root);
-        let marker = match self.send_to_cli(&key, &root, cli, &prompt, ctx) {
+        let base = crate::git::head(&cwd);
+        let extra_dir = worktree.as_ref().map(|_| root.as_path());
+        let marker = match self.send_to_cli(&session, &cwd, cli, &prompt, extra_dir, ctx) {
             Ok(marker) => marker,
             Err(e) => {
                 self.toast(e);
@@ -1104,13 +1198,16 @@ impl App {
         for e in errors {
             self.toast(e);
         }
+        let mut watch = CliWatch::new(key, cli.program);
+        watch.session = session;
         self.ai_runs.push(AiRun {
-            cli: CliWatch::new(key, cli.program),
+            cli: watch,
             id,
             from,
             started_at,
             marker,
             base,
+            worktree,
         });
         true
     }
@@ -1119,7 +1216,7 @@ impl App {
     /// goes quiet.
     fn run_end(&self, run: &mut AiRun, now: Instant) -> Option<RunEnd> {
         let Some(marker) = &run.marker else {
-            let output = self.terminals.last_output(&run.cli.ghost);
+            let output = self.terminals.last_output(&run.cli.session);
             return (!ai_activity(Some(run.cli.started), output, None, now).0).then_some(RunEnd::Finished);
         };
         let modified = std::fs::metadata(marker).and_then(|m| m.modified());
@@ -1153,6 +1250,13 @@ impl App {
         let ended_ghosts: Vec<PathBuf> = ended.iter().map(|(run, _)| run.cli.ghost.clone()).collect();
         for (run, end) in ended {
             let ghost = run.cli.ghost.clone();
+            // The branch holds the ticket's work between runs and until it merges.
+            if let Some(dir) = &run.worktree
+                && let Err(e) = crate::git::save_worktree(dir, &format!("Work on {}", format_id(run.id)))
+            {
+                let msg = format!("Couldn't save {}'s work in its worktree: {e}", format_id(run.id));
+                self.toasts.push((msg, Instant::now()));
+            }
             let Some(p) = self
                 .projects
                 .iter_mut()
@@ -1188,7 +1292,7 @@ impl App {
                 let (tx, ctx2, root, shell) = (
                     self.jobs_tx.clone(),
                     ctx.clone(),
-                    p.root.clone(),
+                    run.worktree.clone().unwrap_or_else(|| p.root.clone()),
                     settings.shell.clone(),
                 );
                 let (job_ghost, job_id, script) = (ghost.clone(), run.id, command.clone());
@@ -1260,17 +1364,25 @@ impl App {
         }
     }
 
-    /// Starts project `i`'s next queued ticket, or with an empty queue, the next one from its Auto columns,
-    /// unless its AI is busy or paused.
+    /// Starts project `i`'s next queued tickets, or with an empty queue, the next ones from its Auto columns, until
+    /// its AI is as busy as it gets, unless it is paused.
     fn start_next(&mut self, i: usize, order: crate::project::AutoOrder, run_limit: u32, ctx: &egui::Context) {
-        if self.projects[i].paused || self.projects[i].project.is_err() || self.ai_running(i) {
-            return;
+        self.check_git(i);
+        while !self.projects[i].paused && self.projects[i].project.is_ok() && !self.ai_full(i) {
+            if !self.start_one(i, order, run_limit, ctx) {
+                return;
+            }
         }
+    }
+
+    /// Starts project `i`'s next queued ticket, or with an empty queue, the next one from its Auto columns. False
+    /// when nothing started.
+    fn start_one(&mut self, i: usize, order: crate::project::AutoOrder, run_limit: u32, ctx: &egui::Context) -> bool {
         // Queued tickets waiting for others stay queued until those are done.
         while let Some(pos) = self.next_queued(i) {
             let id = self.projects[i].queue.remove(pos);
             if self.run_ai(i, id, ctx) {
-                return;
+                return true;
             }
         }
         let op = &self.projects[i];
@@ -1280,7 +1392,7 @@ impl App {
             .ok()
             .and_then(|p| p.next_auto(&op.auto, order, run_limit))
         else {
-            return;
+            return false;
         };
         let started = self.run_ai(i, id, ctx);
         let op = &mut self.projects[i];
@@ -1295,7 +1407,9 @@ impl App {
                 "Auto turned off: {} didn't start",
                 crate::ticket::format_id(id)
             ));
+            return false;
         }
+        true
     }
 
     /// Picks up work finished on background threads: test commands and commits.
@@ -1303,6 +1417,29 @@ impl App {
         while let Ok(job) = self.jobs_rx.try_recv() {
             match job {
                 Job::GitFailed(e) => self.toast(e),
+                Job::MergeConflict { ghost, id, files } => {
+                    // Back to the start; its next run takes in what changed and sorts out the clash.
+                    let Some(p) = self.project_mut(&ghost) else { continue };
+                    let _ = p.rescan();
+                    let Some(mut t) = p.find_ticket(id).map(|(_, t)| t.clone()) else {
+                        continue;
+                    };
+                    t.done_at = None;
+                    let note = format!(
+                        "Couldn't merge this ticket's work: it clashes with changes made since in {}. The next run \
+                         takes those changes into its worktree to sort out.",
+                        files.join(", ")
+                    );
+                    t.notes = append_note(&t.notes, &note);
+                    let back = t.save().and_then(|()| p.move_ticket(&t.path, 0));
+                    self.toast(match back {
+                        Ok(()) => format!(
+                            "{}'s work clashes with newer changes; it went back to the start",
+                            t.id_str()
+                        ),
+                        Err(e) => format!("Couldn't send {} back: {e}", t.id_str()),
+                    });
+                }
                 Job::Reverted { id, result: Err(e), .. } => {
                     self.toast(format!("Couldn't revert {}: {e}", format_id(id)))
                 }
@@ -1411,16 +1548,37 @@ impl App {
         if let Err(e) = t.save().and_then(|()| p.rescan()) {
             self.toast(format!("Couldn't update {}: {e}", t.id_str()));
         }
-        if !settings.commit {
+        // A ticket that ran in parallel brings its worktree's work back now; its terminal has done its job.
+        let branch = crate::git::ticket_branch(&t.id_str());
+        let worktree = crate::git::worktree_of(&root, &branch);
+        if worktree.is_some() {
+            let session = run_session(ghost, id);
+            self.terminals.restart(&session);
+            if self.terminal_tab.as_ref() == Some(&session) {
+                self.terminal_tab = None;
+            }
+        } else if !settings.commit {
             return;
         }
         let message = format!("{}: {}", t.id_str(), t.title.replace(['\n', '\r'], " "));
-        let (tx, ctx) = (self.jobs_tx.clone(), ctx.clone());
+        let (tx, ctx, ghost) = (self.jobs_tx.clone(), ctx.clone(), ghost.to_path_buf());
         // ponytail: commits in the background, so a ticket Auto starts next could slip edits in; it starts
         // seconds later, and the git commands take milliseconds.
         std::thread::spawn(move || {
-            if let Err(e) = crate::git::commit(&root, &message, settings.push) {
-                let _ = tx.send(Job::GitFailed(format!("Couldn't commit {}: {e}", format_id(id))));
+            let job = match worktree {
+                Some(top) => match finish_worktree(&root, &top, &branch, &message, &settings) {
+                    Ok(()) => None,
+                    Err(crate::git::MergeError::Conflicts(files)) => Some(Job::MergeConflict { ghost, id, files }),
+                    Err(crate::git::MergeError::Failed(e)) => {
+                        Some(Job::GitFailed(format!("Couldn't merge {}: {e}", format_id(id))))
+                    }
+                },
+                None => crate::git::commit(&root, &message, settings.push)
+                    .err()
+                    .map(|e| Job::GitFailed(format!("Couldn't commit {}: {e}", format_id(id)))),
+            };
+            if let Some(job) = job {
+                let _ = tx.send(job);
                 ctx.request_repaint();
             }
         });
@@ -1464,7 +1622,7 @@ impl App {
             None => None,
         };
         let (key, root) = (p.ghost_path.clone(), p.root.clone());
-        self.send_to_cli(&key, &root, cli, prompt, ctx)?;
+        self.send_to_cli(&key, &root, cli, prompt, None, ctx)?;
         self.generating = Some(Generation {
             cli: CliWatch::new(key, cli.program),
             path,
@@ -1489,7 +1647,7 @@ impl App {
         let prompt =
             terminal::tickets_from_document_prompt(doc, &p.column_dir(0), &p.tickets_dir(), p.meta.next_ticket_id);
         let (key, root) = (p.ghost_path.clone(), p.root.clone());
-        self.send_to_cli(&key, &root, cli, &prompt, ctx).map(|_| ())
+        self.send_to_cli(&key, &root, cli, &prompt, None, ctx).map(|_| ())
     }
 
     /// A file dropped on the window opens the document import with it (the import modal reads the drop itself).
@@ -1582,6 +1740,13 @@ impl App {
                 .size_range(100.0..=max)
         };
         let (key, cwd) = self.terminal_target();
+        let tabs = self.run_tabs(&key);
+        let shown = self
+            .terminal_tab
+            .clone()
+            .filter(|t| tabs.iter().any(|(tab, ..)| tab == t))
+            .unwrap_or_else(|| key.clone());
+        let mut close_tab = None;
         let (mut toggle_pause, mut stop) = (false, false);
         panel.frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1595,6 +1760,33 @@ impl App {
                     self.save_config();
                 }
                 ui.label(RichText::new(format!("{}  Terminal", icon::TERMINAL_WINDOW)).strong());
+                if !tabs.is_empty() {
+                    ui.add_space(8.0);
+                    if ui.selectable_label(shown == key, "Main").clicked() {
+                        self.terminal_tab = None;
+                    }
+                    for (tab, label, running) in &tabs {
+                        let text = match running {
+                            true => RichText::new(format!("{}  {label}", icon::CIRCLE)).color(theme::ACCENT),
+                            false => RichText::new(label),
+                        };
+                        let tip = match running {
+                            true => format!("{label} is running in its own worktree"),
+                            false => format!("{label}'s terminal. Right-click to close it."),
+                        };
+                        let response = ui.selectable_label(shown == *tab, text).on_hover_text(tip);
+                        if response.clicked() {
+                            self.terminal_tab = Some(tab.clone());
+                        }
+                        if !running {
+                            response.context_menu(|ui| {
+                                if ui.button("Close terminal").clicked() {
+                                    close_tab = Some(tab.clone());
+                                }
+                            });
+                        }
+                    }
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let queued = self.active.is_some_and(|i| !self.projects[i].queue.is_empty());
                     let idle = if queued { theme::ACCENT } else { theme::TEXT };
@@ -1654,7 +1846,7 @@ impl App {
                 ui.spacing_mut().item_spacing.x = GAP;
                 if !collapsed {
                     ui.allocate_ui_with_layout(vec2(terminal_width, size.y), Layout::top_down(Align::Min), |ui| {
-                        self.terminal_view(ui, &key, &cwd);
+                        self.terminal_view(ui, &shown, &cwd);
                     });
                 }
                 if queue_open {
@@ -1674,6 +1866,9 @@ impl App {
                 }
             });
         });
+        if let Some(tab) = close_tab {
+            self.terminals.restart(&tab);
+        }
         if let Some(i) = self.active {
             if stop {
                 self.stop_ai(i);
@@ -1683,14 +1878,32 @@ impl App {
         }
     }
 
+    /// Terminals of the parallel runs of the project whose own terminal is `main`: key, ticket number and whether
+    /// the AI is on it now. Sorted by ticket number.
+    fn run_tabs(&self, main: &Path) -> Vec<(PathBuf, String, bool)> {
+        let prefix = format!("{}#", main.display());
+        let mut tabs: Vec<_> = self
+            .terminals
+            .keys()
+            .filter_map(|k| {
+                let label = k.to_string_lossy().strip_prefix(&prefix)?.to_string();
+                let running = self.ai_runs.iter().any(|r| r.cli.session == *k);
+                Some((k.clone(), label, running))
+            })
+            .collect();
+        tabs.sort_by(|a, b| a.1.cmp(&b.1));
+        tabs
+    }
+
     fn terminal_view(&mut self, ui: &mut Ui, key: &Path, cwd: &Path) {
         let shell = self.config.settings.shell.clone();
         // A project's terminal opens with its AI CLI running, ready to use (worked out only when it opens:
         // that writes the completion hook's settings).
         let startup = match self.active_project() {
-            Some(p) if !self.terminals.contains(key) => {
-                self.project_cli(p).ok().map(|cli| self.cli_launch(key, cli, None).0)
-            }
+            Some(p) if !self.terminals.contains(key) && p.ghost_path == key => self
+                .project_cli(p)
+                .ok()
+                .map(|cli| self.cli_launch(key, cli, None, None).0),
             _ => None,
         };
         match self
@@ -2409,6 +2622,15 @@ fn append_note(notes: &str, note: &str) -> String {
 
 /// What ticket `t` changed: its commit when it has one, otherwise everything since its latest run started.
 fn load_changes(root: &Path, commit: Option<&str>, t: &Ticket) -> Result<crate::git::Changes, String> {
+    // Still in its own worktree: everything since it branched off (or last took in) the main checkout.
+    if commit.is_none()
+        && let Some(top) = crate::git::worktree_of(root, &crate::git::ticket_branch(&t.id_str()))
+    {
+        let main = crate::git::head(root).ok_or("The main checkout has no commit")?;
+        let dir = project_dir(&top, &crate::git::prefix(root)?);
+        let base = crate::git::merge_base(&dir, &main)?;
+        return crate::git::changes_since(&dir, &base);
+    }
     match (commit, t.base()) {
         (Some(c), _) => crate::git::commit_changes(root, c),
         (None, Some(base)) => crate::git::changes_since(root, base),
@@ -2420,6 +2642,70 @@ fn load_changes(root: &Path, commit: Option<&str>, t: &Ticket) -> Result<crate::
 
 /// Writes the ticket guide into the instructions file the project's AI CLI reads (CLAUDE.md for
 /// Claude Code, AGENTS.md for Codex, ...), plus Developer and Tester sub agents where the CLI has them.
+/// A short, stable-enough name for terminal key `key`, for files kept per terminal or project.
+fn key_name(key: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Terminal key of ticket `id`'s own terminal in project `ghost`, when tickets run in parallel.
+fn run_session(ghost: &Path, id: u32) -> PathBuf {
+    PathBuf::from(format!("{}#{}", ghost.display(), format_id(id)))
+}
+
+/// The project folder inside the worktree whose top folder is `top`; `prefix` is where the project sits in its
+/// repository.
+fn project_dir(top: &Path, prefix: &str) -> PathBuf {
+    match prefix {
+        "" => top.to_path_buf(),
+        p => top.join(p),
+    }
+}
+
+/// Sets up ticket `id`'s worktree for project `ghost` in `root` (see `git::prepare_worktree`), in GhostLane's own
+/// folder so nothing lands in the project. Returns the project folder inside it.
+fn ticket_worktree(ghost: &Path, root: &Path, id: u32) -> Result<PathBuf, String> {
+    let dir = crate::config::config_dir()
+        .ok_or("No folder for worktrees")?
+        .join("worktrees")
+        .join(key_name(ghost))
+        .join(format_id(id));
+    let top = crate::git::prepare_worktree(root, &dir, &crate::git::ticket_branch(&format_id(id)))?;
+    Ok(project_dir(&top, &crate::git::prefix(root)?))
+}
+
+/// Added to the prompt of a ticket running in its own worktree: work there, but the ticket file is the board's.
+fn worktree_note(ticket: &Path) -> String {
+    format!(
+        " (You are in a git worktree of your own for this ticket: make your changes here. The ticket file is {} in \
+         the main project; read and move that one, not the copy in this folder. If git reports merge conflicts \
+         here, resolve them first.)",
+        ticket.display().to_string().replace(['\n', '\r'], " ")
+    )
+}
+
+/// Brings a done ticket's worktree (top folder `top`, on `branch`) back into the main checkout at `root`: its work
+/// merged as staged changes, committed (and pushed) as `message` if the project commits, then the worktree goes.
+fn finish_worktree(
+    root: &Path,
+    top: &Path,
+    branch: &str,
+    message: &str,
+    settings: &crate::config::ProjectSettings,
+) -> Result<(), crate::git::MergeError> {
+    use crate::git::MergeError::Failed;
+    let dir = project_dir(top, &crate::git::prefix(root).map_err(Failed)?);
+    let id = branch.rsplit('/').next().unwrap_or(branch);
+    crate::git::save_worktree(&dir, &format!("Work on {id}")).map_err(Failed)?;
+    crate::git::squash_merge(root, branch)?;
+    if settings.commit {
+        crate::git::commit(root, message, settings.push).map_err(Failed)?;
+    }
+    crate::git::remove_worktree(root, top, branch).map_err(Failed)
+}
+
 fn write_ai_guide(p: &Project) -> Result<(), String> {
     let id = p.meta.ai_cli.as_deref().unwrap_or(terminal::DEFAULT_CLI);
     let Some(cli) = terminal::ai_cli(id) else { return Ok(()) };
@@ -2589,6 +2875,7 @@ mod tests {
             started_at: std::time::SystemTime::now(),
             marker: None,
             base: None,
+            worktree: None,
         };
         p.move_ticket(&t.path, 1).unwrap(); // the play button moved it to In Dev
         assert_eq!(moved(&p, &run), RunResult::Unmoved);
@@ -2610,6 +2897,47 @@ mod tests {
         };
         p.move_ticket(&at(&p), 0).unwrap();
         assert_eq!(moved(&p, &test_run), RunResult::SentBack);
+    }
+
+    #[test]
+    fn a_done_tickets_worktree_merges_back_and_commits() {
+        let d = tempfile::tempdir().unwrap();
+        // The project sits in a folder of the repository, not at its top.
+        let root = d.path().join("app");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Test"],
+            &["config", "user.email", "test@example.com"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(d.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        crate::git::commit(&root, "setup", false).unwrap();
+        let branch = crate::git::ticket_branch("00001");
+        let worktrees = tempfile::tempdir().unwrap();
+        let top = crate::git::prepare_worktree(&root, &worktrees.path().join("wt"), &branch).unwrap();
+        std::fs::write(project_dir(&top, "app/").join("a.txt"), "done").unwrap();
+        let settings = crate::config::ProjectSettings {
+            commit: true,
+            ..Default::default()
+        };
+        finish_worktree(&root, &top, &branch, "00001: Thing", &settings).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "done");
+        assert!(!top.exists());
+        assert!(crate::git::ticket_commit(&root, "00001", crate::ticket::now_secs()).is_some());
+
+        let note = worktree_note(Path::new("/p/tickets/in\ndev/00001.md"));
+        assert!(!note.contains('\n') && note.contains("/p/tickets/in dev/00001.md"));
+        assert_eq!(
+            run_session(Path::new("/p/p.ghost"), 7),
+            PathBuf::from("/p/p.ghost#00007")
+        );
     }
 
     #[test]

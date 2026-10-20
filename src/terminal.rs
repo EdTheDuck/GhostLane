@@ -16,6 +16,8 @@ pub struct AiCli {
     pub instructions_file: &'static str,
     /// Keys that stop the CLI's current turn without quitting it.
     pub interrupt: &'static [u8],
+    /// Flag that lets the CLI work on files in one more folder; `None` when it has none.
+    pub add_dir_flag: Option<&'static str>,
 }
 
 pub const DEFAULT_CLI: &str = "claude";
@@ -28,6 +30,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         prompt_flag: None,
         interrupt: b"\x1b",
         instructions_file: "CLAUDE.md",
+        add_dir_flag: Some("--add-dir"),
     },
     AiCli {
         id: "codex",
@@ -36,6 +39,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         prompt_flag: None,
         interrupt: b"\x1b",
         instructions_file: "AGENTS.md",
+        add_dir_flag: None,
     },
     AiCli {
         id: "gemini",
@@ -44,6 +48,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         prompt_flag: Some("-i"),
         interrupt: b"\x1b",
         instructions_file: "GEMINI.md",
+        add_dir_flag: Some("--include-directories"),
     },
     AiCli {
         id: "copilot",
@@ -52,6 +57,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         prompt_flag: Some("-i"),
         interrupt: b"\x1b",
         instructions_file: ".github/copilot-instructions.md",
+        add_dir_flag: None,
     },
     AiCli {
         id: "cursor",
@@ -60,6 +66,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         prompt_flag: None,
         interrupt: b"\x1b",
         instructions_file: "AGENTS.md",
+        add_dir_flag: None,
     },
     AiCli {
         id: "opencode",
@@ -68,6 +75,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         prompt_flag: Some("--prompt"),
         interrupt: b"\x1b",
         instructions_file: "AGENTS.md",
+        add_dir_flag: None,
     },
     AiCli {
         id: "aider",
@@ -76,6 +84,7 @@ pub const AI_CLIS: [AiCli; 7] = [
         prompt_flag: Some("--message"),
         interrupt: b"\x03",
         instructions_file: "CONVENTIONS.md",
+        add_dir_flag: None,
     },
 ];
 
@@ -195,6 +204,15 @@ pub fn cli_command(cli: &AiCli, extra: Option<&str>, prompt: Option<&str>, shell
         command = format!("{command} {flag}{}", quote(shell, prompt));
     }
     command
+}
+
+/// Arguments that let `cli` work on files in `dir` too, quoted for `shell`; `None` for CLIs that can't.
+pub fn add_dir_args(cli: &AiCli, dir: &Path, shell: &str) -> Option<String> {
+    Some(format!(
+        "{} {}",
+        cli.add_dir_flag?,
+        quote(shell, &dir.display().to_string())
+    ))
 }
 
 /// Command-line flag that runs GhostLane as a completion hook: it touches the file named next and exits.
@@ -563,6 +581,11 @@ impl Terminals {
         self.shell_pid(key).is_some_and(|pid| runs_program(pid, program))
     }
 
+    /// Keys of all sessions, alive or not.
+    pub fn keys(&self) -> impl Iterator<Item = &PathBuf> {
+        self.sessions.keys()
+    }
+
     /// Is there a session for `key`, alive or not?
     pub fn contains(&self, key: &Path) -> bool {
         self.sessions.contains_key(key)
@@ -688,6 +711,14 @@ mod tests {
         assert_eq!(posix, "claude 'Do 00007 at /p/tickets/to_do/00007.md in /p'");
         let gemini = build_ai_command(ai_cli("gemini").unwrap(), "Go", path, "1", Path::new("/p"), "/bin/bash");
         assert_eq!(gemini.unwrap(), "gemini -i 'Go'");
+        assert_eq!(
+            add_dir_args(claude(), Path::new("/p/it's"), "/bin/bash").unwrap(),
+            r"--add-dir '/p/it'\''s'"
+        );
+        assert_eq!(
+            add_dir_args(ai_cli("aider").unwrap(), Path::new("/p"), "/bin/bash"),
+            None
+        );
         let ps = build_ai_command(
             claude(),
             "it's {ticket_id}",

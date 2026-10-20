@@ -10,6 +10,7 @@ use crate::theme;
 const FONT_SIZES: std::ops::RangeInclusive<u8> = 10..=20;
 const RUN_LIMITS: std::ops::RangeInclusive<u32> = 1..=20;
 const ARCHIVE_DAYS: [u32; 6] = [0, 1, 3, 7, 14, 30];
+const PARALLEL_RUNS: std::ops::RangeInclusive<u32> = 2..=6;
 
 pub struct SettingsForm {
     ai_prompt: String,
@@ -24,6 +25,8 @@ pub struct SettingsForm {
     notify_failed: bool,
     notify_desktop: bool,
     archive_after_days: u32,
+    parallel_runs: bool,
+    max_parallel_runs: u32,
     detected_shell: String,
     installed: Vec<String>,
 }
@@ -48,6 +51,8 @@ impl SettingsForm {
             notify_failed: s.notify_failed,
             notify_desktop: s.notify_desktop,
             archive_after_days: s.archive_after_days,
+            parallel_runs: s.parallel_runs,
+            max_parallel_runs: s.max_parallel_runs,
             detected_shell: detect_shell(None).0,
             installed: detect_ai_clis(),
         }
@@ -153,6 +158,28 @@ impl SettingsForm {
                     });
                 super::pointer(combo.response);
             });
+            switch_row(
+                ui,
+                &mut self.parallel_runs,
+                RichText::new("Run tickets in parallel").strong(),
+            )
+            .on_hover_text(
+                "Each ticket the AI works on gets a git worktree and a terminal tab of its own, so several run at                  once without getting in each other's way. When a ticket reaches the last column its work is merged                  back. Only for projects in a git repository; others run one ticket at a time.",
+            );
+            if self.parallel_runs {
+                ui.horizontal(|ui| {
+                    ui.add_space(46.0);
+                    ui.label("At most");
+                    let combo = ComboBox::from_id_salt("max_parallel_runs")
+                        .selected_text(format!("{} tickets at once", self.max_parallel_runs))
+                        .show_ui(ui, |ui| {
+                            for n in PARALLEL_RUNS {
+                                ui.selectable_value(&mut self.max_parallel_runs, n, format!("{n} tickets at once"));
+                            }
+                        });
+                    super::pointer(combo.response);
+                });
+            }
             ui.add_space(8.0);
 
             ui.label(RichText::new("Notifications").strong());
@@ -258,6 +285,8 @@ impl SettingsForm {
             notify_failed: self.notify_failed,
             notify_desktop: self.notify_desktop,
             archive_after_days: self.archive_after_days,
+            parallel_runs: self.parallel_runs,
+            max_parallel_runs: self.max_parallel_runs,
         }
     }
 }
@@ -298,6 +327,8 @@ mod tests {
             notify_failed: false,
             notify_desktop: false,
             archive_after_days: 0,
+            parallel_runs: true,
+            max_parallel_runs: 5,
         });
         form.reset();
         let s = form.to_settings();
@@ -309,6 +340,8 @@ mod tests {
         assert_eq!(s.auto_run_limit, 6);
         assert!(s.notify_idle && s.notify_failed && s.notify_desktop);
         assert_eq!(s.archive_after_days, 7);
+        assert!(!s.parallel_runs);
+        assert_eq!(s.max_parallel_runs, 3);
         assert_eq!(s.ai_clis, Some(detect_ai_clis()));
     }
 

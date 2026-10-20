@@ -63,6 +63,8 @@ Want it hands-free? Flip the **Auto** switch on a column whose tickets the AI pi
 
 A ticket that keeps failing its tests won't loop forever: once it has been sent to the AI as many times as the **Auto run limit** in Settings (6 by default), Auto skips it and its card shows a red flag. Press ▶ to give it another go yourself, or right-click it and choose **Reset Run Count**.
 
+Got a big backlog? Turn on **Run tickets in parallel** in Settings and GhostLane works on several tickets at once (3 by default). Each ticket gets a git worktree of its own on a `ghostlane/<number>` branch, plus its own tab in the terminal bar, so the AIs never trip over each other's changes. The ticket keeps its worktree from development through testing, and when it reaches the last column its work is merged back into your project in one go, then committed and pushed if the project does that. If its changes clash with work merged since, it goes back to the start with a note, and its next run brings the newer code in to sort it out. Worktrees live in GhostLane's own folder, never in your project, and parallel runs only kick in for projects in a git repository.
+
 Need to step in? The terminal bar has a ⏸ **Pause** button that lets the AI finish the ticket it's on and then starts nothing new, and a ⏹ **Stop** button that interrupts the AI straight away, leaves the ticket where it is and pauses the queue. Press ▶ **Resume** when you're ready.
 
 GhostLane also gets your attention when you're in another window: the taskbar flashes (or the Dock icon bounces) when the AI has run out of work, and when a ticket fails and comes back to an earlier column. A desktop notification tells you each time a run ends, which column the ticket landed in, and whether the test command passed.
@@ -218,6 +220,7 @@ Click the ⚙ cog to choose:
 - the **Default AI command** the ▶ button sends for columns that don't have their own, with the placeholders `{ticket_path}`, `{ticket_id}` and `{project_dir}`
 - the **Auto order** your Auto columns work through tickets in: by priority or by number, ascending or descending
 - the **Auto run limit**: how many times a ticket can be sent to the AI before Auto skips it
+- **Run tickets in parallel**, each in its own git worktree, and how many at once (off by default)
 - **Archive done tickets**: how long a ticket stays in view in the last column before it's tucked away
 - **notifications**: whether GhostLane gets your attention when the AI runs out of work and when a ticket fails, and whether it pops up a desktop notification each time a run ends while you're working in another window
 - which **shell** to use (detected automatically by default)

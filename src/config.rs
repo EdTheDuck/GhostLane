@@ -33,6 +33,10 @@ pub struct Settings {
     pub notify_desktop: bool,
     /// Hide tickets that have been in the last column longer than this many days. 0 = never.
     pub archive_after_days: u32,
+    /// Run several tickets at once, each in a git worktree of its own.
+    pub parallel_runs: bool,
+    /// How many tickets a project runs at once when `parallel_runs` is on.
+    pub max_parallel_runs: u32,
 }
 
 impl Default for Settings {
@@ -49,6 +53,8 @@ impl Default for Settings {
             notify_failed: true,
             notify_desktop: true,
             archive_after_days: 7,
+            parallel_runs: false,
+            max_parallel_runs: 3,
         }
     }
 }

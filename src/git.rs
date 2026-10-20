@@ -1,4 +1,6 @@
 //! Commits (and pushes) a project's work when a ticket is done, shows what a ticket changed and reverts it.
+//! With parallel runs, each ticket works in a worktree of its own on a `ghostlane/<id>` branch, merged back (or
+//! opened as a pull request) when it is done.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,25 +22,39 @@ fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
 
 /// `git`, with `input` written to its stdin.
 fn git_with_input(root: &Path, args: &[&str], input: Option<&[u8]>) -> Result<std::process::Output, String> {
-    let mut child = no_window(Command::new("git").args(args).current_dir(root))
+    checked("git", args, run("git", root, args, input)?)
+}
+
+/// Runs `program args` in `root` whatever its exit code; errors only when it can't be started.
+fn run(program: &str, root: &Path, args: &[&str], input: Option<&[u8]>) -> Result<std::process::Output, String> {
+    let mut child = no_window(Command::new(program).args(args).current_dir(root))
         // Never wait on a credentials prompt nobody can see.
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GH_PROMPT_DISABLED", "1")
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Couldn't run git: {e}"))?;
+        .map_err(|e| format!("Couldn't run {program}: {e}"))?;
     if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
         // Dropped at the end of this block, so git sees the end of its input.
-        stdin.write_all(input).map_err(|e| format!("Couldn't run git: {e}"))?;
+        stdin
+            .write_all(input)
+            .map_err(|e| format!("Couldn't run {program}: {e}"))?;
     }
-    let out = child.wait_with_output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    child
+        .wait_with_output()
+        .map_err(|e| format!("Couldn't run {program}: {e}"))
+}
+
+/// `out`, or its last line of error output when it failed.
+fn checked(program: &str, args: &[&str], out: std::process::Output) -> Result<std::process::Output, String> {
     if out.status.success() {
         return Ok(out);
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     let msg = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed");
-    Err(format!("git {}: {}", args[0], msg.trim()))
+    Err(format!("{program} {}: {}", args[0], msg.trim()))
 }
 
 /// Stages everything in the repository holding `root` and commits it as `message`, then pushes if `push`.
@@ -164,6 +180,125 @@ fn cap(mut diff: String) -> String {
     diff.trim_start_matches('\n').to_string()
 }
 
+/// The branch ticket `id` works on in its worktree.
+pub fn ticket_branch(id: &str) -> String {
+    format!("ghostlane/{id}")
+}
+
+/// Where the project folder `root` sits in its repository: empty at the top, otherwise like `app/`.
+pub fn prefix(root: &Path) -> Result<String, String> {
+    Ok(stdout(git(root, &["rev-parse", "--show-prefix"])?))
+}
+
+/// Top folder of the worktree that has `branch` checked out, if one does.
+pub fn worktree_of(root: &Path, branch: &str) -> Option<PathBuf> {
+    let list = stdout(git(root, &["worktree", "list", "--porcelain"]).ok()?);
+    let want = format!("branch refs/heads/{branch}");
+    let mut path = None;
+    for line in list.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(p));
+        } else if line == want {
+            return path;
+        }
+    }
+    None
+}
+
+/// Makes sure `branch` has a worktree (a new one goes in `dir`, branched off the main checkout's HEAD) and brings
+/// the main checkout's latest commit into it. Merge conflicts stay in the worktree for the AI to resolve.
+/// Returns the worktree's top folder.
+pub fn prepare_worktree(root: &Path, dir: &Path, branch: &str) -> Result<PathBuf, String> {
+    let head = head(root).ok_or("Parallel runs need a git repository with at least one commit")?;
+    if let Some(existing) = worktree_of(root, branch).filter(|p| p.is_dir()) {
+        // Already up to date, or conflicts left for the AI: neither stops the run.
+        let _ = git(&existing, &["merge", "-q", "--no-edit", &head]);
+        return Ok(existing);
+    }
+    // Forget worktrees whose folders were deleted, so their branches can be checked out again.
+    git(root, &["worktree", "prune"])?;
+    if dir.exists() {
+        // Not a worktree git knows about (checked above): left over, and only ever in GhostLane's own folder.
+        std::fs::remove_dir_all(dir).map_err(|e| format!("Couldn't clear {}: {e}", dir.display()))?;
+    }
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Couldn't create {}: {e}", parent.display()))?;
+    }
+    let path = dir.to_string_lossy();
+    let exists = git(root, &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")]).is_ok();
+    if exists {
+        git(root, &["worktree", "add", "-q", &path, branch])?;
+        let _ = git(dir, &["merge", "-q", "--no-edit", &head]);
+    } else {
+        git(root, &["worktree", "add", "-q", "-b", branch, &path, &head])?;
+    }
+    Ok(dir.to_path_buf())
+}
+
+/// Commits what changed in the worktree's project folder `dir` to its branch, then drops what is left: edits to
+/// the worktree's copies of the board, which belongs to the main checkout.
+pub fn save_worktree(dir: &Path, message: &str) -> Result<(), String> {
+    let mut args = vec!["add", "-A", "--"];
+    args.extend(OUTSIDE_BOARD);
+    git(dir, &args)?;
+    if git(dir, &["diff", "--cached", "--quiet"]).is_err() {
+        git(dir, &["commit", "-q", "-m", message])?;
+    }
+    // Only reached once everything else is committed, so this can only throw away board edits.
+    git(dir, &["reset", "-q", "--hard"])?;
+    Ok(())
+}
+
+/// Why a ticket's branch couldn't be merged.
+#[derive(Debug, PartialEq)]
+pub enum MergeError {
+    /// It changes these files in ways that clash with the main checkout.
+    Conflicts(Vec<String>),
+    Failed(String),
+}
+
+/// Stages everything `branch` changed onto the main checkout at `root` without committing (a squash merge).
+/// Changes nothing when it would conflict.
+pub fn squash_merge(root: &Path, branch: &str) -> Result<(), MergeError> {
+    let args = [
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        "HEAD",
+        branch,
+    ];
+    let out = run("git", root, &args, None).map_err(MergeError::Failed)?;
+    if out.status.code() == Some(1) {
+        // The new tree's id, then the files that clash.
+        let files = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .skip(1)
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect();
+        return Err(MergeError::Conflicts(files));
+    }
+    checked("git", &args, out).map_err(MergeError::Failed)?;
+    git(root, &["merge", "-q", "--squash", branch]).map_err(MergeError::Failed)?;
+    Ok(())
+}
+
+/// The commit where `dir`'s HEAD and commit `other` last met.
+pub fn merge_base(dir: &Path, other: &str) -> Result<String, String> {
+    check_sha(other)?;
+    let base = stdout(git(dir, &["merge-base", "HEAD", other])?);
+    check_sha(&base)?;
+    Ok(base)
+}
+
+/// Deletes the worktree at `dir` and its `branch`.
+pub fn remove_worktree(root: &Path, dir: &Path, branch: &str) -> Result<(), String> {
+    git(root, &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
+    git(root, &["branch", "-q", "-D", branch])?;
+    Ok(())
+}
+
 /// Undoes `commit` with a new commit named `message`, leaving the board's own files (tickets, `.ghost`) alone so
 /// the ticket stays on the board. Changes nothing when the files it touches have changed since.
 pub fn revert(root: &Path, commit: &str, message: &str) -> Result<(), String> {
@@ -281,6 +416,84 @@ mod tests {
         assert!(revert(root, &sha, "x").is_err());
         assert_eq!(head(root).unwrap(), again);
         assert_eq!(read("a.txt"), "mine\n");
+    }
+
+    #[test]
+    fn worktrees_carry_a_tickets_work_until_it_merges() {
+        let d = repo();
+        let root = d.path();
+        let write = |dir: &Path, name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(root, "a.txt", "a\n");
+        write(root, "b.txt", "b\n");
+        write(root, "tickets/to_do/00001.md", "t\n");
+        commit(root, "setup", false).unwrap();
+        let branch = ticket_branch("00001");
+        let dirs = tempfile::tempdir().unwrap();
+        let dir = dirs.path().join("wt");
+
+        let wt = prepare_worktree(root, &dir, &branch).unwrap();
+        assert_eq!(
+            worktree_of(root, &branch).map(|p| p.canonicalize().unwrap()),
+            Some(wt.canonicalize().unwrap())
+        );
+        write(&wt, "a.txt", "a from the ticket\n");
+        write(&wt, "new.txt", "new\n");
+        write(&wt, "tickets/to_do/00001.md", "the copy, not the board\n");
+        save_worktree(&wt, "Work on 00001").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("tickets/to_do/00001.md")).unwrap(),
+            "t\n"
+        );
+        assert!(stdout(git(&wt, &["status", "--porcelain"]).unwrap()).is_empty());
+
+        // The main checkout moved on meanwhile, without clashing; the next run takes that in.
+        write(root, "b.txt", "b on main\n");
+        commit(root, "main moves", false).unwrap();
+        let again = prepare_worktree(root, &dir, &branch).unwrap();
+        assert_eq!(again.canonicalize().unwrap(), wt.canonicalize().unwrap());
+        assert_eq!(std::fs::read_to_string(wt.join("b.txt")).unwrap(), "b on main\n");
+
+        squash_merge(root, &branch).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "a from the ticket\n"
+        );
+        assert!(root.join("new.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("tickets/to_do/00001.md")).unwrap(),
+            "t\n"
+        );
+        commit(root, "00001: Thing", false).unwrap();
+        remove_worktree(root, &wt, &branch).unwrap();
+        assert!(!wt.exists());
+        assert_eq!(worktree_of(root, &branch), None);
+    }
+
+    #[test]
+    fn clashing_branches_merge_nothing() {
+        let d = repo();
+        let root = d.path();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        commit(root, "setup", false).unwrap();
+        let dirs = tempfile::tempdir().unwrap();
+        let branch = ticket_branch("00002");
+        let wt = prepare_worktree(root, &dirs.path().join("wt"), &branch).unwrap();
+        std::fs::write(wt.join("a.txt"), "ticket\n").unwrap();
+        save_worktree(&wt, "Work on 00002").unwrap();
+        std::fs::write(root.join("a.txt"), "main\n").unwrap();
+        commit(root, "main", false).unwrap();
+        let before = head(root).unwrap();
+        assert_eq!(
+            squash_merge(root, &branch),
+            Err(MergeError::Conflicts(vec!["a.txt".into()]))
+        );
+        assert_eq!(head(root).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "main\n");
+        assert!(stdout(git(root, &["status", "--porcelain"]).unwrap()).is_empty());
     }
 
     #[test]
