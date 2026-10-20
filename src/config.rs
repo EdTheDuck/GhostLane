@@ -176,7 +176,8 @@ pub struct AppConfig {
     pub open_projects: Vec<PathBuf>,
     pub active_project: Option<PathBuf>,
     pub terminal_collapsed: bool,
-    pub queue_open: bool,
+    /// The queue beside the terminal is hidden; it shows by default.
+    pub queue_closed: bool,
     pub settings: Settings,
     /// Keyed by .ghost path.
     pub projects: HashMap<PathBuf, ProjectSettings>,
@@ -309,6 +310,7 @@ settings:
 ";
         let cfg: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.terminal_collapsed);
+        assert!(!cfg.queue_closed, "the queue shows unless closed");
         assert_eq!(cfg.settings.ai_prompt, DEFAULT_AI_PROMPT);
         assert_eq!(cfg.settings.ai_clis, None);
         assert_eq!(cfg.settings.enabled_clis(), ["claude"]);

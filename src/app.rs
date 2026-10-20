@@ -1951,7 +1951,7 @@ impl App {
     fn terminal_panel(&mut self, ui: &mut Ui) {
         self.terminals.poll();
         let collapsed = self.config.terminal_collapsed;
-        let queue_open = self.config.queue_open;
+        let queue_open = !self.config.queue_closed;
         let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 6));
         let panel = if collapsed && !queue_open {
             egui::Panel::bottom("terminal_collapsed")
@@ -2058,7 +2058,7 @@ impl App {
                         .on_hover_text(tip)
                         .clicked()
                     {
-                        self.config.queue_open = !queue_open;
+                        self.config.queue_closed = queue_open;
                         self.save_config();
                     }
                 });
