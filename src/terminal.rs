@@ -143,15 +143,20 @@ pub fn fill_prompt(prompt: &str, ticket_path: &Path, ticket_id: &str, project_di
         .replace(['\n', '\r'], " "))
 }
 
-/// Prompt asking the AI CLI to write a new ticket file at `path` for `request`, on one line.
-pub fn ticket_request_prompt(request: &str, path: &Path, id: &str) -> String {
+/// Prompt asking the AI CLI to write a new ticket file at `path` for `request`, on one line; with `epic`, the
+/// ticket goes in that epic.
+pub fn ticket_request_prompt(request: &str, path: &Path, id: &str, epic: Option<u32>) -> String {
     let request = request.replace(['\n', '\r'], " ");
+    let epic = epic.map_or_else(String::new, |e| {
+        let e = crate::ticket::format_id(e);
+        format!(" Also add epic: '{e}' to the front matter, since the ticket belongs to epic {e}.")
+    });
     format!(
         "Create a new ticket for this project. The request is: {request} -- Look through the project files for context first, \
          then write the ticket to {path} and change nothing else. The file must be Markdown that starts with a YAML front \
          matter block between two lines of three dashes, containing: id: '{id}', title: a short title, priority: one of low, \
          medium, high or highest, and run_count: 0. After the front matter add a '## Description' section explaining what \
-         needs doing and why, then a '## Test Scope' section listing how to check it is done.",
+         needs doing and why, then a '## Test Scope' section listing how to check it is done.{epic}",
         path = path.display()
     )
 }
@@ -879,7 +884,15 @@ mod tests {
 
     #[test]
     fn ticket_request_prompt_is_one_line_with_path_and_id() {
-        let p = ticket_request_prompt("Add login\nwith email", Path::new("/p/tickets/to_do/00009.md"), "00009");
+        let p = ticket_request_prompt(
+            "Add login\nwith email",
+            Path::new("/p/tickets/to_do/00009.md"),
+            "00009",
+            None,
+        );
+        assert!(!p.contains("epic"));
+        let in_epic = ticket_request_prompt("x", Path::new("/p/00009.md"), "00009", Some(40));
+        assert!(in_epic.contains("epic: '00040'"));
         assert!(!p.contains('\n'));
         assert!(p.contains("Add login with email"));
         assert!(p.contains("/p/tickets/to_do/00009.md"));

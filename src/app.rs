@@ -1898,12 +1898,18 @@ impl App {
     }
 
     /// Asks the AI CLI to write a new ticket into column `col` and waits for it.
-    fn start_generation(&mut self, col: usize, request: &str, ctx: &egui::Context) -> Result<(), String> {
+    fn start_generation(
+        &mut self,
+        col: usize,
+        request: &str,
+        epic: Option<u32>,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
         let p = self.active_project().ok_or("No project is open")?;
         let col = col.min(p.meta.columns.len().saturating_sub(1));
         let id = crate::ticket::format_id(p.meta.next_ticket_id);
         let path = p.column_dir(col).join(format!("{id}.md"));
-        let prompt = terminal::ticket_request_prompt(request, &path, &id);
+        let prompt = terminal::ticket_request_prompt(request, &path, &id, epic);
         self.start_writing(path, &prompt, None, ctx)
     }
 
@@ -2516,7 +2522,10 @@ impl App {
                 Some(FormOutcome::Save) => self.save_ticket_form(),
                 Some(FormOutcome::Generate(request)) => {
                     let started = match form.mode {
-                        FormMode::Create { col } => self.start_generation(col, &request, ctx),
+                        FormMode::Create { col } => {
+                            let epic = form.ticket.epic;
+                            self.start_generation(col, &request, epic, ctx)
+                        }
                         FormMode::Edit => {
                             let id = form.ticket.id;
                             self.start_update(id, &request, ctx)
@@ -2559,6 +2568,14 @@ impl App {
                         self.delete_epic(&e, clear);
                     }
                     Some(EpicOutcome::QueueAll) => self.queue_epic(e.id),
+                    Some(EpicOutcome::NewTicket) => {
+                        let t = Ticket {
+                            id: p.meta.next_ticket_id,
+                            epic: Some(e.id),
+                            ..Default::default()
+                        };
+                        self.modal = Some(self.ticket_form(TicketForm::create(0, t)));
+                    }
                     Some(EpicOutcome::Breakdown) => {
                         self.modal = None;
                         if let Err(err) = self.start_breakdown(&e, ctx) {

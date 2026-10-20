@@ -194,6 +194,8 @@ pub enum EpicOutcome {
     },
     /// Queue its unfinished tickets.
     QueueAll,
+    /// Make a new ticket in it.
+    NewTicket,
     /// Ask the AI to write tickets for it.
     Breakdown,
     /// Show this ticket.
@@ -254,6 +256,13 @@ pub fn view(
                         .on_hover_text("Add its unfinished tickets to the queue; blocked ones wait their turn");
                     if queue.clicked() {
                         outcome = Some(EpicOutcome::QueueAll);
+                    }
+                    if ui
+                        .button(format!("{}  Add ticket", icon::PLUS))
+                        .on_hover_text("A new ticket in this epic, in the first column")
+                        .clicked()
+                    {
+                        outcome = Some(EpicOutcome::NewTicket);
                     }
                 });
             });
@@ -561,6 +570,7 @@ mod tests {
                 let mut cache = CommonMarkCache::default();
                 match super::view(ui.ctx(), view, &p, &e, &mut cache) {
                     Some(EpicOutcome::QueueAll) => out.push("queue".into()),
+                    Some(EpicOutcome::NewTicket) => out.push("new".into()),
                     Some(EpicOutcome::Open(id)) => out.push(format!("open {id}")),
                     Some(EpicOutcome::Delete { clear }) => out.push(format!("delete {clear}")),
                     _ => {}
@@ -575,10 +585,12 @@ mod tests {
         h.run();
         h.get_by_label_contains("Queue all").click();
         h.run();
+        h.get_by_label_contains("Add ticket").click();
+        h.run();
         h.get_by_label("Delete").click();
         h.run();
         h.get_all_by_label("Delete").last().unwrap().click();
         h.run();
-        assert_eq!(h.state().1, ["open 2", "queue", "delete true"]);
+        assert_eq!(h.state().1, ["open 2", "queue", "new", "delete true"]);
     }
 }
