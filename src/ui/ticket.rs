@@ -28,6 +28,8 @@ fn markdown(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
 pub enum ViewOutcome {
     Close,
     Edit,
+    /// Send the ticket to the trash (Ctrl+Z brings it back).
+    Delete,
     /// Move the ticket to the last column.
     Approve,
     /// Send the ticket back to the first column with this note.
@@ -91,13 +93,13 @@ pub struct Links {
     pub blocks: Vec<Dependency>,
 }
 
-/// `done`: the ticket is in the last column (`last` is that column's name).
+/// `column`: where the ticket is. `done`: that's the last column (`last` is its name).
 pub fn view(
     ctx: &egui::Context,
     state: &mut TicketView,
     t: &Ticket,
     links: &Links,
-    (done, last): (bool, &str),
+    (column, done, last): (&str, bool, &str),
     cache: &mut CommonMarkCache,
 ) -> Option<ViewOutcome> {
     let mut outcome = None;
@@ -108,87 +110,44 @@ pub fn view(
         if super::modal_close(ui, "Close") {
             outcome = Some(ViewOutcome::Close);
         }
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(t.id_str())
-                    .monospace()
-                    .size(16.0)
-                    .color(theme::TEXT_MUTED),
-            );
-            ui.label(priority_icon(t.priority).size(16.0));
-            ui.label(RichText::new(t.priority.label()).color(theme::TEXT_MUTED));
-            ui.label(RichText::new(format!("·  Runs: {}", t.run_count)).color(theme::TEXT_MUTED));
-        });
-        ui.add_space(4.0);
-        ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
-        if !t.labels.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                for l in &t.labels {
-                    super::label_chip(ui, l, None);
+        header(ui, t, column);
+        // Footer first, from the bottom up, so the body above gets whatever height is left.
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.horizontal(|ui| {
+                if super::danger_button(ui, "Delete").clicked() {
+                    outcome = Some(ViewOutcome::Delete);
                 }
-            });
-        }
-        let waiting = links.blocked_by.iter().any(|d| d.waiting == Some(true));
-        let lock = if waiting {
-            (icon::LOCK, theme::DANGER)
-        } else {
-            (icon::LOCK_OPEN, theme::TEXT_MUTED)
-        };
-        for (deps, (glyph, color), text) in [
-            (&links.blocked_by, lock, "Blocked by"),
-            (
-                &links.blocks,
-                (icon::ARROW_BEND_DOWN_RIGHT, theme::TEXT_MUTED),
-                "Blocks",
-            ),
-        ] {
-            if deps.is_empty() {
-                continue;
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("{glyph}  {text}")).color(color));
-                for d in deps {
-                    let color = if d.waiting == Some(true) {
-                        theme::TEXT
-                    } else {
-                        theme::TEXT_MUTED
-                    };
-                    if d.waiting.is_none() {
-                        ui.label(RichText::new(&d.label).color(color));
-                        continue;
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if accent_button(ui, "Edit").clicked() {
+                        outcome = Some(ViewOutcome::Edit);
                     }
-                    let link = egui::Label::new(RichText::new(&d.label).color(color).underline());
-                    if super::pointer(ui.add(link.sense(egui::Sense::click()))).clicked() {
-                        outcome = Some(ViewOutcome::Open(d.id));
-                    }
-                }
+                });
             });
-        }
-        let before = state.tab;
-        tabs(
-            ui,
-            &mut state.tab,
-            &[
-                (ViewTab::Details, "Details"),
-                (ViewTab::TestScope, "Test Scope"),
-                (ViewTab::Changes, "Changes"),
-            ],
-        );
-        if state.tab != before {
-            // The app loads the changes on the next frame.
-            ui.ctx().request_repaint();
-        }
-        // Footer first, from the bottom up, so the tab above gets whatever height is left.
-        ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
-            if accent_button(ui, "Edit").clicked() {
-                outcome = Some(ViewOutcome::Edit);
-            }
             ui.separator();
-            ui.with_layout(Layout::top_down(Align::Min), |ui| match state.tab {
-                ViewTab::Details => details_tab(ui, state, t, cache),
-                ViewTab::TestScope => test_scope_tab(ui, t, cache),
-                ViewTab::Changes => changes_tab(ui, state, done, last, &mut outcome),
+            // The sidebar on the right first, so the tabs on the left get the rest of the width.
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                sidebar(ui, t, links, &mut outcome);
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    let before = state.tab;
+                    tabs(
+                        ui,
+                        &mut state.tab,
+                        &[
+                            (ViewTab::Details, "Details"),
+                            (ViewTab::TestScope, "Test Scope"),
+                            (ViewTab::Changes, "Changes"),
+                        ],
+                    );
+                    if state.tab != before {
+                        // The app loads the changes on the next frame.
+                        ui.ctx().request_repaint();
+                    }
+                    match state.tab {
+                        ViewTab::Details => details_tab(ui, state, t, cache),
+                        ViewTab::TestScope => test_scope_tab(ui, t, cache),
+                        ViewTab::Changes => changes_tab(ui, state, done, last, &mut outcome),
+                    }
+                });
             });
         });
     });
@@ -208,46 +167,181 @@ pub fn view(
     outcome
 }
 
+const RADIUS: u8 = 6;
+
+/// Number, column and title on a dark band, with a stripe in the priority's colour down its left edge.
+fn header(ui: &mut Ui, t: &Ticket, column: &str) {
+    const STRIPE: f32 = 4.0;
+    let band = egui::Frame::new()
+        .fill(theme::BG)
+        .corner_radius(RADIUS)
+        // Room on the right for the close button above the band's corner.
+        .inner_margin(egui::Margin {
+            left: 20,
+            right: 36,
+            top: 14,
+            bottom: 14,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t.id_str())
+                        .monospace()
+                        .size(16.0)
+                        .color(theme::TEXT_MUTED),
+                );
+                super::label_chip(ui, column, None);
+            });
+            ui.add(egui::Label::new(RichText::new(&t.title).size(24.0).strong()).wrap());
+        });
+    let r = band.response.rect;
+    let stripe = egui::Rect::from_min_size(r.min, vec2(STRIPE, r.height()));
+    let corners = egui::CornerRadius {
+        nw: RADIUS,
+        sw: RADIUS,
+        ..Default::default()
+    };
+    ui.painter()
+        .rect_filled(stripe, corners, super::priority_color(t.priority));
+}
+
+/// Priority, runs, tokens, when it was done, labels and linked tickets, down the right of the view.
+fn sidebar(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<ViewOutcome>) {
+    const WIDTH: f32 = 260.0;
+    const MARGIN: i8 = 16;
+    let height = ui.available_height() - 2.0 * f32::from(MARGIN);
+    egui::Frame::new()
+        .fill(theme::BG)
+        .corner_radius(RADIUS)
+        .inner_margin(MARGIN)
+        .show(ui, |ui| {
+            ui.set_width(WIDTH - 2.0 * f32::from(MARGIN));
+            ui.set_height(height);
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ScrollArea::vertical().id_salt("ticket_sidebar").show(ui, |ui| {
+                    sidebar_fields(ui, t, links, outcome);
+                });
+            });
+        });
+}
+
+fn sidebar_fields(ui: &mut Ui, t: &Ticket, links: &Links, outcome: &mut Option<ViewOutcome>) {
+    // Each caption close to its value, with a wider gap before the next one.
+    ui.spacing_mut().item_spacing.y = 4.0;
+    let caption = |ui: &mut Ui, text: &str, color| {
+        ui.add_space(12.0);
+        ui.label(RichText::new(text).size(12.0).color(color));
+    };
+    ui.label(RichText::new("Priority").size(12.0).color(theme::TEXT_MUTED));
+    ui.horizontal(|ui| {
+        ui.label(priority_icon(t.priority));
+        ui.label(t.priority.label());
+    });
+    caption(ui, "Runs", theme::TEXT_MUTED);
+    ui.label(t.run_count.to_string());
+    let tokens: u64 = t.runs.iter().filter_map(|r| r.tokens).map(|t| t.total()).sum();
+    if tokens > 0 {
+        caption(ui, "Tokens", theme::TEXT_MUTED);
+        ui.label(crate::ticket::compact(tokens));
+    }
+    if let Some(done) = t.done_at {
+        caption(ui, "Done", theme::TEXT_MUTED);
+        ui.label(crate::ticket::readable_utc(&crate::ticket::utc_timestamp(done)));
+    }
+    if !t.labels.is_empty() {
+        caption(ui, "Labels", theme::TEXT_MUTED);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            for l in &t.labels {
+                super::label_chip(ui, l, None);
+            }
+        });
+    }
+    let waiting = links.blocked_by.iter().any(|d| d.waiting == Some(true));
+    let lock = if waiting {
+        (icon::LOCK, theme::DANGER)
+    } else {
+        (icon::LOCK_OPEN, theme::TEXT_MUTED)
+    };
+    for (deps, (glyph, color), text) in [
+        (&links.blocked_by, lock, "Blocked by"),
+        (
+            &links.blocks,
+            (icon::ARROW_BEND_DOWN_RIGHT, theme::TEXT_MUTED),
+            "Blocks",
+        ),
+    ] {
+        if deps.is_empty() {
+            continue;
+        }
+        caption(ui, &format!("{glyph}  {text}"), color);
+        for d in deps {
+            let color = if d.waiting == Some(true) {
+                theme::TEXT
+            } else {
+                theme::TEXT_MUTED
+            };
+            if d.waiting.is_none() {
+                ui.add(egui::Label::new(RichText::new(&d.label).color(color)).wrap());
+                continue;
+            }
+            let link = egui::Label::new(RichText::new(&d.label).color(color).underline()).wrap();
+            if super::pointer(ui.add(link.sense(egui::Sense::click()))).clicked() {
+                *outcome = Some(ViewOutcome::Open(d.id));
+            }
+        }
+    }
+}
+
+/// A section of the ticket on a lighter card, its heading in the accent colour.
+fn card(ui: &mut Ui, heading: &str, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .fill(theme::CARD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(RADIUS)
+        .inner_margin(16)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(heading).size(17.0).strong().color(theme::ACCENT));
+            ui.add_space(4.0);
+            add(ui);
+        });
+}
+
 /// Description, notes and run history.
 fn details_tab(ui: &mut Ui, state: &TicketView, t: &Ticket, cache: &mut CommonMarkCache) {
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        // Description always shows; notes only when they have text.
-        let notes = Some(("Notes", &t.notes)).filter(|(_, text)| !text.trim().is_empty());
-        for (i, (heading, text)) in std::iter::once(("Description", &t.description))
-            .chain(notes)
-            .enumerate()
-        {
-            if i > 0 {
-                ui.add_space(16.0);
-            }
-            ui.label(RichText::new(heading).size(17.0).strong().color(theme::ACCENT));
-            ui.add_space(4.0);
-            markdown(ui, cache, text);
+        card(ui, "Description", |ui| markdown(ui, cache, &t.description));
+        // Notes only when they have text.
+        if !t.notes.trim().is_empty() {
+            card(ui, "Notes", |ui| markdown(ui, cache, &t.notes));
         }
         if !t.runs.is_empty() || state.commit.is_some() {
-            ui.add_space(16.0);
-            ui.label(RichText::new("Run History").size(17.0).strong().color(theme::ACCENT));
-            ui.add_space(4.0);
-            if let Some(commit) = &state.commit {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon::GIT_COMMIT).color(theme::ACCENT));
-                    ui.label("Committed as");
-                    ui.label(RichText::new(commit).monospace());
-                    ui.label(RichText::new("· review or revert it on the Changes tab").color(theme::TEXT_MUTED));
-                });
-            }
-            run_history(ui, &t.runs);
+            card(ui, "Run History", |ui| {
+                if let Some(commit) = &state.commit {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icon::GIT_COMMIT).color(theme::ACCENT));
+                        ui.label("Committed as");
+                        ui.label(RichText::new(commit).monospace());
+                        ui.label(RichText::new("· review or revert it on the Changes tab").color(theme::TEXT_MUTED));
+                    });
+                }
+                run_history(ui, &t.runs);
+            });
         }
     });
 }
 
 fn test_scope_tab(ui: &mut Ui, t: &Ticket, cache: &mut CommonMarkCache) {
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        if t.test_scope.trim().is_empty() {
-            ui.label(RichText::new("No test scope yet.").color(theme::TEXT_MUTED));
-        } else {
-            markdown(ui, cache, &t.test_scope);
-        }
+        card(ui, "Test Scope", |ui| {
+            if t.test_scope.trim().is_empty() {
+                ui.label(RichText::new("No test scope yet.").color(theme::TEXT_MUTED));
+            } else {
+                markdown(ui, cache, &t.test_scope);
+            }
+        });
     });
 }
 
@@ -1186,9 +1280,17 @@ mod tests {
         let mut h = Harness::new_ui_state(
             |ui, (view_state, t, done, out): &mut ViewState| {
                 let mut cache = CommonMarkCache::default();
-                match super::view(ui.ctx(), view_state, t, &Links::default(), (*done, "Done"), &mut cache) {
+                match super::view(
+                    ui.ctx(),
+                    view_state,
+                    t,
+                    &Links::default(),
+                    ("In Test", *done, "Done"),
+                    &mut cache,
+                ) {
                     Some(ViewOutcome::Approve) => out.push("approve".into()),
                     Some(ViewOutcome::Edit) => out.push("edit".into()),
+                    Some(ViewOutcome::Delete) => out.push("delete".into()),
                     Some(ViewOutcome::Reject(note)) => out.push(format!("reject {note}")),
                     Some(ViewOutcome::Revert(c)) => out.push(format!("revert {c}")),
                     _ => {}
@@ -1200,6 +1302,20 @@ mod tests {
         h.set_size(vec2(1200.0, 800.0));
         h.run_steps(3);
         h
+    }
+
+    #[test]
+    fn delete_sits_bottom_left_opposite_edit() {
+        let mut h = view_harness(TicketView::new(5, None), false);
+        let (delete, edit) = (h.get_by_label("Delete").rect(), h.get_by_label("Edit").rect());
+        assert!(delete.right() < edit.left() && (delete.center().y - edit.center().y).abs() < 2.0);
+        assert!(
+            delete.left() < 40.0 + (1200.0 - modal_size(&h.ctx).x) / 2.0,
+            "on the left edge"
+        );
+        h.get_by_label("Delete").click();
+        h.run();
+        assert_eq!(h.state().3, ["delete"]);
     }
 
     #[test]
@@ -1300,9 +1416,14 @@ mod tests {
         let mut h = Harness::new_ui_state(
             |ui, (view_state, opened): &mut (TicketView, Option<u32>)| {
                 let mut cache = CommonMarkCache::default();
-                if let Some(ViewOutcome::Open(id)) =
-                    super::view(ui.ctx(), view_state, &ticket, &links, (false, "Done"), &mut cache)
-                {
+                if let Some(ViewOutcome::Open(id)) = super::view(
+                    ui.ctx(),
+                    view_state,
+                    &ticket,
+                    &links,
+                    ("To Do", false, "Done"),
+                    &mut cache,
+                ) {
                     *opened = Some(id);
                 }
             },

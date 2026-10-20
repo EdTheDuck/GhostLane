@@ -1776,7 +1776,7 @@ impl App {
                     return;
                 };
                 let (t, last, root) = (t.clone(), p.last_col(), p.root.clone());
-                let last_name = p.meta.columns[last].name.clone();
+                let (col_name, last_name) = (p.meta.columns[col].name.clone(), p.meta.columns[last].name.clone());
                 let links = self.links(&t);
                 let Some(Modal::ViewTicket(view)) = &mut self.modal else {
                     return;
@@ -1784,9 +1784,20 @@ impl App {
                 if view.wants_changes() {
                     view.changes = Some(load_changes(&root, view.commit.as_deref(), &t));
                 }
-                match ticket_ui::view(ctx, view, &t, &links, (col == last, &last_name), &mut self.md_cache) {
+                match ticket_ui::view(
+                    ctx,
+                    view,
+                    &t,
+                    &links,
+                    (&col_name, col == last, &last_name),
+                    &mut self.md_cache,
+                ) {
                     Some(ViewOutcome::Close) => self.modal = None,
                     Some(ViewOutcome::Edit) => self.modal = Some(self.ticket_form(TicketForm::edit(&t))),
+                    Some(ViewOutcome::Delete) => {
+                        self.modal = None;
+                        self.delete_tickets(&[t]);
+                    }
                     Some(ViewOutcome::Approve) => {
                         self.modal = None;
                         self.apply(
