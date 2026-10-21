@@ -1,4 +1,4 @@
-# 👻 GhostLane
+# 👻 GhostLane - by Dan McGuire
 
 **Plan the work. Hand it to your AI. Watch it move across the board.**
 
