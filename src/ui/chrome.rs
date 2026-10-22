@@ -190,7 +190,8 @@ pub fn resize_edges(ui: &mut Ui) {
 }
 
 /// Ghost and "GhostLane" centred in `bar`, kept clear of the content between `left_end` and
-/// `right_start`. While `busy`, the letters become dots that the ghost eats, on a loop.
+/// `right_start`, with the version in small text after it. While `busy`, the letters become dots that the ghost
+/// eats, on a loop, and the version hides.
 pub fn title(ui: &Ui, bar: Rect, left_end: f32, right_start: f32, busy: bool) {
     const GHOST: f32 = 26.0;
     const GAP: f32 = 8.0;
@@ -229,8 +230,52 @@ pub fn title(ui: &Ui, bar: Rect, left_end: f32, right_start: f32, busy: bool) {
             }
         }
     } else if x + width <= *free.end() {
+        let version = painter.layout_no_wrap(
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            FontId::proportional(11.0),
+            theme::TEXT_MUTED,
+        );
+        // Bottoms lined up, so it sits on the title's baseline. Left out when it doesn't fit.
+        let version_pos = text_pos + vec2(galley.size().x + 5.0, galley.size().y - version.size().y - 2.0);
+        if version_pos.x + version.size().x <= *free.end() {
+            painter.galley(version_pos, version, theme::TEXT_MUTED);
+        }
         painter.galley(text_pos, galley, theme::TEXT);
     }
     egui::Image::new(egui::include_image!("../../assets/ghost.svg"))
         .paint_at(ui, Rect::from_center_size(ghost_center, vec2(GHOST, GHOST)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    fn texts(busy: bool) -> Vec<String> {
+        let mut h = Harness::new_ui(move |ui| {
+            let bar = Rect::from_min_size(Pos2::ZERO, vec2(900.0, BAR_HEIGHT));
+            title(ui, bar, 0.0, 900.0, busy);
+        });
+        h.step();
+        h.output()
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn version_follows_the_title_and_hides_while_busy() {
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        // No image loader here, so the ghost paints as a ⚠; only the text matters.
+        assert!(texts(false).starts_with(&[version.clone(), TITLE.to_string()]));
+        let busy = texts(true);
+        assert!(
+            !busy.contains(&version) && !busy.contains(&TITLE.to_string()),
+            "{busy:?}"
+        );
+    }
 }
