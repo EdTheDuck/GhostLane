@@ -451,6 +451,66 @@ fn instructions(p: &Project, role: Role, push: bool) -> String {
     out
 }
 
+/// How the session in AI CLI `cli` uses the board, for its instructions file: new work becomes tickets, and each
+/// ticket goes through the columns, handed to the sub agent that works each step. `commit`: the project commits,
+/// so it has a Git agent.
+pub fn workflow(p: &Project, cli: &str, commit: bool) -> String {
+    let first = p.column_label(0);
+    let mut out = format!(
+        "\n### Working with the board\n\n\
+         - Track all work as tickets. When you're asked for a change that has no ticket yet (a feature, a fix, a \
+         refactor), create one in {first} first, with a Description of what is wanted and why and a Test Scope \
+         saying how to check it. Questions and quick look-ups don't need a ticket.\n\
+         - Split a big request into several tickets that can each be done and tested on their own. When they share \
+         one goal, group them under an epic. If a ticket can't start before another is done, list that one under \
+         `blocked_by`.\n\
+         - Work you find along the way, such as a bug or a follow-up, gets a new ticket rather than widening the \
+         current one.\n"
+    );
+    let all = stages(p);
+    if all.is_empty() {
+        return out;
+    }
+    let agents = has_agents(cli);
+    out.push_str(if agents {
+        "- Work a ticket one step at a time, handing each step to its sub agent with the ticket's file path:\n"
+    } else {
+        "- Work a ticket one step at a time:\n"
+    });
+    for s in &all {
+        let (from, working) = (p.column_label(s.from), p.column_label(s.working));
+        let then = match s.done {
+            Some(done) => format!("on to {} when it's done", p.column_label(done)),
+            None => "leaves it there when it's done".to_string(),
+        };
+        if agents {
+            let agent = stage_agent(p, s);
+            out.push_str(&format!(
+                "  - Tickets in {from}: hand them to the `{agent}` sub agent. It moves the ticket to {working} while \
+                 it works and {then}.\n"
+            ));
+        } else {
+            let then = then
+                .replacen("on to", "move it on to", 1)
+                .replacen("leaves", "leave", 1);
+            out.push_str(&format!(
+                "  - Tickets in {from}: move the ticket to {working} when you start, and {then}.\n"
+            ));
+        }
+    }
+    if agents {
+        out.push_str(
+            "- Hand over one ticket at a time and let the sub agent move it. Afterwards, check which column the \
+             ticket ended up in and report that; a ticket sent back to an earlier column has the reason in its \
+             Notes.\n",
+        );
+        if commit && !all.iter().any(|s| stage_agent(p, s) == Role::Git.id()) {
+            out.push_str("- When a finished ticket's work needs committing, hand it to the `git` sub agent.\n");
+        }
+    }
+    out
+}
+
 /// Writes the Developer and Tester agents for AI CLI `cli` into the project, and the Git agent when the project
 /// commits. A model already set in a file stays; without one they get the role's default. Returns the files left alone because someone else made them.
 pub fn write_agents(p: &Project, cli: &str, settings: &ProjectSettings) -> io::Result<Vec<PathBuf>> {
@@ -580,6 +640,37 @@ mod tests {
         let git = fs::read_to_string(d.path().join(".claude/agents/git.md")).unwrap();
         assert!(git.contains("model: claude-sonnet-5-5\n") && git.contains("Don't push."));
         assert_eq!(Role::Git.default_model("codex"), Role::Tester.default_model("codex"));
+    }
+
+    #[test]
+    fn workflow_files_new_work_and_hands_each_step_to_its_agent() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = default_project(d.path());
+        let w = workflow(&p, "claude", true);
+        assert!(w.contains("create one in **To Do** (`tickets/to_do/`) first"));
+        assert!(w.contains(
+            "  - Tickets in **To Do** (`tickets/to_do/`): hand them to the `developer` sub agent. It moves the ticket \
+             to **In Dev** (`tickets/in_dev/`) while it works and on to **Ready For Test** (`tickets/ready_for_test/`) \
+             when it's done.\n"
+        ));
+        assert!(w.contains("hand them to the `tester` sub agent"));
+        assert!(
+            w.contains("hand it to the `git` sub agent"),
+            "commit without a git column"
+        );
+        assert!(!workflow(&p, "claude", false).contains("`git`"));
+
+        p.meta.columns[3].agent = Some("git".into());
+        let w = workflow(&p, "claude", true);
+        assert!(w.contains("Tickets in **Ready For Test** (`tickets/ready_for_test/`): hand them to the `git`"));
+        assert!(!w.contains("needs committing"));
+
+        let w = workflow(&p, "aider", false);
+        assert!(!w.contains("sub agent"));
+        assert!(w.contains(
+            "  - Tickets in **To Do** (`tickets/to_do/`): move the ticket to **In Dev** (`tickets/in_dev/`) when you \
+             start, and move it on to **Ready For Test** (`tickets/ready_for_test/`) when it's done.\n"
+        ));
     }
 
     #[test]

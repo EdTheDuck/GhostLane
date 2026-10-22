@@ -3299,7 +3299,8 @@ fn finish_worktree(
 fn write_ai_guide(p: &Project, settings: &ProjectSettings, agents: &AgentEdits) -> Result<(), String> {
     let id = p.meta.ai_cli.as_deref().unwrap_or(terminal::DEFAULT_CLI);
     let Some(cli) = terminal::ai_cli(id) else { return Ok(()) };
-    p.write_ai_guide(cli.instructions_file)
+    let workflow = crate::agents::workflow(p, cli.id, settings.commit);
+    p.write_ai_guide(cli.instructions_file, &workflow)
         .map_err(|e| format!("Couldn't update {}: {e}", cli.instructions_file))?;
     for a in &agents.new {
         crate::agents::create(&p.root, cli.id, a).map_err(|e| format!("Couldn't add the {} agent: {e}", a.name))?;

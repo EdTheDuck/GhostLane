@@ -707,16 +707,16 @@ An epic groups tickets working towards one bigger goal. Each is a file in `epics
         )
     }
 
-    /// Puts `ai_guide` into `file` (relative to the root) between GhostLane's markers, replacing the
-    /// previous guide and keeping the rest of the file. Creates the file if needed.
-    pub fn write_ai_guide(&self, file: &str) -> io::Result<()> {
+    /// Puts `ai_guide` followed by `extra` into `file` (relative to the root) between GhostLane's markers,
+    /// replacing the previous guide and keeping the rest of the file. Creates the file if needed.
+    pub fn write_ai_guide(&self, file: &str, extra: &str) -> io::Result<()> {
         let path = self.root.join(file);
         let existing = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e),
         };
-        let updated = replace_guide(&existing, &self.ai_guide());
+        let updated = replace_guide(&existing, &(self.ai_guide() + extra));
         if updated == existing {
             return Ok(());
         }
@@ -1223,13 +1223,13 @@ mod tests {
     fn guide_lists_columns_and_lands_in_the_cli_file() {
         let d = tempfile::tempdir().unwrap();
         let p = new_project(d.path());
-        p.write_ai_guide("CLAUDE.md").unwrap();
+        p.write_ai_guide("CLAUDE.md", "").unwrap();
         let text = fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
         assert!(text.contains("3. **Ready For Test** (`tickets/ready_for_test/`)\n"));
         assert!(text.contains("`my_project.ghost`"));
-        p.write_ai_guide("CLAUDE.md").unwrap();
+        p.write_ai_guide("CLAUDE.md", "").unwrap();
         assert_eq!(fs::read_to_string(d.path().join("CLAUDE.md")).unwrap(), text);
-        p.write_ai_guide(".github/copilot-instructions.md").unwrap();
+        p.write_ai_guide(".github/copilot-instructions.md", "").unwrap();
         assert!(d.path().join(".github/copilot-instructions.md").is_file());
 
         let mut p = p;
