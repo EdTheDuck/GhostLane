@@ -6,11 +6,12 @@ use egui_dnd::{DragDropItem, dnd};
 use egui_phosphor::regular as icon;
 
 use super::{accent_button, icon_button};
+use crate::agents::{AgentEdits, AgentInfo, NewAgent, Role, has_agents, valid_model};
 use crate::app::ExportFormat;
 use crate::config::ProjectSettings;
 use crate::project::{
-    AutoMove, ColumnEdit, DEFAULT_AUTO_MOVES, DEFAULT_COLUMNS, DEFAULT_PROMPTS, Project, find_ghost_file, folder_name,
-    validate_columns,
+    AutoMove, ColumnEdit, DEFAULT_AGENTS, DEFAULT_AUTO_MOVES, DEFAULT_COLUMNS, DEFAULT_PROMPTS, Project,
+    find_ghost_file, folder_name, validate_columns,
 };
 use crate::theme;
 
@@ -26,6 +27,8 @@ pub struct ColumnRow {
     show_prompt: bool,
     /// 0 = no limit.
     wip_limit: u32,
+    /// Sub agent for tickets moved in on AI Working; `None` = the session itself.
+    agent: Option<String>,
 }
 
 impl DragDropItem for &mut ColumnRow {
@@ -60,7 +63,25 @@ pub struct ProjectForm {
     git_excluded: bool,
     /// Asking how to delete the project.
     confirm_delete: bool,
+    /// Sub agents of `ai_cli` already in the project folder, and the CLI and folder they were read for.
+    found: Vec<AgentInfo>,
+    found_for: Option<(String, PathBuf)>,
+    /// Models typed into the sub agent list, by name; empty = the session's model.
+    models: HashMap<String, String>,
+    /// Sub agents to write when the dialog is saved.
+    new_agents: Vec<NewAgent>,
+    /// The sub agent being written, while its form is open.
+    draft: Option<NewAgent>,
     pub error: Option<String>,
+}
+
+/// A line of the sub agent list: name, model (empty = the session's), and where it comes from.
+struct AgentRow {
+    name: String,
+    model: String,
+    note: &'static str,
+    /// What an empty model means: GhostLane's own agents go back to their default.
+    fallback: Option<&'static str>,
 }
 
 pub enum ProjectOutcome {
@@ -73,6 +94,7 @@ pub enum ProjectOutcome {
         settings: ProjectSettings,
         /// Put the .ghost file and tickets folder in .gitignore.
         git_excluded: bool,
+        agents: AgentEdits,
     },
     Save {
         name: String,
@@ -81,6 +103,7 @@ pub enum ProjectOutcome {
         ai_cli: String,
         settings: ProjectSettings,
         git_excluded: bool,
+        agents: AgentEdits,
     },
     OpenExisting(PathBuf),
     /// Save the board to a file; the dialog stays open.
@@ -110,6 +133,7 @@ impl ProjectForm {
                 ai_prompt: column_prompt.unwrap_or(prompt).to_string(),
                 show_prompt: false,
                 wip_limit: 0,
+                agent: DEFAULT_AGENTS[i].map(str::to_string),
             })
             .collect();
         ProjectForm {
@@ -126,6 +150,11 @@ impl ProjectForm {
             ghost: None,
             git_excluded: false,
             confirm_delete: false,
+            found: Vec::new(),
+            found_for: None,
+            models: HashMap::new(),
+            new_agents: Vec::new(),
+            draft: None,
             error: None,
         }
     }
@@ -150,6 +179,7 @@ impl ProjectForm {
                 ai_prompt: c.ai_prompt.clone().unwrap_or_else(|| prompt.to_string()),
                 show_prompt: false,
                 wip_limit: c.wip_limit.unwrap_or(0),
+                agent: c.agent.clone(),
             })
             .collect();
         ProjectForm {
@@ -166,6 +196,11 @@ impl ProjectForm {
             ghost: Some(p.ghost_path.clone()),
             git_excluded: p.git_excluded(),
             confirm_delete: false,
+            found: Vec::new(),
+            found_for: None,
+            models: HashMap::new(),
+            new_agents: Vec::new(),
+            draft: None,
             error: None,
         }
     }
@@ -182,10 +217,18 @@ impl ProjectForm {
         if self.removed.iter().any(|r| r.target.is_none()) {
             return Err("Choose where to move tickets from removed columns".into());
         }
+        if self
+            .models
+            .values()
+            .any(|m| !m.trim().is_empty() && !valid_model(m.trim()))
+        {
+            return Err("Models take letters, digits, spaces and . - _ / :".into());
+        }
         Ok(())
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ProjectOutcome> {
+        self.find_agents();
         let mut outcome = None;
         let modal = super::show_modal(ctx, "project_modal", |ui| {
             // Room for each column row's name, folder, ticket count, WIP limit and buttons side by side.
@@ -253,6 +296,7 @@ impl ProjectForm {
                     ai_prompt: self.default_prompt.clone(),
                     show_prompt: false,
                     wip_limit: 0,
+                    agent: None,
                 });
                 self.next_key += 1;
             }
@@ -260,6 +304,7 @@ impl ProjectForm {
             self.removed_ui(ui);
             ui.add_space(8.0);
             settings_ui(ui, &mut self.settings, &mut self.git_excluded);
+            self.agents_ui(ui);
             if self.editing {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -347,10 +392,11 @@ impl ProjectForm {
     fn columns_ui(&mut self, ui: &mut Ui) {
         let only_one = self.rows.len() == 1;
         let mut remove = None;
+        let agents: Vec<String> = self.agent_rows().into_iter().map(|a| a.name).collect();
         let default_prompt = &self.default_prompt;
         dnd(ui, "project_columns").show_vec(&mut self.rows, |ui, row, handle, state| {
             if state.index > 0 {
-                auto_move_ui(ui, row);
+                auto_move_ui(ui, row, &agents);
             }
             // Same rule as the board: tickets that arrive on "AI Working" get no play button.
             let has_play = state.index == 0 || row.auto_move != AutoMove::AiWorking;
@@ -481,6 +527,7 @@ impl ProjectForm {
                     // Unchanged or cleared: keep following Settings.
                     ai_prompt: (!prompt.is_empty() && prompt != self.default_prompt.trim()).then(|| prompt.to_string()),
                     wip_limit: (r.wip_limit > 0).then_some(r.wip_limit),
+                    agent: r.agent.clone().filter(|_| i > 0 && r.auto_move == AutoMove::AiWorking),
                 }
             })
             .collect();
@@ -492,6 +539,7 @@ impl ProjectForm {
                 ai_cli: self.ai_cli.clone(),
                 settings: self.submitted_settings(),
                 git_excluded: self.git_excluded,
+                agents: self.agent_edits(),
             };
         }
         let targets = self
@@ -509,6 +557,183 @@ impl ProjectForm {
             ai_cli: self.ai_cli.clone(),
             settings: self.submitted_settings(),
             git_excluded: self.git_excluded,
+            agents: self.agent_edits(),
+        }
+    }
+
+    /// Re-reads the sub agents in the project folder when the AI CLI or folder changed; models typed for the old
+    /// ones go.
+    fn find_agents(&mut self) {
+        let key = self.location.clone().map(|l| (self.ai_cli.clone(), l));
+        if key != self.found_for {
+            self.found = key
+                .as_ref()
+                .map(|(cli, dir)| crate::agents::list(dir, cli))
+                .unwrap_or_default();
+            self.models.clear();
+            self.found_for = key;
+        }
+    }
+
+    /// The sub agents the project will have: those in its folder, the Developer, Tester and (when committing) Git
+    /// agents GhostLane writes, and new ones. By name.
+    fn agent_rows(&self) -> Vec<AgentRow> {
+        if !has_agents(&self.ai_cli) {
+            return Vec::new();
+        }
+        let mut rows: Vec<AgentRow> = self
+            .found
+            .iter()
+            .map(|a| AgentRow {
+                name: a.name.clone(),
+                model: a.model.clone().unwrap_or_default(),
+                note: if a.managed { "GhostLane" } else { "Yours" },
+                fallback: role_default(&a.name, &self.ai_cli).filter(|_| a.managed),
+            })
+            .collect();
+        let roles = [Role::Developer, Role::Tester, Role::Git];
+        for r in roles.into_iter().filter(|&r| r != Role::Git || self.settings.commit) {
+            if !rows.iter().any(|a| a.name == r.id()) {
+                rows.push(AgentRow {
+                    name: r.id().to_string(),
+                    model: r.default_model(&self.ai_cli).unwrap_or_default().to_string(),
+                    note: "New",
+                    fallback: r.default_model(&self.ai_cli),
+                });
+            }
+        }
+        rows.extend(self.new_agents.iter().map(|a| AgentRow {
+            name: a.name.clone(),
+            model: a.model.clone(),
+            note: "New",
+            fallback: None,
+        }));
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
+    }
+
+    /// New sub agents, and models changed in the list.
+    fn agent_edits(&self) -> AgentEdits {
+        if !has_agents(&self.ai_cli) {
+            return AgentEdits::default();
+        }
+        let rows = self.agent_rows();
+        let mut models: Vec<(String, String)> = self
+            .models
+            .iter()
+            .map(|(name, m)| (name.clone(), m.trim().to_string()))
+            .filter(|(name, m)| {
+                rows.iter()
+                    .any(|r| &r.name == name && &r.model != m && !(m.is_empty() && r.fallback.is_some()))
+            })
+            .collect();
+        models.sort();
+        AgentEdits {
+            new: self.new_agents.clone(),
+            models,
+        }
+    }
+
+    /// The sub agent list with each one's model, and the form for a new one.
+    fn agents_ui(&mut self, ui: &mut Ui) {
+        if !has_agents(&self.ai_cli) {
+            return;
+        }
+        ui.add_space(8.0);
+        let rows = self.agent_rows();
+        ui.horizontal(|ui| {
+            ui.label("Sub agents");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let new = egui::Button::new(format!("{}  New sub agent", icon::PLUS));
+                if ui.add_enabled(self.draft.is_none(), new).clicked() {
+                    self.draft = Some(NewAgent::default());
+                }
+            });
+        });
+        for row in &rows {
+            ui.horizontal(|ui| {
+                ui.add_space(26.0);
+                ui.label(RichText::new(&row.name).monospace());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let tip = match row.note {
+                        "GhostLane" => {
+                            "Kept up to date by GhostLane from the board's columns when the project is saved"
+                        }
+                        "Yours" => "Not made by GhostLane: only its model is changed here",
+                        _ => "Written when the project is saved",
+                    };
+                    ui.label(RichText::new(row.note).small().color(theme::TEXT_MUTED))
+                        .on_hover_text(tip);
+                    let mut model = self.models.get(&row.name).unwrap_or(&row.model).clone();
+                    let edit = ui
+                        .add(
+                            TextEdit::singleline(&mut model)
+                                .margin(super::INPUT_MARGIN)
+                                .hint_text(row.fallback.unwrap_or("Session's model"))
+                                .desired_width(220.0),
+                        )
+                        .on_hover_text("The model this sub agent runs on. Empty: the same as the session.");
+                    if edit.changed() {
+                        self.models.insert(row.name.clone(), model);
+                    }
+                });
+            });
+        }
+        let Some(d) = &mut self.draft else { return };
+        let mut close = false;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let field = |ui: &mut Ui, label: &str, text: &mut String, hint: &str| {
+                ui.label(label);
+                ui.add(
+                    TextEdit::singleline(text)
+                        .margin(super::INPUT_MARGIN)
+                        .hint_text(hint)
+                        .desired_width(f32::INFINITY),
+                );
+            };
+            field(ui, "Agent name", &mut d.name, "reviewer");
+            field(ui, "Model", &mut d.model, "Empty: the session's model");
+            field(
+                ui,
+                "Description",
+                &mut d.description,
+                "When to use it, e.g. Reviews code changes",
+            );
+            ui.label("Instructions");
+            ui.add(
+                TextEdit::multiline(&mut d.instructions)
+                    .margin(super::INPUT_MARGIN)
+                    .hint_text("What it does and how")
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+            let problem = if rows.iter().any(|r| r.name == d.name) {
+                Some("There's already a sub agent with that name")
+            } else {
+                d.problem()
+            };
+            ui.horizontal(|ui| {
+                if let Some(p) = problem {
+                    ui.label(RichText::new(p).color(theme::TEXT_MUTED));
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add_enabled_ui(problem.is_none(), |ui| accent_button(ui, "Add"))
+                        .inner
+                        .clicked()
+                    {
+                        close = true;
+                        self.new_agents.push(d.clone());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if close {
+            self.draft = None;
         }
     }
 
@@ -522,6 +747,14 @@ impl ProjectForm {
             test_command: s.test_command.trim().to_string(),
         }
     }
+}
+
+/// Default model of GhostLane's own agent `name` on AI CLI `cli`.
+fn role_default(name: &str, cli: &str) -> Option<&'static str> {
+    [Role::Developer, Role::Tester, Role::Git]
+        .into_iter()
+        .find(|r| r.id() == name)
+        .and_then(|r| r.default_model(cli))
 }
 
 /// Asks whether deleting the project should leave its files or trash them too. `Some(Some(files))` once chosen,
@@ -609,8 +842,9 @@ fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings, git_excluded: &mut bool) {
     );
 }
 
-/// Dropdown between two rows: what moves tickets from the row above into `row`.
-fn auto_move_ui(ui: &mut Ui, row: &mut ColumnRow) {
+/// Dropdown between two rows: what moves tickets from the row above into `row`, and on AI Working, which of
+/// `agents` works them.
+fn auto_move_ui(ui: &mut Ui, row: &mut ColumnRow, agents: &[String]) {
     ui.horizontal(|ui| {
         ui.add_space(26.0);
         ui.label(RichText::new(icon::ARROW_DOWN).color(theme::TEXT_MUTED));
@@ -624,6 +858,21 @@ fn auto_move_ui(ui: &mut Ui, row: &mut ColumnRow) {
             });
         super::pointer(combo.response)
             .on_hover_text("AI Working: when ▶ is pressed above. AI Complete: when the AI finishes.");
+        if row.auto_move == AutoMove::AiWorking && !agents.is_empty() {
+            ui.label(RichText::new("Sub agent").color(theme::TEXT_MUTED).small());
+            const MAIN: &str = "Main session";
+            let combo = ComboBox::from_id_salt(("agent", row.key))
+                .selected_text(row.agent.as_deref().unwrap_or(MAIN))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut row.agent, None, MAIN);
+                    for a in agents {
+                        ui.selectable_value(&mut row.agent, Some(a.clone()), a);
+                    }
+                });
+            super::pointer(combo.response).on_hover_text(
+                "The sub agent ▶ hands these tickets to. Main session: the AI CLI works on them itself.",
+            );
+        }
     });
 }
 
@@ -672,7 +921,7 @@ mod tests {
             (form, None),
         );
         crate::theme::apply(&h.ctx);
-        h.set_size(egui::vec2(900.0, 1000.0));
+        h.set_size(egui::vec2(900.0, 1400.0));
         h.run_steps(3);
         h
     }
@@ -702,7 +951,7 @@ mod tests {
             (form, None),
         );
         crate::theme::apply(&h.ctx);
-        h.set_size(egui::vec2(900.0, 1000.0));
+        h.set_size(egui::vec2(900.0, 1400.0));
         h.run_steps(3);
         h.get_by_label_contains("Board as Markdown report").click();
         h.run();
@@ -728,7 +977,7 @@ mod tests {
             (form, Vec::new()),
         );
         crate::theme::apply(&h.ctx);
-        h.set_size(egui::vec2(900.0, 1000.0));
+        h.set_size(egui::vec2(900.0, 1400.0));
         h.run_steps(3);
         // Bottom left, on the row with Save.
         let delete = h.get_by_label("Delete").rect();
@@ -782,7 +1031,7 @@ mod tests {
             (form, None),
         );
         crate::theme::apply(&h.ctx);
-        h.set_size(egui::vec2(900.0, 1000.0));
+        h.set_size(egui::vec2(900.0, 1400.0));
         h.run_steps(3);
         let title = h.get_by_label("Edit Project").rect();
         let folder = h.get_by_label(icon::FOLDER_OPEN).rect();
@@ -936,6 +1185,81 @@ mod tests {
             h.step();
         }
         assert_eq!(h.state().1, Some(true));
+    }
+
+    #[test]
+    fn ai_working_columns_pick_a_sub_agent() {
+        let mut h = harness();
+        assert_eq!(h.get_all_by_label("Sub agent").count(), 2, "In Dev and In Test");
+        let form = &mut h.state_mut().0;
+        form.location = Some(PathBuf::from("/p"));
+        // A column that stops moving on AI Working drops its agent.
+        form.rows[2].agent = Some("developer".into());
+        let ProjectOutcome::Create { columns, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        let agents: Vec<_> = columns.iter().map(|c| c.agent.as_deref()).collect();
+        assert_eq!(agents, DEFAULT_AGENTS);
+    }
+
+    #[test]
+    fn sub_agents_list_their_models_and_git_comes_with_commit() {
+        let mut h = harness();
+        // Room for the new sub agent form without scrolling.
+        h.set_size(egui::vec2(900.0, 2000.0));
+        h.run_steps(3);
+        let names = |h: &Harness<'static, (ProjectForm, Option<bool>)>| {
+            h.state()
+                .0
+                .agent_rows()
+                .into_iter()
+                .map(|a| (a.name, a.model))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&h),
+            [
+                ("developer".into(), "claude-opus-5-5".into()),
+                ("tester".into(), "claude-sonnet-5-5".into())
+            ]
+        );
+        h.get_by_label("Commit when ticket is done").click();
+        h.run();
+        assert_eq!(names(&h)[0], ("developer".into(), "claude-opus-5-5".into()));
+        assert_eq!(names(&h)[1], ("git".into(), "claude-sonnet-5-5".into()));
+        assert!(h.query_by_label("git").is_some());
+
+        h.get_by_label_contains("New sub agent").click();
+        h.run();
+        let form = &mut h.state_mut().0;
+        *form.draft.as_mut().unwrap() = NewAgent {
+            name: "tester".into(),
+            description: "Reviews".into(),
+            instructions: "Review it.".into(),
+            ..Default::default()
+        };
+        h.run();
+        assert!(h.query_by_label("There's already a sub agent with that name").is_some());
+        h.state_mut().0.draft.as_mut().unwrap().name = "reviewer".into();
+        h.run();
+        h.get_by_label("Add").click();
+        h.run();
+        let form = &mut h.state_mut().0;
+        assert!(form.draft.is_none());
+        form.location = Some(PathBuf::from("/p"));
+        form.models.insert("tester".into(), " claude-haiku-5-5 ".into());
+        form.models.insert("developer".into(), "claude-opus-5-5".into());
+        let ProjectOutcome::Create { agents, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        assert_eq!(agents.new[0].name, "reviewer");
+        assert_eq!(
+            agents.models,
+            [("tester".into(), "claude-haiku-5-5".into())],
+            "only changed ones"
+        );
+        form.models.insert("tester".into(), "bad: model".into());
+        assert!(form.validation().is_err());
     }
 
     #[test]

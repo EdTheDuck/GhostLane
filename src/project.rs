@@ -30,6 +30,8 @@ pub const DEFAULT_PROMPTS: [Option<&str>; 5] = [
     None,
     None,
 ];
+/// Sub agents working the default columns that tickets move into on AI Working.
+pub const DEFAULT_AGENTS: [Option<&str>; 5] = [None, Some("developer"), None, Some("tester"), None];
 
 /// What moves a ticket into a column from the column before it, without the user dragging it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,9 @@ pub struct Column {
     /// Most tickets the column should hold; its count turns red past it and Auto won't fill it further.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wip_limit: Option<u32>,
+    /// Sub agent that works tickets moved in on AI Working; `None` = the session itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Markers around the ticket guide GhostLane keeps in an AI CLI's instructions file.
@@ -159,6 +164,7 @@ pub struct ColumnEdit {
     pub auto_move: AutoMove,
     pub ai_prompt: Option<String>,
     pub wip_limit: Option<u32>,
+    pub agent: Option<String>,
 }
 
 pub struct Project {
@@ -219,7 +225,7 @@ impl Project {
         // Absolute, so the root (also the terminal's working folder) never comes out empty.
         let ghost_path = &std::path::absolute(ghost_path)?;
         let text = fs::read_to_string(ghost_path)?;
-        let meta: GhostFile = serde_yaml_ng::from_str(&text)
+        let mut meta: GhostFile = serde_yaml_ng::from_str(&text)
             .map_err(|e| err(format!("{} is not a valid .ghost file: {e}", ghost_path.display())))?;
         // Folders end up in paths and shell commands, and .ghost files can come from untrusted repos:
         // only accept what `folder_name` would have produced.
@@ -231,6 +237,12 @@ impl Project {
                     ghost_path.display(),
                     c.folder.escape_default()
                 )));
+            }
+        }
+        // Agent names go into prompts; drop any that aren't plain names.
+        for c in &mut meta.columns {
+            if c.agent.as_deref().is_some_and(|a| !crate::agents::valid_name(a)) {
+                c.agent = None;
             }
         }
         let root = ghost_path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -270,6 +282,7 @@ impl Project {
                 auto_move: AutoMove::Manual,
                 ai_prompt: None,
                 wip_limit: None,
+                agent: None,
             })
             .collect();
         let meta = GhostFile {
@@ -607,6 +620,7 @@ impl Project {
                     auto_move: e.auto_move,
                     ai_prompt: e.ai_prompt.clone(),
                     wip_limit: e.wip_limit.filter(|&n| n > 0),
+                    agent: e.agent.clone(),
                 }
             })
             .collect();
@@ -1079,6 +1093,23 @@ mod tests {
         )
         .unwrap();
         assert!(Project::load(&path).is_ok());
+    }
+
+    #[test]
+    fn column_agents_round_trip_and_odd_names_are_dropped() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("p.ghost");
+        fs::write(
+            &path,
+            "name: P\ncolumns:\n- {name: A, folder: a, agent: tester}\n- {name: B, folder: b, agent: \"x; rm -rf /\"}\n",
+        )
+        .unwrap();
+        let p = Project::load(&path).unwrap();
+        assert_eq!(p.meta.columns[0].agent.as_deref(), Some("tester"));
+        assert_eq!(p.meta.columns[1].agent, None);
+        p.save_meta().unwrap();
+        let p = Project::load(&path).unwrap();
+        assert_eq!(p.meta.columns[0].agent.as_deref(), Some("tester"));
     }
 
     #[test]

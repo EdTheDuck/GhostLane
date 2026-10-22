@@ -12,7 +12,8 @@ use egui_phosphor::regular as icon;
 use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 
-use crate::config::AppConfig;
+use crate::agents::AgentEdits;
+use crate::config::{AppConfig, ProjectSettings};
 use crate::project::{AutoMove, Project, Sort};
 use crate::terminal::{self, Terminals};
 use crate::theme;
@@ -172,7 +173,7 @@ pub enum ExportFormat {
 }
 
 pub enum Modal {
-    Project(ProjectForm),
+    Project(Box<ProjectForm>),
     ViewTicket(TicketView),
     EditTicket(Box<TicketForm>),
     ViewEpic(EpicView),
@@ -832,14 +833,14 @@ impl App {
             Action::NewProject => {
                 let clis = self.config.settings.enabled_clis();
                 let form = ProjectForm::new_project(clis, &self.config.settings.ai_prompt);
-                self.modal = Some(Modal::Project(form));
+                self.modal = Some(Modal::Project(Box::new(form)));
             }
             Action::EditProject => {
                 let clis = self.config.settings.enabled_clis();
                 if let Some(p) = self.active_project() {
                     let settings = self.config.project(&p.ghost_path);
                     let form = ProjectForm::edit(p, clis, &self.config.settings.ai_prompt, settings);
-                    self.modal = Some(Modal::Project(form));
+                    self.modal = Some(Modal::Project(Box::new(form)));
                 }
             }
             Action::ImportDocument => self.modal = Some(Modal::Import(ImportForm::default())),
@@ -1379,6 +1380,12 @@ impl App {
                 return false;
             }
         };
+        // Names are checked on load, so only a plain name reaches the prompt.
+        if let Some(agent) = working_col.and_then(|c| p.meta.columns[c].agent.as_deref())
+            && crate::agents::has_agents(cli.id)
+        {
+            prompt.push_str(&format!(" Use the {agent} sub agent to work on it."));
+        }
         // In parallel, the ticket works in a worktree and a terminal of its own.
         // ponytail: sets the worktree up on the UI thread; move it to a background job if big repos make it lag.
         let (session, cwd, worktree) = if self.parallel(pi) {
@@ -2750,6 +2757,7 @@ impl App {
                 ai_cli,
                 settings,
                 git_excluded,
+                agents,
             } => match Project::create(&dir, &name, &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()) {
                 Ok(mut p) => {
                     self.modal = None;
@@ -2758,11 +2766,12 @@ impl App {
                         c.auto_move = edit.auto_move;
                         c.ai_prompt = edit.ai_prompt;
                         c.wip_limit = edit.wip_limit.filter(|&n| n > 0);
+                        c.agent = edit.agent;
                     }
                     if let Err(e) = p.save_meta() {
                         self.toast(format!("Couldn't save the project's settings: {e}"));
                     }
-                    if let Err(e) = write_ai_guide(&p) {
+                    if let Err(e) = write_ai_guide(&p, &settings, &agents) {
                         self.toast(e);
                     }
                     if let Err(e) = p.set_git_excluded(git_excluded) {
@@ -2784,13 +2793,14 @@ impl App {
                 ai_cli,
                 settings,
                 git_excluded,
+                agents,
             } => {
                 self.modal = None;
                 if let Some(Err(e)) = self.active_project().map(|p| p.set_git_excluded(git_excluded)) {
                     self.toast(format!("Couldn't update .gitignore: {e}"));
                 }
                 if let Some(ghost) = self.active_project().map(|p| p.ghost_path.clone()) {
-                    self.config.projects.insert(ghost, settings);
+                    self.config.projects.insert(ghost, settings.clone());
                     self.save_config();
                 }
                 let Some(p) = self.active_project_mut() else { return };
@@ -2798,7 +2808,7 @@ impl App {
                 let result = p
                     .apply_columns(&name, &edits, &targets)
                     .map_err(|e| format!("Couldn't update project: {e}"));
-                match result.and_then(|_| write_ai_guide(p)) {
+                match result.and_then(|_| write_ai_guide(p, &settings, &agents)) {
                     Ok(()) => {}
                     Err(e) => {
                         self.toast(e);
@@ -3286,12 +3296,20 @@ fn finish_worktree(
     crate::git::remove_worktree(root, top, branch).map_err(Failed)
 }
 
-fn write_ai_guide(p: &Project) -> Result<(), String> {
+fn write_ai_guide(p: &Project, settings: &ProjectSettings, agents: &AgentEdits) -> Result<(), String> {
     let id = p.meta.ai_cli.as_deref().unwrap_or(terminal::DEFAULT_CLI);
     let Some(cli) = terminal::ai_cli(id) else { return Ok(()) };
     p.write_ai_guide(cli.instructions_file)
         .map_err(|e| format!("Couldn't update {}: {e}", cli.instructions_file))?;
-    let skipped = crate::agents::write_agents(p, cli.id).map_err(|e| format!("Couldn't write the AI agents: {e}"))?;
+    for a in &agents.new {
+        crate::agents::create(&p.root, cli.id, a).map_err(|e| format!("Couldn't add the {} agent: {e}", a.name))?;
+    }
+    let skipped =
+        crate::agents::write_agents(p, cli.id, settings).map_err(|e| format!("Couldn't write the AI agents: {e}"))?;
+    for (name, model) in &agents.models {
+        crate::agents::set_model(&p.root, cli.id, name, model)
+            .map_err(|e| format!("Couldn't set the {name} agent's model: {e}"))?;
+    }
     match skipped.as_slice() {
         [] => Ok(()),
         files => Err(format!(

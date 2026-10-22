@@ -22,7 +22,7 @@ Native app for Windows, macOS and Linux, written in Rust. No account, no server,
 - **Hands-free when you want it.** Queue up tickets while the AI is busy, switch a column to Auto and let it work through the backlog by itself, or schedule the queue to run overnight. Pause or stop it whenever you need to step in.
 - **Several tickets at once.** Turn on parallel runs and each ticket gets its own git worktree and terminal, so three AIs can work side by side and their work merges back when each ticket is done.
 - **Tickets move themselves.** Press ▶ on a To Do ticket and it slides into In Dev while the AI works, then on to Ready For Test when it's done. Testing works the same way, so a ticket can go from idea to Done with two clicks.
-- **A Developer and a Tester on call.** GhostLane sets up developer and tester sub agents for your AI CLI that know your columns, which tickets are theirs and where to move them next.
+- **A Developer and a Tester on call.** GhostLane sets up developer and tester sub agents for your AI CLI that know your columns, which tickets are theirs and where to move them next. The Tester runs on a cheaper model, each column picks which agent works it, and you can add your own.
 - **A big backlog stays readable.** Epics group tickets under a bigger goal with a progress bar, and labels, a filter bar, WIP limits and arrows between dependent tickets show what matters at a glance. Ctrl+K jumps to any ticket, epic or command.
 - **The AI can see the plan.** Tickets live in `tickets/` inside your project, so your AI can read past and upcoming work, and can create or edit tickets itself. The board picks up every change the moment the file changes.
 - **Bring your own AI.** Claude Code, OpenAI Codex, Gemini CLI, GitHub Copilot CLI, Cursor, opencode and Aider are built in. Each project picks its own.
@@ -198,12 +198,15 @@ The **Export** buttons in the project dialog (the pencil next to the project nam
 
 Whenever you create or save a project, GhostLane writes a short guide to your columns, their folders and the ticket format into the instructions file your AI CLI reads: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, Cursor and opencode, `GEMINI.md` for Gemini CLI, `.github/copilot-instructions.md` for Copilot and `CONVENTIONS.md` for Aider. The guide sits in its own marked block, so anything else you keep in that file stays as it is.
 
-Where the CLI supports sub agents (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor and opencode), GhostLane also sets up two of them:
+Where the CLI supports sub agents (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor and opencode), GhostLane also sets up a few of them:
 
 - a **Developer** that picks up tickets waiting for development, moves them into the development column before starting and on for testing when the work is done
 - a **Tester** that checks finished work against each ticket's test scope, passes it on, or notes what failed and sends it back for rework
+- a **Git** agent, when the project commits, that commits each ticket's work with its number and title and pushes it if you push
 
-Both know every column, its folder and how tickets move between them, and GhostLane rewrites them whenever you change your columns or transitions. If you already have your own agent file with the same name, GhostLane leaves it alone.
+The Developer runs on your CLI's strongest model (Opus 5.5 on Claude Code, GPT-5.5 on Codex); the Tester and Git agents run on a cheaper one (Sonnet 5.5, GPT-5.4 mini, Gemini 3.5 Flash). The **Sub agents** list in the project dialog shows every agent in the project and its model: change a model right there, or add a sub agent of your own with a name, a model and its instructions. Each column that tickets move into on **AI Working** picks the sub agent that works them, and ▶ hands the ticket to it.
+
+They all know every column, its folder and how tickets move between them, and GhostLane rewrites them whenever you change your columns or transitions. If you already have your own agent file with the same name, GhostLane leaves it alone.
 
 ### Search and sort every column
 
