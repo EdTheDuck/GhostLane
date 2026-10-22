@@ -275,6 +275,7 @@ impl ProjectForm {
                 super::pointer(combo.response).on_hover_text("Used by the ▶ button. Turn on more tools in Settings.");
             });
             ui.add_space(8.0);
+            self.agents_ui(ui);
 
             let add = ui
                 .horizontal(|ui| {
@@ -304,7 +305,6 @@ impl ProjectForm {
             self.removed_ui(ui);
             ui.add_space(8.0);
             settings_ui(ui, &mut self.settings, &mut self.git_excluded);
-            self.agents_ui(ui);
             if self.editing {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -581,14 +581,20 @@ impl ProjectForm {
         if !has_agents(&self.ai_cli) {
             return Vec::new();
         }
+        let fallback = |a: &AgentInfo| role_default(&a.name, &self.ai_cli).filter(|_| a.managed);
         let mut rows: Vec<AgentRow> = self
             .found
             .iter()
             .map(|a| AgentRow {
                 name: a.name.clone(),
-                model: a.model.clone().unwrap_or_default(),
+                // GhostLane's own agents without a model get their default when saved.
+                model: a
+                    .model
+                    .clone()
+                    .or_else(|| fallback(a).map(str::to_string))
+                    .unwrap_or_default(),
                 note: if a.managed { "GhostLane" } else { "Yours" },
-                fallback: role_default(&a.name, &self.ai_cli).filter(|_| a.managed),
+                fallback: fallback(a),
             })
             .collect();
         let roles = [Role::Developer, Role::Tester, Role::Git];
@@ -639,7 +645,6 @@ impl ProjectForm {
         if !has_agents(&self.ai_cli) {
             return;
         }
-        ui.add_space(8.0);
         let rows = self.agent_rows();
         ui.horizontal(|ui| {
             ui.label("Sub agents");
@@ -665,20 +670,15 @@ impl ProjectForm {
                     ui.label(RichText::new(row.note).small().color(theme::TEXT_MUTED))
                         .on_hover_text(tip);
                     let mut model = self.models.get(&row.name).unwrap_or(&row.model).clone();
-                    let edit = ui
-                        .add(
-                            TextEdit::singleline(&mut model)
-                                .margin(super::INPUT_MARGIN)
-                                .hint_text(row.fallback.unwrap_or("Session's model"))
-                                .desired_width(220.0),
-                        )
-                        .on_hover_text("The model this sub agent runs on. Empty: the same as the session.");
-                    if edit.changed() {
+                    let id = ("agent_model", &row.name);
+                    if model_combo(ui, id, &self.ai_cli, &mut model, row.fallback.is_none()) {
                         self.models.insert(row.name.clone(), model);
                     }
                 });
             });
         }
+        ui.add_space(8.0);
+        let cli = self.ai_cli.clone();
         let Some(d) = &mut self.draft else { return };
         let mut close = false;
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -693,7 +693,8 @@ impl ProjectForm {
                 );
             };
             field(ui, "Agent name", &mut d.name, "reviewer");
-            field(ui, "Model", &mut d.model, "Empty: the session's model");
+            ui.label("Model");
+            model_combo(ui, "new_agent_model", &cli, &mut d.model, true);
             field(
                 ui,
                 "Description",
@@ -747,6 +748,39 @@ impl ProjectForm {
             test_command: s.test_command.trim().to_string(),
         }
     }
+}
+
+/// Dropdown of AI CLI `cli`'s models for `model`, plus the session's model (empty) when `session`. A model set
+/// by hand in the agent file stays listed. True when changed.
+fn model_combo(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    cli: &str,
+    model: &mut String,
+    session: bool,
+) -> bool {
+    const SESSION: &str = "Session's model";
+    let current = model.clone();
+    let mut options: Vec<&str> = session.then_some("").into_iter().collect();
+    options.extend(crate::agents::models(cli));
+    if !options.contains(&current.as_str()) {
+        options.push(&current);
+    }
+    let label = |m: &str| if m.is_empty() { SESSION } else { m }.to_string();
+    let mut changed = false;
+    let combo = ComboBox::from_id_salt(id)
+        .width(220.0)
+        .selected_text(label(&current))
+        .show_ui(ui, |ui| {
+            for m in &options {
+                if ui.selectable_label(current == *m, label(m)).clicked() && current != *m {
+                    *model = m.to_string();
+                    changed = true;
+                }
+            }
+        });
+    super::pointer(combo.response).on_hover_text("The model this sub agent runs on");
+    changed
 }
 
 /// Default model of GhostLane's own agent `name` on AI CLI `cli`.
@@ -1223,6 +1257,25 @@ mod tests {
                 ("tester".into(), "claude-sonnet-5-5".into())
             ]
         );
+        // Above the columns, each model a dropdown of the CLI's models.
+        assert!(h.get_by_label("Sub agents").rect().bottom() < h.get_by_label("Columns").rect().top());
+        h.get_by_value("claude-sonnet-5-5").click();
+        h.run();
+        h.get_by_label("claude-haiku-5-5").click();
+        h.run();
+        assert_eq!(
+            h.state().0.models.get("tester").map(String::as_str),
+            Some("claude-haiku-5-5")
+        );
+        h.get_by_value("claude-opus-5-5").click();
+        h.run();
+        assert!(h.query_by_label("claude-fable-5-1").is_some());
+        assert!(
+            h.query_by_label("Session's model").is_none(),
+            "GhostLane's agents fall back to their default"
+        );
+        h.get_by_label("claude-opus-5-5").click();
+        h.run();
         h.get_by_label("Commit when ticket is done").click();
         h.run();
         assert_eq!(names(&h)[0], ("developer".into(), "claude-opus-5-5".into()));

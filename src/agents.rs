@@ -64,6 +64,23 @@ impl Role {
     }
 }
 
+/// Models offered for AI CLI `cli`'s sub agents, strongest first; empty when they depend on the user's plan or
+/// provider.
+pub fn models(cli: &str) -> &'static [&'static str] {
+    match cli {
+        "claude" => &[
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+        ],
+        "codex" => &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
+        "gemini" => &["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.5-flash-lite"],
+        "copilot" => &["Claude Opus 5.5", "Claude Sonnet 5.5", "Claude Haiku 5.5", "GPT-5.5"],
+        _ => &[],
+    }
+}
+
 /// Where AI CLI `cli` keeps a project's sub agents and their file ending; `None` when it has none.
 fn agent_dir(cli: &str) -> Option<(&'static str, &'static str)> {
     match cli {
@@ -563,6 +580,18 @@ mod tests {
         let git = fs::read_to_string(d.path().join(".claude/agents/git.md")).unwrap();
         assert!(git.contains("model: claude-sonnet-5-5\n") && git.contains("Don't push."));
         assert_eq!(Role::Git.default_model("codex"), Role::Tester.default_model("codex"));
+    }
+
+    #[test]
+    fn every_default_model_is_offered() {
+        for cli in ["claude", "codex", "gemini", "copilot", "cursor", "opencode"] {
+            for role in [Role::Developer, Role::Tester, Role::Git] {
+                if let Some(m) = role.default_model(cli) {
+                    assert!(models(cli).contains(&m), "{cli} {m}");
+                }
+            }
+            assert!(models(cli).iter().all(|m| valid_model(m)));
+        }
     }
 
     #[test]

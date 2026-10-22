@@ -204,7 +204,7 @@ Where the CLI supports sub agents (Claude Code, Codex, Gemini CLI, GitHub Copilo
 - a **Tester** that checks finished work against each ticket's test scope, passes it on, or notes what failed and sends it back for rework
 - a **Git** agent, when the project commits, that commits each ticket's work with its number and title and pushes it if you push
 
-The Developer runs on your CLI's strongest model (Opus 5.5 on Claude Code, GPT-5.5 on Codex); the Tester and Git agents run on a cheaper one (Sonnet 5.5, GPT-5.4 mini, Gemini 3.5 Flash). The **Sub agents** list in the project dialog shows every agent in the project and its model: change a model right there, or add a sub agent of your own with a name, a model and its instructions. Each column that tickets move into on **AI Working** picks the sub agent that works them, and ▶ hands the ticket to it.
+The Developer runs on your CLI's strongest model (Opus 5.5 on Claude Code, GPT-5.5 on Codex); the Tester and Git agents run on a cheaper one (Sonnet 5.5, GPT-5.4 mini, Gemini 3.5 Flash). The **Sub agents** list in the project dialog sits above the columns and shows every agent in the project with its model: pick another model from the dropdown, or add a sub agent of your own with a name, a model and its instructions. Each column that tickets move into on **AI Working** picks the sub agent that works them, and ▶ hands the ticket to it.
 
 They all know every column, its folder and how tickets move between them, and GhostLane rewrites them whenever you change your columns or transitions. If you already have your own agent file with the same name, GhostLane leaves it alone.
 
