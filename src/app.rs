@@ -1384,7 +1384,11 @@ impl App {
         if let Some(agent) = working_col.and_then(|c| p.meta.columns[c].agent.as_deref())
             && crate::agents::has_agents(cli.id)
         {
-            prompt.push_str(&format!(" Use the {agent} sub agent to work on it."));
+            // In the background, the CLI would stop at once and GhostLane would start the next ticket meanwhile.
+            prompt.push_str(&format!(
+                " Use the {agent} sub agent to work on it. Run it in the foreground and wait for it to finish \
+                 before you stop."
+            ));
         }
         // In parallel, the ticket works in a worktree and a terminal of its own.
         // ponytail: sets the worktree up on the UI thread; move it to a background job if big repos make it lag.
@@ -1596,8 +1600,7 @@ impl App {
         for (ghost, id) in failed {
             self.retry(&ghost, id);
         }
-        // A project whose AI is free starts its next queued ticket, or with an empty queue, the next one
-        // from its Auto columns. Not while a ticket is being written: that prompt is still in flight.
+        // A project whose AI is free starts its next queued or Auto ticket. Not while a ticket is being written: that prompt is still in flight.
         if self.generating.is_none() {
             for i in 0..self.projects.len() {
                 self.start_next(i, settings.auto_order, settings.auto_run_limit, ctx);
@@ -1647,8 +1650,7 @@ impl App {
         }
     }
 
-    /// Starts project `i`'s next queued tickets, or with an empty queue, the next ones from its Auto columns, until
-    /// its AI is as busy as it gets, unless it is paused.
+    /// Starts project `i`'s next queued or Auto tickets until its AI is as busy as it gets, unless it is paused.
     fn start_next(&mut self, i: usize, order: crate::project::AutoOrder, run_limit: u32, ctx: &egui::Context) {
         self.check_git(i);
         while !self.projects[i].paused && self.projects[i].project.is_ok() && !self.ai_full(i) {
@@ -1658,25 +1660,31 @@ impl App {
         }
     }
 
-    /// Starts project `i`'s next queued ticket, or with an empty queue, the next one from its Auto columns. False
+    /// Starts project `i`'s next ticket: one from its Auto columns when that is further along the board than the
+    /// next queued ticket (a ticket waiting for testing goes before new development), else the queued one. False
     /// when nothing started.
     fn start_one(&mut self, i: usize, order: crate::project::AutoOrder, run_limit: u32, ctx: &egui::Context) -> bool {
+        let op = &self.projects[i];
+        let auto = op
+            .project
+            .as_ref()
+            .ok()
+            .and_then(|p| p.next_auto(&op.auto, order, run_limit));
+        let column = |app: &Self, id| {
+            let p = app.projects[i].project.as_ref().ok()?;
+            p.find_ticket(id).map(|(c, _)| c)
+        };
         // Queued tickets waiting for others stay queued until those are done.
         while self.queue_runs(i)
             && let Some(pos) = self.next_queued(i)
+            && auto.is_none_or(|(a, _)| column(self, self.projects[i].queue[pos]).is_none_or(|q| q >= a))
         {
             let id = self.projects[i].queue.remove(pos);
             if self.run_ai(i, id, ctx) {
                 return true;
             }
         }
-        let op = &self.projects[i];
-        let Some((col, id)) = op
-            .project
-            .as_ref()
-            .ok()
-            .and_then(|p| p.next_auto(&op.auto, order, run_limit))
-        else {
+        let Some((col, id)) = auto else {
             return false;
         };
         let started = self.run_ai(i, id, ctx);

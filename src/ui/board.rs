@@ -634,9 +634,10 @@ fn click(
     }
 }
 
-/// "Auto" switch: while on, the AI works through this column's tickets by itself whenever its queue is empty.
+/// "Auto" switch: while on, the AI works through this column's tickets by itself, before queued tickets from
+/// earlier columns.
 fn auto_toggle(ui: &mut Ui, auto: &mut HashSet<String>, folder: &str) {
-    const TIP: &str = "Work on this column's tickets automatically when the queue is empty";
+    const TIP: &str = "Work on this column's tickets automatically, before queued tickets from earlier columns";
     let mut on = auto.contains(folder);
     ui.add_space(6.0);
     super::switch_row(ui, &mut on, "Auto").on_hover_text(TIP);

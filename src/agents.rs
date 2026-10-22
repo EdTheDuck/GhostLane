@@ -637,7 +637,8 @@ pub fn workflow(p: &Project, cli: &str, commit: bool) -> String {
     }
     if agents {
         out.push_str(
-            "- Hand over one ticket at a time and let the sub agent move it. Afterwards, check which column the \
+            "- Hand over one ticket at a time and let the sub agent move it. Run sub agents in the foreground, never \
+             in the background, and wait for each to finish before the next step. Afterwards, check which column the \
              ticket ended up in and report that; a ticket sent back to an earlier column has the reason in its \
              Notes.\n",
         );
