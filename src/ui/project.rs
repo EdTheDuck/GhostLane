@@ -75,7 +75,8 @@ pub struct ProjectForm {
     pub error: Option<String>,
 }
 
-/// A line of the sub agent list: name, model (empty = the session's), and where it comes from.
+/// A line of the sub agent list: name, model (empty = the session's), and where it comes from (empty = not
+/// written yet).
 struct AgentRow {
     name: String,
     model: String,
@@ -603,7 +604,7 @@ impl ProjectForm {
                 rows.push(AgentRow {
                     name: r.id().to_string(),
                     model: r.default_model(&self.ai_cli).unwrap_or_default().to_string(),
-                    note: "New",
+                    note: "",
                     fallback: r.default_model(&self.ai_cli),
                 });
             }
@@ -611,7 +612,7 @@ impl ProjectForm {
         rows.extend(self.new_agents.iter().map(|a| AgentRow {
             name: a.name.clone(),
             model: a.model.clone(),
-            note: "New",
+            note: "",
             fallback: None,
         }));
         rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -667,8 +668,10 @@ impl ProjectForm {
                         "Yours" => "Not made by GhostLane: only its model is changed here",
                         _ => "Written when the project is saved",
                     };
-                    ui.label(RichText::new(row.note).small().color(theme::TEXT_MUTED))
-                        .on_hover_text(tip);
+                    if !row.note.is_empty() {
+                        ui.label(RichText::new(row.note).small().color(theme::TEXT_MUTED))
+                            .on_hover_text(tip);
+                    }
                     let mut model = self.models.get(&row.name).unwrap_or(&row.model).clone();
                     let id = ("agent_model", &row.name);
                     if model_combo(ui, id, &self.ai_cli, &mut model, row.fallback.is_none()) {
@@ -1257,6 +1260,7 @@ mod tests {
                 ("tester".into(), "claude-sonnet-5-5".into())
             ]
         );
+        assert!(h.query_by_label("New").is_none(), "agents not written yet carry no tag");
         // Above the columns, each model a dropdown of the CLI's models.
         assert!(h.get_by_label("Sub agents").rect().bottom() < h.get_by_label("Columns").rect().top());
         h.get_by_value("claude-sonnet-5-5").click();
