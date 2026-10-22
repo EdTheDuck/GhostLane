@@ -72,6 +72,10 @@ pub struct ProjectForm {
     new_agents: Vec<NewAgent>,
     /// The sub agent being written, while its form is open.
     draft: Option<NewAgent>,
+    /// The agent the open form edits, by name; `None` = it adds one.
+    editing_agent: Option<String>,
+    /// Sub agents edited, by name, written when the dialog is saved. GhostLane's own only take instructions.
+    edited: HashMap<String, NewAgent>,
     pub error: Option<String>,
 }
 
@@ -83,6 +87,10 @@ struct AgentRow {
     note: &'static str,
     /// What an empty model means: GhostLane's own agents go back to their default.
     fallback: Option<&'static str>,
+    /// GhostLane writes it from the columns.
+    managed: bool,
+    /// Its file, if any, can be edited here.
+    editable: bool,
 }
 
 pub enum ProjectOutcome {
@@ -156,6 +164,8 @@ impl ProjectForm {
             models: HashMap::new(),
             new_agents: Vec::new(),
             draft: None,
+            editing_agent: None,
+            edited: HashMap::new(),
             error: None,
         }
     }
@@ -202,6 +212,8 @@ impl ProjectForm {
             models: HashMap::new(),
             new_agents: Vec::new(),
             draft: None,
+            editing_agent: None,
+            edited: HashMap::new(),
             error: None,
         }
     }
@@ -562,8 +574,8 @@ impl ProjectForm {
         }
     }
 
-    /// Re-reads the sub agents in the project folder when the AI CLI or folder changed; models typed for the old
-    /// ones go.
+    /// Re-reads the sub agents in the project folder when the AI CLI or folder changed; models chosen and edits
+    /// made for the old ones go.
     fn find_agents(&mut self) {
         let key = self.location.clone().map(|l| (self.ai_cli.clone(), l));
         if key != self.found_for {
@@ -572,6 +584,7 @@ impl ProjectForm {
                 .map(|(cli, dir)| crate::agents::list(dir, cli))
                 .unwrap_or_default();
             self.models.clear();
+            self.edited.clear();
             self.found_for = key;
         }
     }
@@ -596,6 +609,8 @@ impl ProjectForm {
                     .unwrap_or_default(),
                 note: if a.managed { "GhostLane" } else { "Yours" },
                 fallback: fallback(a),
+                managed: a.managed,
+                editable: a.editable,
             })
             .collect();
         let roles = [Role::Developer, Role::Tester, Role::Git];
@@ -606,6 +621,8 @@ impl ProjectForm {
                     model: r.default_model(&self.ai_cli).unwrap_or_default().to_string(),
                     note: "",
                     fallback: r.default_model(&self.ai_cli),
+                    managed: true,
+                    editable: true,
                 });
             }
         }
@@ -614,6 +631,8 @@ impl ProjectForm {
             model: a.model.clone(),
             note: "",
             fallback: None,
+            managed: false,
+            editable: true,
         }));
         rows.sort_by(|a, b| a.name.cmp(&b.name));
         rows
@@ -635,9 +654,17 @@ impl ProjectForm {
             })
             .collect();
         models.sort();
+        let mut edited: Vec<NewAgent> = self
+            .edited
+            .values()
+            .filter(|a| rows.iter().any(|r| r.name == a.name))
+            .cloned()
+            .collect();
+        edited.sort_by(|a, b| a.name.cmp(&b.name));
         AgentEdits {
             new: self.new_agents.clone(),
             models,
+            edited,
         }
     }
 
@@ -653,19 +680,32 @@ impl ProjectForm {
                 let new = egui::Button::new(format!("{}  New sub agent", icon::PLUS));
                 if ui.add_enabled(self.draft.is_none(), new).clicked() {
                     self.draft = Some(NewAgent::default());
+                    self.editing_agent = None;
                 }
             });
         });
+        let mut open = None;
         for row in &rows {
             ui.horizontal(|ui| {
                 ui.add_space(26.0);
                 ui.label(RichText::new(&row.name).monospace());
+                let edit = ui
+                    .add_enabled_ui(self.draft.is_none() && row.editable, |ui| {
+                        icon_button(ui, icon::PENCIL_SIMPLE, "Edit")
+                    })
+                    .inner;
+                if edit.clicked() {
+                    open = Some(row);
+                }
+                if !row.editable {
+                    edit.on_disabled_hover_text("Its file is laid out in a way GhostLane can't edit");
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let tip = match row.note {
                         "GhostLane" => {
                             "Kept up to date by GhostLane from the board's columns when the project is saved"
                         }
-                        "Yours" => "Not made by GhostLane: only its model is changed here",
+                        "Yours" => "Not made by GhostLane, which never rewrites it",
                         _ => "Written when the project is saved",
                     };
                     if !row.note.is_empty() {
@@ -681,8 +721,14 @@ impl ProjectForm {
             });
         }
         ui.add_space(8.0);
+        if let Some(row) = open {
+            self.draft = Some(self.agent_to_edit(row));
+            self.editing_agent = Some(row.name.clone());
+        }
         let cli = self.ai_cli.clone();
         let Some(d) = &mut self.draft else { return };
+        let editing = self.editing_agent.clone();
+        let managed = editing.is_some() && rows.iter().any(|r| r.name == d.name && r.managed);
         let mut close = false;
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -695,16 +741,30 @@ impl ProjectForm {
                         .desired_width(f32::INFINITY),
                 );
             };
-            field(ui, "Agent name", &mut d.name, "reviewer");
-            ui.label("Model");
-            model_combo(ui, "new_agent_model", &cli, &mut d.model, true);
-            field(
-                ui,
-                "Description",
-                &mut d.description,
-                "When to use it, e.g. Reviews code changes",
-            );
-            ui.label("Instructions");
+            if let Some(name) = &editing {
+                ui.label(RichText::new(name).monospace().strong());
+            } else {
+                field(ui, "Agent name", &mut d.name, "reviewer");
+                ui.label("Model");
+                model_combo(ui, "new_agent_model", &cli, &mut d.model, true);
+            }
+            if managed {
+                ui.label(
+                    RichText::new(
+                        "GhostLane writes this agent's steps from the board's columns. What you add here is kept \
+                         when it rewrites them.",
+                    )
+                    .color(theme::TEXT_MUTED),
+                );
+            } else {
+                field(
+                    ui,
+                    "Description",
+                    &mut d.description,
+                    "When to use it, e.g. Reviews code changes",
+                );
+            }
+            ui.label(if managed { "Your instructions" } else { "Instructions" });
             ui.add(
                 TextEdit::multiline(&mut d.instructions)
                     .margin(super::INPUT_MARGIN)
@@ -712,7 +772,9 @@ impl ProjectForm {
                     .desired_rows(4)
                     .desired_width(f32::INFINITY),
             );
-            let problem = if rows.iter().any(|r| r.name == d.name) {
+            let problem = if managed {
+                None
+            } else if editing.is_none() && rows.iter().any(|r| r.name == d.name) {
                 Some("There's already a sub agent with that name")
             } else {
                 d.problem()
@@ -722,13 +784,20 @@ impl ProjectForm {
                     ui.label(RichText::new(p).color(theme::TEXT_MUTED));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if editing.is_some() { "Save" } else { "Add" };
                     if ui
-                        .add_enabled_ui(problem.is_none(), |ui| accent_button(ui, "Add"))
+                        .add_enabled_ui(problem.is_none(), |ui| accent_button(ui, label))
                         .inner
                         .clicked()
                     {
                         close = true;
-                        self.new_agents.push(d.clone());
+                        if editing.is_none() {
+                            self.new_agents.push(d.clone());
+                        } else if let Some(a) = self.new_agents.iter_mut().find(|a| a.name == d.name) {
+                            *a = d.clone();
+                        } else {
+                            self.edited.insert(d.name.clone(), d.clone());
+                        }
                     }
                     if ui.button("Cancel").clicked() {
                         close = true;
@@ -739,6 +808,19 @@ impl ProjectForm {
         if close {
             self.draft = None;
         }
+    }
+
+    /// The form's contents for editing sub agent `row`: earlier edits, else what its file says.
+    fn agent_to_edit(&self, row: &AgentRow) -> NewAgent {
+        let earlier = self.edited.get(&row.name);
+        earlier
+            .or_else(|| self.new_agents.iter().find(|a| a.name == row.name))
+            .cloned()
+            .or_else(|| crate::agents::read(self.location.as_deref()?, &self.ai_cli, &row.name))
+            .unwrap_or_else(|| NewAgent {
+                name: row.name.clone(),
+                ..Default::default()
+            })
     }
 
     fn submitted_settings(&self) -> ProjectSettings {
@@ -1317,6 +1399,61 @@ mod tests {
         );
         form.models.insert("tester".into(), "bad: model".into());
         assert!(form.validation().is_err());
+    }
+
+    #[test]
+    fn each_sub_agent_has_an_edit_button() {
+        let mut h = harness();
+        h.set_size(egui::vec2(900.0, 2000.0));
+        h.run_steps(3);
+        let edit = |h: &mut Harness<'static, (ProjectForm, Option<bool>)>, i: usize| {
+            h.get_all_by_label(icon::PENCIL_SIMPLE).nth(i).unwrap().click();
+            h.run();
+        };
+        assert_eq!(h.get_all_by_label(icon::PENCIL_SIMPLE).count(), 2);
+        // GhostLane's tester only takes added instructions.
+        edit(&mut h, 1);
+        assert!(h.query_by_label("Your instructions").is_some() && h.query_by_label("Description").is_none());
+        h.state_mut().0.draft.as_mut().unwrap().instructions = "Run the slow tests too.".into();
+        h.run();
+        h.get_by_label("Save").click();
+        h.run();
+        assert!(h.state().0.draft.is_none());
+
+        h.state_mut().0.new_agents.push(NewAgent {
+            name: "reviewer".into(),
+            description: "Reviews".into(),
+            instructions: "Review it.".into(),
+            ..Default::default()
+        });
+        h.run();
+        edit(&mut h, 1);
+        assert!(h.query_by_label("Description").is_some() && h.query_by_label("Agent name").is_none());
+        h.state_mut().0.draft.as_mut().unwrap().description = "Reviews code".into();
+        h.run();
+        h.get_by_label("Save").click();
+        h.run();
+        edit(&mut h, 2);
+        assert_eq!(
+            h.state().0.draft.as_ref().unwrap().instructions,
+            "Run the slow tests too.",
+            "earlier edits"
+        );
+        h.get_by_label("Cancel").click();
+        h.run();
+
+        let form = &mut h.state_mut().0;
+        assert_eq!(form.new_agents[0].description, "Reviews code");
+        form.location = Some(PathBuf::from("/p"));
+        let ProjectOutcome::Create { agents, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        let edited: Vec<_> = agents
+            .edited
+            .iter()
+            .map(|a| (a.name.as_str(), a.instructions.as_str()))
+            .collect();
+        assert_eq!(edited, [("tester", "Run the slow tests too.")]);
     }
 
     #[test]

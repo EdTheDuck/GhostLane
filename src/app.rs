@@ -3307,6 +3307,9 @@ fn write_ai_guide(p: &Project, settings: &ProjectSettings, agents: &AgentEdits) 
     }
     let skipped =
         crate::agents::write_agents(p, cli.id, settings).map_err(|e| format!("Couldn't write the AI agents: {e}"))?;
+    for a in &agents.edited {
+        crate::agents::update(&p.root, cli.id, a).map_err(|e| e.to_string())?;
+    }
     for (name, model) in &agents.models {
         crate::agents::set_model(&p.root, cli.id, name, model)
             .map_err(|e| format!("Couldn't set the {name} agent's model: {e}"))?;

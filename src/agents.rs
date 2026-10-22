@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::config::ProjectSettings;
@@ -11,6 +12,8 @@ use crate::ticket::write_atomic;
 
 /// Files carrying this are GhostLane's to rewrite; anything else at the same path is left alone.
 const MARKER: &str = "Managed by GhostLane";
+/// In GhostLane's own agents, the user's instructions follow this heading; they're kept when the rest is rewritten.
+const EXTRA: &str = "## Your instructions";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Role {
@@ -156,6 +159,8 @@ pub struct AgentEdits {
     pub new: Vec<NewAgent>,
     /// New models by agent name; empty = the session's model.
     pub models: Vec<(String, String)>,
+    /// Agents edited, for `update`.
+    pub edited: Vec<NewAgent>,
 }
 
 /// A sub agent found in the project.
@@ -166,6 +171,8 @@ pub struct AgentInfo {
     pub model: Option<String>,
     /// GhostLane made it and rewrites it when the project is saved.
     pub managed: bool,
+    /// Laid out so `read` and `update` can handle it.
+    pub editable: bool,
 }
 
 /// The sub agents AI CLI `cli` would find in the project at `root`, by name.
@@ -181,10 +188,12 @@ pub fn list(root: &Path, cli: &str) -> Vec<AgentInfo> {
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().strip_suffix(ext)?.to_string();
             let text = fs::read_to_string(e.path()).ok()?;
+            let managed = text.contains(MARKER);
             Some(AgentInfo {
                 name,
                 model: model_in(&text).map(str::to_string),
-                managed: text.contains(MARKER),
+                managed,
+                editable: parse(&text, ext == ".toml", managed).is_some(),
             })
         })
         .collect();
@@ -248,6 +257,134 @@ fn with_model(text: &str, model: Option<&str>, toml: bool) -> String {
     joined
 }
 
+/// Where an agent file's instructions are: after the front matter, or inside TOML's `developer_instructions`
+/// literal string. `None` for any other layout.
+fn body_range(text: &str, toml: bool) -> Option<Range<usize>> {
+    if toml {
+        const KEY: &str = "\ndeveloper_instructions = '''";
+        let start = text.find(KEY)? + KEY.len();
+        // TOML drops the line break right after the opening quotes.
+        let start = start + usize::from(text[start..].starts_with('\n'));
+        let end = text.rfind("'''")?;
+        return (end >= start).then_some(start..end);
+    }
+    let mut pos = 0;
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        pos += line.len();
+        match (i, line.trim() == "---") {
+            (0, false) => return None,
+            (1.., true) => return Some(pos..text.len()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `description: ...` or `description = ...`: the value, untrimmed.
+fn description_value(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("description")?.trim_start();
+    rest.strip_prefix(':').or_else(|| rest.strip_prefix('='))
+}
+
+/// The description from an agent file's single-line `description` entry; `None` without one.
+fn description_in(text: &str) -> Option<String> {
+    let value = header(text).find_map(description_value)?.trim();
+    if value.is_empty() || value.starts_with(['|', '>']) || value.starts_with("\"\"\"") || value.starts_with("'''") {
+        return None;
+    }
+    let inner = |q: char| value.strip_prefix(q).and_then(|v| v.strip_suffix(q));
+    Some(match (inner('"'), inner('\'')) {
+        (Some(v), _) => v.replace("\\\\", "\\"),
+        (_, Some(v)) => v.to_string(),
+        _ => value.to_string(),
+    })
+}
+
+/// What follows `EXTRA` in a managed agent's instructions.
+fn extra_in(body: &str) -> &str {
+    body.find(&format!("\n{EXTRA}\n"))
+        .map_or("", |i| body[i + EXTRA.len() + 2..].trim())
+}
+
+/// `body` with what followed `EXTRA` replaced by `extra` (none = no heading either).
+fn with_extra(body: &str, extra: &str) -> String {
+    let base = body[..body.find(&format!("\n{EXTRA}\n")).unwrap_or(body.len())].trim_end();
+    match extra.trim() {
+        "" => format!("{base}\n"),
+        extra => format!("{base}\n\n{EXTRA}\n\n{extra}\n"),
+    }
+}
+
+/// Description and editable instructions of an agent file: for GhostLane's own agents only the user's part.
+fn parse(text: &str, toml: bool, managed: bool) -> Option<(String, String)> {
+    let body = &text[body_range(text, toml)?];
+    let instructions = if managed { extra_in(body) } else { body.trim() };
+    Some((description_in(text)?, instructions.to_string()))
+}
+
+/// Sub agent `name` for editing; `None` when it's missing or laid out in a way GhostLane can't edit. For
+/// GhostLane's own agents, `instructions` holds only what the user added.
+pub fn read(root: &Path, cli: &str, name: &str) -> Option<NewAgent> {
+    let path = agent_path(root, cli, name)?;
+    let text = fs::read_to_string(&path).ok()?;
+    let (description, instructions) = parse(&text, path.extension()? == "toml", text.contains(MARKER))?;
+    Some(NewAgent {
+        name: name.to_string(),
+        model: model_in(&text).unwrap_or_default().to_string(),
+        description,
+        instructions,
+    })
+}
+
+/// Writes `a`'s description and instructions into its agent file, keeping its model and other settings. For
+/// GhostLane's own agents `a.instructions` only replaces what the user added.
+pub fn update(root: &Path, cli: &str, a: &NewAgent) -> io::Result<()> {
+    let bad = |what: &str| io::Error::other(format!("Couldn't edit the {} agent: {what}", a.name));
+    if !valid_name(&a.name) {
+        return Err(bad("bad name"));
+    }
+    let Some(path) = agent_path(root, cli, &a.name) else {
+        return Ok(());
+    };
+    let text = fs::read_to_string(&path)?;
+    let toml = path.extension().is_some_and(|e| e == "toml");
+    let range = body_range(&text, toml).ok_or_else(|| bad("its layout isn't one GhostLane can edit"))?;
+    let managed = text.contains(MARKER);
+    let (head, body, tail) = (&text[..range.start], &text[range.clone()], &text[range.end..]);
+    let escape = |s: &str| if toml { s.replace("'''", "''") } else { s.to_string() };
+    let new = if managed {
+        format!("{head}{}{tail}", with_extra(body, &escape(&a.instructions)))
+    } else {
+        if let Some(problem) = a.problem() {
+            return Err(bad(problem));
+        }
+        description_in(&text).ok_or_else(|| bad("it has no one-line description"))?;
+        let mut done = false;
+        let head: String = head
+            .split_inclusive('\n')
+            .map(|l| {
+                if done || description_value(l).is_none() {
+                    return l.to_string();
+                }
+                done = true;
+                let sep = if toml { " =" } else { ":" };
+                format!("description{sep} \"{}\"\n", clean(&a.description))
+            })
+            .collect();
+        let gap = if toml { "" } else { "\n" };
+        format!("{head}{gap}{}\n{tail}", escape(a.instructions.trim()))
+    };
+    if new == text { Ok(()) } else { write_atomic(&path, &new) }
+}
+
+/// A description on one line for a double-quoted YAML or TOML string.
+fn clean(description: &str) -> String {
+    description
+        .replace(['\n', '\r'], " ")
+        .replace('"', "'")
+        .replace('\\', "\\\\")
+}
+
 /// Sets the model of sub agent `name` of AI CLI `cli`; empty = the session's own. A missing agent is skipped.
 pub fn set_model(root: &Path, cli: &str, name: &str, model: &str) -> io::Result<()> {
     if !valid_name(name) || !(model.is_empty() || valid_model(model)) {
@@ -284,7 +421,7 @@ pub fn create(root: &Path, cli: &str, a: &NewAgent) -> io::Result<()> {
 
 /// Agent file text for AI CLI `cli`. `managed` marks it as GhostLane's and asks for a high reasoning effort.
 fn render(cli: &str, name: &str, description: &str, model: Option<&str>, body: &str, managed: bool) -> String {
-    let desc = description.replace(['\n', '\r'], " ").replace('"', "'");
+    let desc = clean(description);
     if cli == "codex" {
         let mut out = String::new();
         if managed {
@@ -532,7 +669,9 @@ pub fn write_agents(p: &Project, cli: &str, settings: &ProjectSettings) -> io::R
         }
         // Files from before models were set get the default too.
         let model = old.as_deref().and_then(model_in).or(role.default_model(cli));
-        let body = instructions(p, role, push);
+        let toml = path.extension().is_some_and(|e| e == "toml");
+        let extra = old.as_deref().and_then(|o| Some(extra_in(&o[body_range(o, toml)?])));
+        let body = with_extra(&instructions(p, role, push), extra.unwrap_or_default());
         let text = render(cli, role.id(), role.description(), model, &body, true);
         if old.as_deref() != Some(text.as_str()) {
             write_atomic(&path, &text)?;
@@ -733,5 +872,83 @@ mod tests {
             ..new
         };
         assert!(bad.problem().is_some() && create(d.path(), "claude", &bad).is_err());
+    }
+
+    #[test]
+    fn edits_keep_settings_and_ghostlanes_agents_keep_what_the_user_added() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = default_project(d.path());
+        let s = ProjectSettings::default();
+        for cli in ["claude", "codex"] {
+            write_agents(&p, cli, &s).unwrap();
+            let mut dev = read(d.path(), cli, "developer").unwrap();
+            assert_eq!(dev.instructions, "", "{cli}: nothing added yet");
+            dev.instructions = "Run `cargo test` before moving on. '''".into();
+            update(d.path(), cli, &dev).unwrap();
+            p.meta.columns[1].name = "Building".into();
+            write_agents(&p, cli, &s).unwrap();
+            let again = read(d.path(), cli, "developer").unwrap();
+            // TOML literal strings can't hold their own closing quotes.
+            let quotes = if cli == "codex" { "''" } else { "'''" };
+            assert_eq!(
+                again.instructions,
+                format!("Run `cargo test` before moving on. {quotes}"),
+                "{cli}: survives a rewrite"
+            );
+            assert_eq!(again.model, Role::Developer.default_model(cli).unwrap());
+            let path = agent_path(d.path(), cli, "developer").unwrap();
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains("**Building**") && text.contains(MARKER));
+            p.meta.columns[1].name = "In Dev".into();
+
+            let mine = NewAgent {
+                name: "docs".into(),
+                description: "Writes docs".into(),
+                model: "x".into(),
+                instructions: "Write.".into(),
+            };
+            create(d.path(), cli, &mine).unwrap();
+            let path = agent_path(d.path(), cli, "docs").unwrap();
+            let text = fs::read_to_string(&path).unwrap().replace("Write.", "Write.\n\nMore.");
+            let text = text.replacen("description", "tools: Read\ndescription", 1);
+            fs::write(&path, text).unwrap();
+            let mut docs = read(d.path(), cli, "docs").unwrap();
+            assert_eq!(
+                (docs.description.as_str(), docs.instructions.as_str()),
+                ("Writes docs", "Write.\n\nMore.")
+            );
+            docs.description = "Writes \"docs\" \\ guides".into();
+            docs.instructions = "Write them all.".into();
+            update(d.path(), cli, &docs).unwrap();
+            let back = read(d.path(), cli, "docs").unwrap();
+            assert_eq!(back.description, "Writes 'docs' \\ guides");
+            assert_eq!(
+                (back.instructions.as_str(), back.model.as_str()),
+                ("Write them all.", "x")
+            );
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains("tools: Read\n") && !text.contains(MARKER),
+                "{cli}: {text}"
+            );
+            assert!(list(d.path(), cli).iter().all(|a| a.editable));
+        }
+        let text = fs::read_to_string(d.path().join(".claude/agents/docs.md")).unwrap();
+        assert!(serde_yaml_ng::from_str::<serde_yaml_ng::Mapping>(text.split("---\n").nth(1).unwrap()).is_ok());
+        assert!(text.ends_with("---\n\nWrite them all.\n"));
+
+        fs::write(
+            d.path().join(".claude/agents/odd.md"),
+            "---\nname: odd\ndescription: >\n  long\n---\nx",
+        )
+        .unwrap();
+        assert!(read(d.path(), "claude", "odd").is_none());
+        assert!(
+            !list(d.path(), "claude")
+                .iter()
+                .find(|a| a.name == "odd")
+                .unwrap()
+                .editable
+        );
     }
 }
