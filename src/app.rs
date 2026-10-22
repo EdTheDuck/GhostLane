@@ -275,6 +275,8 @@ struct AiRun {
     marker: Option<PathBuf>,
     /// The project folder inside the ticket's own worktree, when tickets run in parallel.
     worktree: Option<PathBuf>,
+    /// When the hook fired with the ticket still in its AI Working column; the run waits for it to move on.
+    held: Option<std::time::SystemTime>,
 }
 
 /// How a run ended.
@@ -1448,19 +1450,35 @@ impl App {
             marker,
             base,
             worktree,
+            held: None,
         });
         true
     }
 
     /// Has `run` ended? Hooked runs end when the hook fires (or the CLI quits), others once the terminal
-    /// goes quiet.
+    /// goes quiet. A hook firing while the ticket still sits in its AI Working column holds the run until the
+    /// ticket moves or the hook fires again: the CLI may have stopped with a sub agent still working in the
+    /// background.
     fn run_end(&self, run: &mut AiRun, now: Instant) -> Option<RunEnd> {
         let Some(marker) = &run.marker else {
             let output = self.terminals.last_output(&run.cli.session);
             return (!ai_activity(Some(run.cli.started), output, None, now).0).then_some(RunEnd::Finished);
         };
-        let modified = std::fs::metadata(marker).and_then(|m| m.modified());
-        if modified.is_ok_and(|m| m > run.started_at) {
+        let modified = std::fs::metadata(marker).and_then(|m| m.modified()).ok();
+        let working = |run: &AiRun| {
+            self.projects
+                .iter()
+                .find_map(|op| op.project.as_ref().ok().filter(|p| p.ghost_path == run.cli.ghost))
+                .is_some_and(|p| still_working(p, run))
+        };
+        if let Some(m) = modified.filter(|&m| m > run.held.unwrap_or(run.started_at)) {
+            if run.held.is_none() && working(run) {
+                run.held = Some(m);
+                return None;
+            }
+            return Some(RunEnd::Finished);
+        }
+        if run.held.is_some() && !working(run) {
             return Some(RunEnd::Finished);
         }
         run.cli.gone(&self.terminals, now).then_some(RunEnd::CliGone)
@@ -1478,9 +1496,18 @@ impl App {
         let now = Instant::now();
         let mut ended = Vec::new();
         for mut run in std::mem::take(&mut self.ai_runs) {
+            let held = run.held.is_some();
             match self.run_end(&mut run, now) {
                 Some(end) => ended.push((run, end)),
-                None => self.ai_runs.push(run),
+                None => {
+                    if !held && run.held.is_some() {
+                        self.toast(format!(
+                            "The AI stopped, but {} hasn't moved on yet; waiting for it",
+                            format_id(run.id)
+                        ));
+                    }
+                    self.ai_runs.push(run)
+                }
             }
         }
         let settings = self.config.settings.clone();
@@ -3114,6 +3141,13 @@ fn moved(p: &Project, run: &AiRun) -> RunResult {
     }
 }
 
+/// Is `run`'s ticket still in the AI Working column the play button moved it to?
+fn still_working(p: &Project, run: &AiRun) -> bool {
+    let from = p.meta.columns.iter().position(|c| c.folder == run.from);
+    let working = from.and_then(|c| p.auto_target(c, AutoMove::AiWorking));
+    working.is_some() && p.find_ticket(run.id).map(|(c, _)| c) == working
+}
+
 /// `notes` with a note saying `command` failed at `when`, followed by its output.
 fn with_failure_note(notes: &str, command: &str, output: &str, when: u64) -> String {
     // A fence longer than any run of backticks in the output, so the output can't close it.
@@ -3509,12 +3543,16 @@ mod tests {
             marker: None,
             base: None,
             worktree: None,
+            held: None,
         };
+        assert!(!still_working(&p, &run), "still in To Do");
         p.move_ticket(&t.path, 1).unwrap(); // the play button moved it to In Dev
         assert_eq!(moved(&p, &run), RunResult::Unmoved);
+        assert!(still_working(&p, &run));
         let at = |p: &Project| p.find_ticket(t.id).unwrap().1.path.clone();
         p.move_ticket(&at(&p), 2).unwrap();
         assert_eq!(moved(&p, &run), RunResult::MovedOn);
+        assert!(!still_working(&p, &run));
         record_run(&mut p, &run, 252, RunResult::MovedOn).unwrap();
         let back = p.find_ticket(t.id).unwrap().1;
         assert_eq!(back.runs.len(), 1);
