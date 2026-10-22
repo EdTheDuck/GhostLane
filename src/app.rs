@@ -369,7 +369,8 @@ pub struct App {
     summaries: Vec<ui::queue::Summary>,
     jobs_tx: Sender<Job>,
     jobs_rx: Receiver<Job>,
-    toasts: Vec<(String, Instant)>,
+    /// Message, when it was shown, and its border: red for errors, yellow for notices, green for good news.
+    toasts: Vec<(String, Instant, egui::Color32)>,
     /// Newer release found by the startup check, shown as a top bar button.
     update: Option<String>,
     update_rx: Option<Receiver<String>>,
@@ -436,8 +437,11 @@ impl App {
         };
         for p in &app.projects {
             if let Err(e) = &p.project {
-                app.toasts
-                    .push((format!("Couldn't load {}: {e}", p.path.display()), Instant::now()));
+                app.toasts.push((
+                    format!("Couldn't load {}: {e}", p.path.display()),
+                    Instant::now(),
+                    theme::DANGER,
+                ));
             }
         }
         app.watch_active(ctx);
@@ -464,10 +468,25 @@ impl App {
         app
     }
 
+    /// Shows an error.
     pub fn toast(&mut self, msg: impl Into<String>) {
+        self.toast_in(msg, theme::DANGER);
+    }
+
+    /// Shows a notice or warning.
+    pub fn info(&mut self, msg: impl Into<String>) {
+        self.toast_in(msg, theme::WARNING);
+    }
+
+    /// Shows good news.
+    pub fn success(&mut self, msg: impl Into<String>) {
+        self.toast_in(msg, theme::ACCENT);
+    }
+
+    fn toast_in(&mut self, msg: impl Into<String>, border: egui::Color32) {
         let msg = msg.into();
         eprintln!("{msg}");
-        self.toasts.push((msg, Instant::now()));
+        self.toasts.push((msg, Instant::now(), border));
     }
 
     pub fn active_project(&self) -> Option<&Project> {
@@ -714,7 +733,7 @@ impl App {
         let Some(i) = self.active else { return };
         let path = self.projects[i].path.clone();
         if !path.is_file() {
-            self.toast(format!("{} was removed; closing project", path.display()));
+            self.info(format!("{} was removed; closing project", path.display()));
             self.projects.remove(i);
             self.active = self.projects.iter().position(|p| p.project.is_ok());
             self.watcher = None;
@@ -930,9 +949,9 @@ impl App {
             Action::AddToQueue(id) => {
                 if let Some(i) = self.active {
                     if self.is_running(i, id) {
-                        self.toast(format!("{} is already with the AI", format_id(id)));
+                        self.info(format!("{} is already with the AI", format_id(id)));
                     } else if self.projects[i].queue.contains(&id) {
-                        self.toast(format!("{} is already queued", format_id(id)));
+                        self.info(format!("{} is already queued", format_id(id)));
                     } else {
                         self.projects[i].queue.push(id);
                     }
@@ -1128,11 +1147,11 @@ impl App {
         self.check_git(i);
         self.projects[i].retries.remove(&id);
         if self.is_running(i, id) {
-            self.toast(format!("{} is already with the AI", crate::ticket::format_id(id)));
+            self.info(format!("{} is already with the AI", crate::ticket::format_id(id)));
         } else if !self.ai_engaged(i) {
             self.run_ai(i, id, ctx);
         } else if self.projects[i].queue.contains(&id) {
-            self.toast(format!("{} is already queued", crate::ticket::format_id(id)));
+            self.info(format!("{} is already queued", crate::ticket::format_id(id)));
         } else {
             self.projects[i].queue.push(id);
         }
@@ -1206,7 +1225,7 @@ impl App {
                     w.spent = true;
                     let msg = format!("{name}: the queue stopped, its token budget is used up");
                     self.desktop_notify(ctx, &msg);
-                    self.toast(msg);
+                    self.info(msg);
                 }
                 (Some(_), false) => {
                     let w = op.window.take().expect("matched Some");
@@ -1501,7 +1520,7 @@ impl App {
                 Some(end) => ended.push((run, end)),
                 None => {
                     if !held && run.held.is_some() {
-                        self.toast(format!(
+                        self.info(format!(
                             "The AI stopped, but {} hasn't moved on yet; waiting for it",
                             format_id(run.id)
                         ));
@@ -1525,7 +1544,7 @@ impl App {
                 && let Err(e) = crate::git::save_worktree(dir, &format!("Work on {}", format_id(run.id)))
             {
                 let msg = format!("Couldn't save {}'s work in its worktree: {e}", format_id(run.id));
-                self.toasts.push((msg, Instant::now()));
+                self.toasts.push((msg, Instant::now(), theme::DANGER));
             }
             let Some(p) = self
                 .projects
@@ -1544,7 +1563,8 @@ impl App {
                     0
                 });
                 notes.push((ghost.clone(), run.id, "the AI CLI closed".to_string(), true, tokens));
-                self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
+                self.toasts
+                    .extend(messages.into_iter().map(|m| (m, Instant::now(), theme::DANGER)));
                 continue;
             }
             let _ = p.rescan();
@@ -1580,7 +1600,8 @@ impl App {
                     });
                     ctx2.request_repaint();
                 });
-                self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
+                self.toasts
+                    .extend(messages.into_iter().map(|m| (m, Instant::now(), theme::DANGER)));
                 self.checks.push(Check { run, seconds, command });
                 continue;
             }
@@ -1616,7 +1637,8 @@ impl App {
                 attention = true;
                 messages.push(format!("{id} came back to {}", p.meta.columns[col].name));
             }
-            self.toasts.extend(messages.into_iter().map(|m| (m, Instant::now())));
+            self.toasts
+                .extend(messages.into_iter().map(|m| (m, Instant::now(), theme::DANGER)));
             if arrived {
                 self.ticket_done(&ghost, run.id, ctx);
             }
@@ -1667,7 +1689,7 @@ impl App {
         };
         op.queue.retain(|&q| q != id);
         op.queue.insert(0, id);
-        self.toast(format!("Trying {} again ({n} of {limit})", format_id(id)));
+        self.info(format!("Trying {} again ({n} of {limit})", format_id(id)));
     }
 
     /// Pops up a desktop notification, unless they're switched off or GhostLane is in front.
@@ -1723,7 +1745,7 @@ impl App {
         if !started || !moved {
             // Otherwise Auto would pick the same ticket again and again.
             op.auto.clear();
-            self.toast(format!(
+            self.info(format!(
                 "Auto turned off: {} didn't start",
                 crate::ticket::format_id(id)
             ));
@@ -1752,13 +1774,13 @@ impl App {
                     );
                     t.notes = append_note(&t.notes, &note);
                     let back = t.save().and_then(|()| p.move_ticket(&t.path, 0));
-                    self.toast(match back {
-                        Ok(()) => format!(
+                    match back {
+                        Ok(()) => self.info(format!(
                             "{}'s work clashes with newer changes; it went back to the start",
                             t.id_str()
-                        ),
-                        Err(e) => format!("Couldn't send {} back: {e}", t.id_str()),
-                    });
+                        )),
+                        Err(e) => self.toast(format!("Couldn't send {} back: {e}", t.id_str())),
+                    }
                 }
                 Job::Reverted { id, result: Err(e), .. } => {
                     self.toast(format!("Couldn't revert {}: {e}", format_id(id)))
@@ -1903,7 +1925,7 @@ impl App {
         }
         if let Some(msg) = complete {
             self.desktop_notify(ctx, &msg);
-            self.toast(msg);
+            self.success(msg);
         }
         // A ticket that ran in parallel brings its worktree's work back now; its terminal has done its job.
         let branch = crate::git::ticket_branch(&t.id_str());
@@ -2125,7 +2147,7 @@ impl App {
         ids.sort_unstable();
         ids.retain(|&t| !self.is_running(i, t) && !self.projects[i].queue.contains(&t));
         if ids.is_empty() {
-            self.toast("Nothing of this epic is waiting to be queued");
+            self.info("Nothing of this epic is waiting to be queued");
         }
         self.projects[i].queue.extend(ids);
     }
@@ -2136,7 +2158,7 @@ impl App {
             return;
         }
         if self.active_project().is_none() {
-            self.toast("Open a project before dropping in a document");
+            self.info("Open a project before dropping in a document");
         } else if self.modal.is_none() && self.generating.is_none() {
             self.modal = Some(Modal::Import(ImportForm::default()));
         }
@@ -3036,7 +3058,7 @@ impl App {
     }
 
     fn show_toasts(&mut self, ctx: &egui::Context) {
-        self.toasts.retain(|(_, t)| t.elapsed() < Duration::from_secs(6));
+        self.toasts.retain(|(_, t, _)| t.elapsed() < Duration::from_secs(6));
         if self.toasts.is_empty() {
             return;
         }
@@ -3046,10 +3068,10 @@ impl App {
             .order(Order::Tooltip)
             .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0))
             .show(ctx, |ui| {
-                for (i, (msg, _)) in self.toasts.iter().enumerate() {
+                for (i, (msg, _, border)) in self.toasts.iter().enumerate() {
                     let r = Frame::new()
                         .fill(theme::CARD)
-                        .stroke(egui::Stroke::new(1.0, theme::DANGER))
+                        .stroke(egui::Stroke::new(1.0, *border))
                         .corner_radius(CornerRadius::same(6))
                         .inner_margin(Margin::symmetric(12, 8))
                         .show(ui, |ui| {
