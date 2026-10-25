@@ -185,6 +185,9 @@ pub struct AppConfig {
     pub projects: HashMap<PathBuf, ProjectSettings>,
     /// When each project's queue may run, keyed by .ghost path.
     pub schedules: HashMap<PathBuf, Schedule>,
+    /// Folders of the columns switched to Auto, keyed by .ghost path. Kept here rather than in the `.ghost` file, so
+    /// a cloned repo never starts the AI by itself.
+    pub auto: HashMap<PathBuf, Vec<String>>,
 }
 
 /// `<config_dir>/GhostLane`.
@@ -226,6 +229,7 @@ impl AppConfig {
         self.open_projects.retain(|p| p.is_file());
         self.projects.retain(|p, _| p.is_file());
         self.schedules.retain(|p, _| p.is_file());
+        self.auto.retain(|p, _| p.is_file());
         if self
             .active_project
             .as_ref()

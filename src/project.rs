@@ -220,6 +220,9 @@ pub fn validate_columns(names: &[String]) -> Result<Vec<String>, String> {
     Ok(folders)
 }
 
+/// Folder inside `tickets/` holding the epics.
+pub const EPICS: &str = "_epics";
+
 impl Project {
     pub fn load(ghost_path: &Path) -> io::Result<Project> {
         // Absolute, so the root (also the terminal's working folder) never comes out empty.
@@ -253,6 +256,8 @@ impl Project {
             tickets: Vec::new(),
             epics: Vec::new(),
         };
+        p.move_old_epics()
+            .map_err(|e| err(format!("Couldn't move epics into {}: {e}", p.epics_dir().display())))?;
         p.rescan()?;
         Ok(p)
     }
@@ -315,9 +320,31 @@ impl Project {
         self.tickets_dir().join(&self.meta.columns[col].folder)
     }
 
-    /// Where epics live, beside `tickets/` so it can never clash with a column folder. Only made once one is.
+    /// Where epics live: inside `tickets/`, under a name no column folder can have (`folder_name` trims a leading
+    /// `_`). Only made once an epic is.
     pub fn epics_dir(&self) -> PathBuf {
-        self.root.join("epics")
+        self.tickets_dir().join(EPICS)
+    }
+
+    /// Moves epic files from `epics/` beside `tickets/`, where versions up to 0.5.1 kept them, into `epics_dir`.
+    /// Only files named like an epic move, and none replaces one already there; the old folder goes once empty.
+    fn move_old_epics(&self) -> io::Result<()> {
+        let old = self.root.join("epics");
+        if !old.is_dir() {
+            return Ok(());
+        }
+        let new = self.epics_dir();
+        for entry in fs::read_dir(&old)? {
+            let path = entry?.path();
+            let to = new.join(path.file_name().unwrap_or_default());
+            if path.is_file() && ticket::id_from_path(&path).is_some() && !to.exists() {
+                fs::create_dir_all(&new)?;
+                fs::rename(&path, &to)?;
+            }
+        }
+        // Fails while anything else is left in it, which then stays.
+        let _ = fs::remove_dir(&old);
+        Ok(())
     }
 
     pub fn save_meta(&self) -> io::Result<()> {
@@ -702,7 +729,7 @@ Anything else worth keeping, such as why a test failed.
 
 ### Epics
 
-An epic groups tickets working towards one bigger goal. Each is a file in `epics/` named with its ID, which comes from the same numbers as tickets (so never reuse a ticket's ID): front matter with `id` and `title`, then a `## Description` of the goal. Read a ticket's epic for the bigger picture before working on it. Progress is worked out from where its tickets are, so don't record it in the epic.
+An epic groups tickets working towards one bigger goal. Each is a file in `tickets/_epics/` named with its ID, which comes from the same numbers as tickets (so never reuse a ticket's ID): front matter with `id` and `title`, then a `## Description` of the goal. Read a ticket's epic for the bigger picture before working on it. Progress is worked out from where its tickets are, so don't record it in the epic.
 "#
         )
     }
@@ -1013,6 +1040,27 @@ mod tests {
         assert_eq!(p.find_epic(9).map(|e| e.title.as_str()), Some("By hand"));
         assert_eq!(p.meta.next_ticket_id, 10);
         assert!(p.ai_guide().contains("### Epics"));
+    }
+
+    #[test]
+    fn epics_from_beside_tickets_move_inside_on_load() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Project::create(d.path(), "P", &s(&["To Do", "Done"])).unwrap();
+        let old = d.path().join("epics");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("00003.md"), "---\ntitle: Old\n---\n").unwrap();
+        let p = Project::load(&p.ghost_path).unwrap();
+        assert_eq!(p.find_epic(3).map(|e| e.title.as_str()), Some("Old"));
+        assert!(p.epics_dir().join("00003.md").is_file());
+        assert!(!old.exists(), "emptied, so removed");
+
+        // Files that aren't epics stay, and so does the folder holding them; an epic already moved wins.
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("notes.txt"), "mine").unwrap();
+        std::fs::write(old.join("00003.md"), "---\ntitle: Stale\n---\n").unwrap();
+        let p = Project::load(&p.ghost_path).unwrap();
+        assert_eq!(p.find_epic(3).map(|e| e.title.as_str()), Some("Old"));
+        assert!(old.join("notes.txt").is_file() && old.join("00003.md").is_file());
     }
 
     fn s(v: &[&str]) -> Vec<String> {

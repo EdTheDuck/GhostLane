@@ -37,7 +37,7 @@ pub struct OpenProject {
     pub queue_auto: bool,
     /// The scheduled window the queue is working in, while one is open.
     window: Option<QueueWindow>,
-    /// Folders of the columns set to Auto. Kept in memory only, so a cloned repo never starts the AI by itself.
+    /// Folders of the columns set to Auto, saved in the app config (`App::save_auto`).
     pub auto: HashSet<String>,
     /// Start nothing new from the queue or Auto columns; the ticket the AI is on still finishes.
     pub paused: bool,
@@ -88,6 +88,13 @@ impl OpenProject {
     fn load(path: PathBuf) -> Self {
         let project = Project::load(&path).map_err(|e| e.to_string());
         Self::new(path, project)
+    }
+
+    /// Switches the columns to Auto that were on when GhostLane last saw this project.
+    fn restore_auto(&mut self, saved: &HashMap<PathBuf, Vec<String>>) {
+        if let Ok(p) = &self.project {
+            self.auto = saved.get(&p.ghost_path).into_iter().flatten().cloned().collect();
+        }
     }
 
     pub fn name(&self) -> String {
@@ -243,7 +250,7 @@ impl Generation {
             .path
             .parent()
             .and_then(|d| d.file_name())
-            .is_some_and(|n| n == "epics");
+            .is_some_and(|n| n == crate::project::EPICS);
         match (self.baseline.is_some(), epic) {
             (true, _) => "Updating ticket…",
             (false, true) => "Generating epic…",
@@ -377,8 +384,6 @@ pub struct App {
     /// .ghost files handed over by later launches (see `instance`).
     handed_rx: Option<Receiver<PathBuf>>,
     watcher: Option<Watcher>,
-    /// The watcher covers the project's epics folder too (it is watched once it exists).
-    epics_watched: bool,
     watch_tx: Sender<DebounceEventResult>,
     watch_rx: Receiver<DebounceEventResult>,
 }
@@ -396,7 +401,10 @@ impl App {
             config.settings.ai_clis = Some(terminal::detect_ai_clis());
             let _ = config.save();
         }
-        let projects: Vec<OpenProject> = config.open_projects.iter().cloned().map(OpenProject::load).collect();
+        let mut projects: Vec<OpenProject> = config.open_projects.iter().cloned().map(OpenProject::load).collect();
+        for op in &mut projects {
+            op.restore_auto(&config.auto);
+        }
         let active = config
             .active_project
             .as_ref()
@@ -431,7 +439,6 @@ impl App {
             update_rx: None,
             handed_rx: None,
             watcher: None,
-            epics_watched: false,
             watch_tx,
             watch_rx,
         };
@@ -685,9 +692,7 @@ impl App {
     fn watch_active(&mut self, ctx: &egui::Context) {
         self.watcher = None;
         let Some(p) = self.active_project() else { return };
-        let (tickets, root, epics) = (p.tickets_dir(), p.root.clone(), p.epics_dir());
-        self.epics_watched = epics.is_dir();
-        let watch_epics = self.epics_watched;
+        let (tickets, root) = (p.tickets_dir(), p.root.clone());
         let tx = self.watch_tx.clone();
         let ctx = ctx.clone();
         let handler = move |res: DebounceEventResult| {
@@ -697,9 +702,6 @@ impl App {
         let result = new_debouncer(Duration::from_millis(200), None, handler).and_then(|mut w| {
             w.watch(&tickets, RecursiveMode::Recursive)?;
             w.watch(&root, RecursiveMode::NonRecursive)?;
-            if watch_epics {
-                w.watch(&epics, RecursiveMode::Recursive)?;
-            }
             Ok(w)
         });
         match result {
@@ -708,11 +710,30 @@ impl App {
         }
     }
 
-    fn poll_watcher(&mut self, ctx: &egui::Context) {
-        // An epics folder made since the watcher started gets watched too.
-        if !self.epics_watched && self.active_project().is_some_and(|p| p.epics_dir().is_dir()) {
-            self.watch_active(ctx);
+    /// Saves each project's Auto columns once they change, wherever that happened (the switch, Auto turning
+    /// itself off, a column renamed).
+    fn save_auto(&mut self) {
+        let mut changed = false;
+        for op in &self.projects {
+            let Ok(p) = &op.project else { continue };
+            let saved = self.config.auto.get(&p.ghost_path);
+            let same = saved.map_or(op.auto.is_empty(), |s| {
+                s.len() == op.auto.len() && s.iter().all(|f| op.auto.contains(f))
+            });
+            if !same {
+                let mut folders: Vec<String> = op.auto.iter().cloned().collect();
+                folders.sort();
+                self.config.auto.insert(p.ghost_path.clone(), folders);
+                changed = true;
+            }
         }
+        if changed {
+            self.config.auto.retain(|_, folders| !folders.is_empty());
+            self.save_config();
+        }
+    }
+
+    fn poll_watcher(&mut self) {
         let mut changed = false;
         while let Ok(res) = self.watch_rx.try_recv() {
             let relevant = |p: &Path| {
@@ -761,7 +782,9 @@ impl App {
                 i
             }
             None => {
-                self.projects.push(OpenProject::new(path, Ok(project)));
+                let mut op = OpenProject::new(path, Ok(project));
+                op.restore_auto(&self.config.auto);
+                self.projects.push(op);
                 self.projects.len() - 1
             }
         };
@@ -780,6 +803,7 @@ impl App {
         let ghost = op.project.as_ref().map_or(op.path.clone(), |p| p.ghost_path.clone());
         self.terminals.restart(&ghost);
         self.config.projects.remove(&ghost);
+        self.config.auto.remove(&ghost);
         if files && let Ok(p) = &op.project {
             for path in [p.ghost_path.clone(), p.tickets_dir()] {
                 if path.exists()
@@ -3403,11 +3427,12 @@ fn strip_unc(p: PathBuf) -> PathBuf {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_watcher(&ctx);
+        self.poll_watcher();
         self.poll_generation();
         self.update_windows(&ctx);
         self.poll_ai_runs(&ctx);
         self.poll_jobs(&ctx);
+        self.save_auto();
         if let Some(v) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.update = Some(v);
         }
