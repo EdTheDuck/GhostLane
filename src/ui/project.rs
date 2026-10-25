@@ -722,8 +722,17 @@ impl ProjectForm {
             return;
         }
         let rows = self.agent_rows();
+        // Room for the widest note, so every model dropdown lines up.
+        let note_width = ["GhostLane", "Yours"]
+            .map(|n| {
+                egui::WidgetText::from(RichText::new(n).small())
+                    .into_galley(ui, None, f32::INFINITY, egui::TextStyle::Small)
+                    .size()
+                    .x
+            })
+            .into_iter()
+            .fold(0.0, f32::max);
         ui.horizontal(|ui| {
-            ui.label("Sub agents");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let new = egui::Button::new(format!("{}  New sub agent", icon::PLUS));
                 if ui.add_enabled(self.draft.is_none(), new).clicked() {
@@ -735,7 +744,6 @@ impl ProjectForm {
         let mut open = None;
         for row in &rows {
             ui.horizontal(|ui| {
-                ui.add_space(26.0);
                 ui.label(RichText::new(&row.name).monospace());
                 let edit = ui
                     .add_enabled_ui(self.draft.is_none() && row.editable, |ui| {
@@ -756,10 +764,14 @@ impl ProjectForm {
                         "Yours" => "Not made by GhostLane, which never rewrites it",
                         _ => "Written when the project is saved",
                     };
-                    if !row.note.is_empty() {
-                        ui.label(RichText::new(row.note).small().color(theme::TEXT_MUTED))
-                            .on_hover_text(tip);
-                    }
+                    let size = egui::vec2(note_width, ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+                        ui.set_min_width(note_width);
+                        if !row.note.is_empty() {
+                            ui.label(RichText::new(row.note).small().color(theme::TEXT_MUTED))
+                                .on_hover_text(tip);
+                        }
+                    });
                     let mut model = self.models.get(&row.name).unwrap_or(&row.model).clone();
                     let id = ("agent_model", &row.name);
                     if model_combo(ui, id, &self.ai_cli, &mut model, row.fallback.is_none()) {
@@ -1087,9 +1099,9 @@ mod tests {
     #[test]
     fn tabs_split_the_form() {
         let mut h = harness();
-        assert!(h.query_by_label("Test command").is_some() && h.query_by_label("Sub agents").is_none());
+        assert!(h.query_by_label("Test command").is_some() && h.query_by_label_contains("New sub agent").is_none());
         open_tab(&mut h, "Agents");
-        assert!(h.query_by_label("Sub agents").is_some() && h.query_by_label("Name").is_none());
+        assert!(h.query_by_label_contains("New sub agent").is_some() && h.query_by_label("Name").is_none());
         open_tab(&mut h, "Columns");
         assert!(h.query_by_label_contains("Add column").is_some());
         open_tab(&mut h, "Git");
@@ -1459,6 +1471,37 @@ mod tests {
         );
         form.models.insert("tester".into(), "bad: model".into());
         assert!(form.validation().is_err());
+    }
+
+    #[test]
+    fn model_dropdowns_line_up_whatever_the_note() {
+        let mut h = harness();
+        h.state_mut().0.found = vec![
+            AgentInfo {
+                name: "developer".into(),
+                model: Some("claude-opus-5-5".into()),
+                managed: true,
+                editable: true,
+            },
+            AgentInfo {
+                name: "reviewer".into(),
+                model: Some("claude-haiku-5-5".into()),
+                managed: false,
+                editable: true,
+            },
+        ];
+        open_tab(&mut h, "Agents");
+        assert!(h.query_by_label("GhostLane").is_some() && h.query_by_label("Yours").is_some());
+        let right = |m: &str| h.get_by_value(m).rect().right();
+        let (ghostlane, yours, none) = (
+            right("claude-opus-5-5"),
+            right("claude-haiku-5-5"),
+            right("claude-sonnet-5-5"),
+        );
+        assert!((ghostlane - yours).abs() < 0.5 && (ghostlane - none).abs() < 0.5);
+        // No inset: names start at the left edge, under the tabs.
+        let name = h.get_by_label("developer").rect().left();
+        assert!((name - h.get_by_label("General").rect().left()).abs() < 0.5);
     }
 
     #[test]
