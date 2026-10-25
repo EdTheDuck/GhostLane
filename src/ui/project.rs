@@ -5,6 +5,7 @@ use egui::{Align, ComboBox, Id, Layout, RichText, TextEdit, Ui};
 use egui_dnd::{DragDropItem, dnd};
 use egui_phosphor::regular as icon;
 
+use super::ticket::tabs;
 use super::{accent_button, icon_button};
 use crate::agents::{AgentEdits, AgentInfo, NewAgent, Role, has_agents, valid_model};
 use crate::app::ExportFormat;
@@ -14,6 +15,9 @@ use crate::project::{
     find_ghost_file, folder_name, validate_columns,
 };
 use crate::theme;
+
+/// Least height of a tab's contents.
+const TAB_HEIGHT: f32 = 360.0;
 
 pub struct ColumnRow {
     key: u64,
@@ -43,8 +47,17 @@ struct Removed {
     target: Option<u64>,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tab {
+    General,
+    Agents,
+    Columns,
+    Git,
+}
+
 pub struct ProjectForm {
     editing: bool,
+    tab: Tab,
     name: String,
     location: Option<PathBuf>,
     rows: Vec<ColumnRow>,
@@ -147,6 +160,7 @@ impl ProjectForm {
             .collect();
         ProjectForm {
             editing: false,
+            tab: Tab::General,
             name: String::new(),
             location: None,
             rows,
@@ -195,6 +209,7 @@ impl ProjectForm {
             .collect();
         ProjectForm {
             editing: true,
+            tab: Tab::General,
             name: p.meta.name.clone(),
             location: Some(p.root.clone()),
             next_key: rows.len() as u64,
@@ -260,79 +275,29 @@ impl ProjectForm {
                 }
             });
             ui.add_space(6.0);
-
-            ui.label("Name");
-            ui.add(
-                TextEdit::singleline(&mut self.name)
-                    .margin(super::INPUT_MARGIN)
-                    .hint_text("My Project")
-                    .desired_width(f32::INFINITY),
+            tabs(
+                ui,
+                &mut self.tab,
+                &[
+                    (Tab::General, "General"),
+                    (Tab::Agents, "Agents"),
+                    (Tab::Columns, "Columns"),
+                    (Tab::Git, "Git"),
+                ],
             );
-            ui.add_space(8.0);
-
-            if !self.editing {
-                self.location_ui(ui, &mut outcome);
-                ui.add_space(8.0);
+            ui.add_space(6.0);
+            let top = ui.cursor().top();
+            match self.tab {
+                Tab::General => self.general_ui(ui, &mut outcome),
+                Tab::Agents => self.agents_ui(ui),
+                Tab::Columns => {
+                    self.columns_ui(ui);
+                    self.removed_ui(ui);
+                }
+                Tab::Git => git_ui(ui, &mut self.settings, &mut self.git_excluded),
             }
-
-            ui.horizontal(|ui| {
-                ui.label("AI CLI");
-                let name = |id: &str| crate::terminal::ai_cli(id).map_or(id.to_string(), |c| c.name.to_string());
-                let combo = ComboBox::from_id_salt("project_ai_cli")
-                    .selected_text(name(&self.ai_cli))
-                    .show_ui(ui, |ui| {
-                        for id in &self.cli_options {
-                            ui.selectable_value(&mut self.ai_cli, id.clone(), name(id));
-                        }
-                    });
-                super::pointer(combo.response).on_hover_text("Used by the ▶ button. Turn on more tools in Settings.");
-            });
-            ui.add_space(8.0);
-            self.agents_ui(ui);
-
-            let add = ui
-                .horizontal(|ui| {
-                    ui.label("Columns");
-                    ui.label(RichText::new("drag to reorder").color(theme::TEXT_MUTED).small());
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.button(format!("{}  Add column", icon::PLUS)).clicked()
-                    })
-                    .inner
-                })
-                .inner;
-            if add {
-                self.rows.push(ColumnRow {
-                    key: self.next_key,
-                    name: "New Column".into(),
-                    orig_folder: None,
-                    tickets: 0,
-                    auto_move: AutoMove::Manual,
-                    ai_prompt: self.default_prompt.clone(),
-                    show_prompt: false,
-                    wip_limit: 0,
-                    agent: None,
-                });
-                self.next_key += 1;
-            }
-            self.columns_ui(ui);
-            self.removed_ui(ui);
-            ui.add_space(8.0);
-            settings_ui(ui, &mut self.settings, &mut self.git_excluded);
-            if self.editing {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label("Export");
-                    if ui.button(format!("{}  Tickets as CSV…", icon::TABLE)).clicked() {
-                        outcome = Some(ProjectOutcome::Export(ExportFormat::Csv));
-                    }
-                    if ui
-                        .button(format!("{}  Board as Markdown report…", icon::FILE_TEXT))
-                        .clicked()
-                    {
-                        outcome = Some(ProjectOutcome::Export(ExportFormat::Markdown));
-                    }
-                });
-            }
+            // Short tabs keep the height so the dialog doesn't jump when switching.
+            ui.add_space((TAB_HEIGHT - (ui.cursor().top() - top)).max(0.0));
 
             ui.add_space(12.0);
             let valid = self.validation();
@@ -370,6 +335,65 @@ impl ProjectForm {
         outcome
     }
 
+    fn general_ui(&mut self, ui: &mut Ui, outcome: &mut Option<ProjectOutcome>) {
+        ui.label("Name");
+        ui.add(
+            TextEdit::singleline(&mut self.name)
+                .margin(super::INPUT_MARGIN)
+                .hint_text("My Project")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(8.0);
+
+        if !self.editing {
+            self.location_ui(ui, outcome);
+            ui.add_space(8.0);
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("AI CLI");
+            let name = |id: &str| crate::terminal::ai_cli(id).map_or(id.to_string(), |c| c.name.to_string());
+            let combo = ComboBox::from_id_salt("project_ai_cli")
+                .selected_text(name(&self.ai_cli))
+                .show_ui(ui, |ui| {
+                    for id in &self.cli_options {
+                        ui.selectable_value(&mut self.ai_cli, id.clone(), name(id));
+                    }
+                });
+            super::pointer(combo.response).on_hover_text("Used by the ▶ button. Turn on more tools in Settings.");
+        });
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Test command");
+            ui.add(
+                TextEdit::singleline(&mut self.settings.test_command)
+                    .margin(super::INPUT_MARGIN)
+                    .hint_text("Optional, e.g. cargo test")
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text(
+                "Runs in the project folder when the AI finishes a ticket in the last column. The ticket only stays                  there if the command succeeds; otherwise it goes back to the first column with the output in its                  notes. Stays on this computer.",
+            );
+        });
+
+        if self.editing {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Export");
+                if ui.button(format!("{}  Tickets as CSV…", icon::TABLE)).clicked() {
+                    *outcome = Some(ProjectOutcome::Export(ExportFormat::Csv));
+                }
+                if ui
+                    .button(format!("{}  Board as Markdown report…", icon::FILE_TEXT))
+                    .clicked()
+                {
+                    *outcome = Some(ProjectOutcome::Export(ExportFormat::Markdown));
+                }
+            });
+        }
+    }
+
     fn location_ui(&mut self, ui: &mut Ui, outcome: &mut Option<ProjectOutcome>) {
         ui.label("Location");
         ui.horizontal(|ui| {
@@ -403,6 +427,29 @@ impl ProjectForm {
     }
 
     fn columns_ui(&mut self, ui: &mut Ui) {
+        let add = ui
+            .horizontal(|ui| {
+                ui.label(RichText::new("Drag to reorder").color(theme::TEXT_MUTED).small());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.button(format!("{}  Add column", icon::PLUS)).clicked()
+                })
+                .inner
+            })
+            .inner;
+        if add {
+            self.rows.push(ColumnRow {
+                key: self.next_key,
+                name: "New Column".into(),
+                orig_folder: None,
+                tickets: 0,
+                auto_move: AutoMove::Manual,
+                ai_prompt: self.default_prompt.clone(),
+                show_prompt: false,
+                wip_limit: 0,
+                agent: None,
+            });
+            self.next_key += 1;
+        }
         let only_one = self.rows.len() == 1;
         let mut remove = None;
         let agents: Vec<String> = self.agent_rows().into_iter().map(|a| a.name).collect();
@@ -671,6 +718,7 @@ impl ProjectForm {
     /// The sub agent list with each one's model, and the form for a new one.
     fn agents_ui(&mut self, ui: &mut Ui) {
         if !has_agents(&self.ai_cli) {
+            ui.label(RichText::new("This AI CLI has no sub agents.").color(theme::TEXT_MUTED));
             return;
         }
         let rows = self.agent_rows();
@@ -913,9 +961,8 @@ fn delete_choice(ctx: &egui::Context, name: &str, ghost: Option<&std::path::Path
     choice
 }
 
-/// Git options and the test command for the project.
-fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings, git_excluded: &mut bool) {
-    ui.label("Git");
+/// Git options for the project.
+fn git_ui(ui: &mut Ui, s: &mut ProjectSettings, git_excluded: &mut bool) {
     super::pointer(ui.checkbox(git_excluded, "Exclude from Git")).on_hover_text(
         "Adds the .ghost file and the tickets folder to the project's .gitignore, so the board stays out of the \
          repository. Unticking takes them out again. Files git already tracks stay tracked until you remove them \
@@ -941,21 +988,8 @@ fn settings_ui(ui: &mut Ui, s: &mut ProjectSettings, git_excluded: &mut bool) {
             );
         });
     }
-    ui.horizontal(|ui| {
-        ui.label("Test command");
-        ui.add(
-            TextEdit::singleline(&mut s.test_command)
-                .margin(super::INPUT_MARGIN)
-                .hint_text("Optional, e.g. cargo test")
-                .desired_width(f32::INFINITY),
-        )
-        .on_hover_text(
-            "Runs in the project folder when the AI finishes a ticket in the last column. The ticket only stays \
-             there if the command succeeds; otherwise it goes back to the first column with the output in its notes.",
-        );
-    });
     ui.label(
-        RichText::new("Committing, pushing and the test command stay on this computer.")
+        RichText::new("Committing and pushing stay on this computer.")
             .small()
             .color(theme::TEXT_MUTED),
     );
@@ -1043,6 +1077,23 @@ mod tests {
         h.set_size(egui::vec2(900.0, 1400.0));
         h.run_steps(3);
         h
+    }
+
+    fn open_tab<T>(h: &mut Harness<'static, T>, name: &str) {
+        h.get_by_label(name).click();
+        h.run();
+    }
+
+    #[test]
+    fn tabs_split_the_form() {
+        let mut h = harness();
+        assert!(h.query_by_label("Test command").is_some() && h.query_by_label("Sub agents").is_none());
+        open_tab(&mut h, "Agents");
+        assert!(h.query_by_label("Sub agents").is_some() && h.query_by_label("Name").is_none());
+        open_tab(&mut h, "Columns");
+        assert!(h.query_by_label_contains("Add column").is_some());
+        open_tab(&mut h, "Git");
+        assert!(h.query_by_label("Exclude from Git").is_some() && h.query_by_label("Test command").is_none());
     }
 
     #[test]
@@ -1163,6 +1214,7 @@ mod tests {
     #[test]
     fn add_column_appends_a_row() {
         let mut h = harness();
+        open_tab(&mut h, "Columns");
         h.get_by_label_contains("Add column").click();
         h.run();
         assert_eq!(h.state().0.rows.len(), DEFAULT_COLUMNS.len() + 1);
@@ -1189,20 +1241,23 @@ mod tests {
 
     #[test]
     fn dropdowns_sit_between_columns() {
-        let h = harness();
+        let mut h = harness();
+        open_tab(&mut h, "Columns");
         assert_eq!(h.get_all_by_label("Moves in on").count(), DEFAULT_COLUMNS.len() - 1);
     }
 
     #[test]
     fn command_icon_only_on_columns_with_a_play_button() {
         // Defaults: In Dev and In Test take tickets on AI Working, so 3 of 5 columns keep the icon.
-        let h = harness();
+        let mut h = harness();
+        open_tab(&mut h, "Columns");
         assert_eq!(h.get_all_by_label(icon::TERMINAL_WINDOW).count(), 3);
     }
 
     #[test]
     fn push_only_shows_and_saves_with_commit() {
         let mut h = harness();
+        open_tab(&mut h, "Git");
         assert!(h.query_by_label("Push when commit is made").is_none());
         h.get_by_label("Commit when ticket is done").click();
         h.run();
@@ -1235,8 +1290,9 @@ mod tests {
     }
 
     #[test]
-    fn exclude_from_git_sits_under_the_git_heading_and_reflects_gitignore() {
+    fn exclude_from_git_sits_under_the_git_tab_and_reflects_gitignore() {
         let mut h = harness();
+        open_tab(&mut h, "Git");
         let heading = h.get_by_label("Git").rect();
         let exclude = h.get_by_label("Exclude from Git").rect();
         let commit = h.get_by_label("Commit when ticket is done").rect();
@@ -1260,6 +1316,7 @@ mod tests {
     #[test]
     fn a_tall_modal_fits_a_small_window_and_scrolls() {
         let mut h = harness();
+        open_tab(&mut h, "Columns");
         h.set_size(egui::vec2(700.0, 420.0));
         h.run_steps(3);
         let modal = h.ctx.memory(|m| m.area_rect(egui::Id::new("project_modal"))).unwrap();
@@ -1309,6 +1366,7 @@ mod tests {
     #[test]
     fn ai_working_columns_pick_a_sub_agent() {
         let mut h = harness();
+        open_tab(&mut h, "Columns");
         assert_eq!(h.get_all_by_label("Sub agent").count(), 2, "In Dev and In Test");
         let form = &mut h.state_mut().0;
         form.location = Some(PathBuf::from("/p"));
@@ -1327,6 +1385,7 @@ mod tests {
         // Room for the new sub agent form without scrolling.
         h.set_size(egui::vec2(900.0, 2000.0));
         h.run_steps(3);
+        open_tab(&mut h, "Agents");
         let names = |h: &Harness<'static, (ProjectForm, Option<bool>)>| {
             h.state()
                 .0
@@ -1343,8 +1402,7 @@ mod tests {
             ]
         );
         assert!(h.query_by_label("New").is_none(), "agents not written yet carry no tag");
-        // Above the columns, each model a dropdown of the CLI's models.
-        assert!(h.get_by_label("Sub agents").rect().bottom() < h.get_by_label("Columns").rect().top());
+        // Each model a dropdown of the CLI's models.
         h.get_by_value("claude-sonnet-5-5").click();
         h.run();
         h.get_by_label("claude-haiku-5-5").click();
@@ -1362,8 +1420,10 @@ mod tests {
         );
         h.get_by_label("claude-opus-5-5").click();
         h.run();
+        open_tab(&mut h, "Git");
         h.get_by_label("Commit when ticket is done").click();
         h.run();
+        open_tab(&mut h, "Agents");
         assert_eq!(names(&h)[0], ("developer".into(), "claude-opus-5-5".into()));
         assert_eq!(names(&h)[1], ("git".into(), "claude-sonnet-5-5".into()));
         assert!(h.query_by_label("git").is_some());
@@ -1406,6 +1466,7 @@ mod tests {
         let mut h = harness();
         h.set_size(egui::vec2(900.0, 2000.0));
         h.run_steps(3);
+        open_tab(&mut h, "Agents");
         let edit = |h: &mut Harness<'static, (ProjectForm, Option<bool>)>, i: usize| {
             h.get_all_by_label(icon::PENCIL_SIMPLE).nth(i).unwrap().click();
             h.run();
