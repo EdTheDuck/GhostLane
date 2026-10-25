@@ -484,27 +484,54 @@ fn stages(p: &Project) -> Vec<Stage> {
         .collect()
 }
 
-/// The sub agent that works a stage: the one picked for its column, else the Tester when the column's name says
+/// The sub agents that may work a stage: those picked for its column, else the Tester when the column's name says
 /// testing, else the Developer.
-fn stage_agent<'a>(p: &'a Project, s: &Stage) -> &'a str {
+fn stage_agents<'a>(p: &'a Project, s: &Stage) -> Vec<&'a str> {
     let c = &p.meta.columns[s.working];
     let name = c.name.to_lowercase();
-    match &c.agent {
-        Some(a) => a,
-        None if name.contains("test") || name.contains("qa") => Role::Tester.id(),
-        None => Role::Developer.id(),
+    let picked = c.agents();
+    if !picked.is_empty() {
+        picked
+    } else if name.contains("test") || name.contains("qa") {
+        vec![Role::Tester.id()]
+    } else {
+        vec![Role::Developer.id()]
     }
+}
+
+/// "the a sub agent", or with more than one "whichever of the a, b or c sub agents fits the ticket best".
+fn handed_to(names: &[String]) -> String {
+    match names.split_last() {
+        Some((last, [])) => format!("the {last} sub agent"),
+        Some((last, rest)) => format!(
+            "whichever of the {} or {last} sub agents fits the ticket best",
+            rest.join(", ")
+        ),
+        None => String::new(),
+    }
+}
+
+/// What the ▶ prompt adds for a column worked by `agents`; `None` = the session works it itself.
+pub fn use_note(agents: &[&str]) -> Option<String> {
+    if agents.is_empty() {
+        return None;
+    }
+    let which = handed_to(&agents.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+    // In the background, the CLI would stop at once and GhostLane would start the next ticket meanwhile.
+    Some(format!(
+        " Use {which} to work on it. Run it in the foreground and wait for it to finish before you stop."
+    ))
 }
 
 /// System prompt for `role`: what it does, which columns are its own, and the board guide. `push`: the Git agent
 /// pushes its commits.
 fn instructions(p: &Project, role: Role, push: bool) -> String {
     let all = stages(p);
-    let mine: Vec<&Stage> = all.iter().filter(|s| stage_agent(p, s) == role.id()).collect();
+    let mine: Vec<&Stage> = all.iter().filter(|s| stage_agents(p, s).contains(&role.id())).collect();
     // Failed tests go back to where development starts.
     let rework = all
         .iter()
-        .find(|s| stage_agent(p, s) == Role::Developer.id())
+        .find(|s| stage_agents(p, s).contains(&Role::Developer.id()))
         .map_or(0, |s| s.from);
     let label = |c: usize| p.column_label(c);
     // Tickets kept in git go into the commit in the column they finish in.
@@ -641,10 +668,11 @@ pub fn workflow(p: &Project, cli: &str, commit: bool) -> String {
             None => "leaves it there when it's done".to_string(),
         };
         if agents {
-            let agent = stage_agent(p, s);
+            let agents: Vec<String> = stage_agents(p, s).iter().map(|a| format!("`{a}`")).collect();
+            let to = handed_to(&agents);
             out.push_str(&format!(
-                "  - Tickets in {from}: hand them to the `{agent}` sub agent. It moves the ticket to {working} while \
-                 it works and {then}.\n"
+                "  - Tickets in {from}: hand them to {to}. It moves the ticket to {working} while it works and \
+                 {then}.\n"
             ));
         } else {
             let then = then
@@ -662,7 +690,7 @@ pub fn workflow(p: &Project, cli: &str, commit: bool) -> String {
              ticket ended up in and report that; a ticket sent back to an earlier column has the reason in its \
              Notes.\n",
         );
-        if commit && !all.iter().any(|s| stage_agent(p, s) == Role::Git.id()) {
+        if commit && !all.iter().any(|s| stage_agents(p, s).contains(&Role::Git.id())) {
             out.push_str("- When a finished ticket's work needs committing, hand it to the `git` sub agent.\n");
         }
     }
@@ -832,12 +860,37 @@ mod tests {
         assert!(w.contains("Tickets in **Ready For Test** (`tickets/ready_for_test/`): hand them to the `git`"));
         assert!(!w.contains("needs committing"));
 
+        // More than one: the session picks.
+        p.meta.columns[1].agent = Some("developer".into());
+        p.meta.columns[1].more_agents = vec!["reviewer".into(), "docs".into()];
+        let w = workflow(&p, "claude", false);
+        assert!(w.contains(
+            "hand them to whichever of the `developer`, `reviewer` or `docs` sub agents fits the ticket best. It \
+             moves the ticket to **In Dev**"
+        ));
+        assert!(instructions(&p, Role::Developer, false).contains("**In Dev**"));
+
         let w = workflow(&p, "aider", false);
         assert!(!w.contains("sub agent"));
         assert!(w.contains(
             "  - Tickets in **To Do** (`tickets/to_do/`): move the ticket to **In Dev** (`tickets/in_dev/`) when you \
              start, and move it on to **Ready For Test** (`tickets/ready_for_test/`) when it's done.\n"
         ));
+    }
+
+    #[test]
+    fn play_prompt_names_the_column_agents() {
+        assert_eq!(use_note(&[]), None);
+        assert!(
+            use_note(&["tester"])
+                .unwrap()
+                .starts_with(" Use the tester sub agent to work on it.")
+        );
+        assert!(
+            use_note(&["developer", "reviewer"]).unwrap().starts_with(
+                " Use whichever of the developer or reviewer sub agents fits the ticket best to work on it."
+            )
+        );
     }
 
     #[test]

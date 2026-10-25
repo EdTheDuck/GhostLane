@@ -1426,14 +1426,10 @@ impl App {
             }
         };
         // Names are checked on load, so only a plain name reaches the prompt.
-        if let Some(agent) = working_col.and_then(|c| p.meta.columns[c].agent.as_deref())
+        if let Some(note) = working_col.and_then(|c| crate::agents::use_note(&p.meta.columns[c].agents()))
             && crate::agents::has_agents(cli.id)
         {
-            // In the background, the CLI would stop at once and GhostLane would start the next ticket meanwhile.
-            prompt.push_str(&format!(
-                " Use the {agent} sub agent to work on it. Run it in the foreground and wait for it to finish \
-                 before you stop."
-            ));
+            prompt.push_str(&note);
         }
         // In parallel, the ticket works in a worktree and a terminal of its own.
         // ponytail: sets the worktree up on the UI thread; move it to a background job if big repos make it lag.
@@ -2848,6 +2844,7 @@ impl App {
                         c.ai_prompt = edit.ai_prompt;
                         c.wip_limit = edit.wip_limit.filter(|&n| n > 0);
                         c.agent = edit.agent;
+                        c.more_agents = edit.more_agents;
                     }
                     if let Err(e) = p.save_meta() {
                         self.toast(format!("Couldn't save the project's settings: {e}"));

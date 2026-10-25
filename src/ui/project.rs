@@ -33,6 +33,8 @@ pub struct ColumnRow {
     wip_limit: u32,
     /// Sub agent for tickets moved in on AI Working; `None` = the session itself.
     agent: Option<String>,
+    /// Further sub agents the AI CLI may pick instead of `agent`.
+    more_agents: Vec<String>,
 }
 
 impl DragDropItem for &mut ColumnRow {
@@ -156,6 +158,7 @@ impl ProjectForm {
                 show_prompt: false,
                 wip_limit: 0,
                 agent: DEFAULT_AGENTS[i].map(str::to_string),
+                more_agents: Vec::new(),
             })
             .collect();
         ProjectForm {
@@ -205,6 +208,7 @@ impl ProjectForm {
                 show_prompt: false,
                 wip_limit: c.wip_limit.unwrap_or(0),
                 agent: c.agent.clone(),
+                more_agents: c.more_agents.clone(),
             })
             .collect();
         ProjectForm {
@@ -447,6 +451,7 @@ impl ProjectForm {
                 show_prompt: false,
                 wip_limit: 0,
                 agent: None,
+                more_agents: Vec::new(),
             });
             self.next_key += 1;
         }
@@ -588,6 +593,15 @@ impl ProjectForm {
                     ai_prompt: (!prompt.is_empty() && prompt != self.default_prompt.trim()).then(|| prompt.to_string()),
                     wip_limit: (r.wip_limit > 0).then_some(r.wip_limit),
                     agent: r.agent.clone().filter(|_| i > 0 && r.auto_move == AutoMove::AiWorking),
+                    more_agents: if i > 0 && r.auto_move == AutoMove::AiWorking && r.agent.is_some() {
+                        r.more_agents
+                            .iter()
+                            .filter(|a| Some(*a) != r.agent.as_ref())
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                 }
             })
             .collect();
@@ -1037,6 +1051,34 @@ fn auto_move_ui(ui: &mut Ui, row: &mut ColumnRow, agents: &[String]) {
             super::pointer(combo.response).on_hover_text(
                 "The sub agent ▶ hands these tickets to. Main session: the AI CLI works on them itself.",
             );
+            if let Some(first) = row.agent.clone() {
+                row.more_agents.retain(|a| *a != first);
+                ui.label(RichText::new("Or").color(theme::TEXT_MUTED).small());
+                let text = if row.more_agents.is_empty() {
+                    "None".to_string()
+                } else {
+                    row.more_agents.join(", ")
+                };
+                let combo = ComboBox::from_id_salt(("more_agents", row.key))
+                    .selected_text(text)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show_ui(ui, |ui| {
+                        for a in agents.iter().filter(|a| **a != first) {
+                            let mut on = row.more_agents.contains(a);
+                            if ui.checkbox(&mut on, a).changed() {
+                                if on {
+                                    row.more_agents.push(a.clone());
+                                } else {
+                                    row.more_agents.retain(|m| m != a);
+                                }
+                            }
+                        }
+                    });
+                super::pointer(combo.response).on_hover_text(
+                    "More sub agents for these tickets. With more than one, the AI CLI hands each ticket to \
+                     whichever fits it best.",
+                );
+            }
         }
     });
 }
@@ -1389,6 +1431,32 @@ mod tests {
         };
         let agents: Vec<_> = columns.iter().map(|c| c.agent.as_deref()).collect();
         assert_eq!(agents, DEFAULT_AGENTS);
+    }
+
+    #[test]
+    fn a_column_with_a_sub_agent_can_offer_more() {
+        let mut h = harness();
+        open_tab(&mut h, "Columns");
+        assert_eq!(h.get_all_by_label("Or").count(), 2, "In Dev and In Test");
+        let modal = h.ctx.memory(|m| m.area_rect(egui::Id::new("project_modal"))).unwrap();
+        let more = h.get_all_by_value("None").next().unwrap().rect();
+        assert!(modal.contains_rect(more), "{more:?} fits in {modal:?}");
+        h.get_all_by_value("None").next().unwrap().click();
+        h.run();
+        h.get_by_label("tester").click();
+        h.run();
+        assert_eq!(h.state().0.rows[1].more_agents, ["tester"]);
+        assert!(h.query_by_label("tester").is_some(), "stays open to tick more");
+        let form = &mut h.state_mut().0;
+        // Back to the main session: nothing more to pick from.
+        form.rows[3].more_agents = vec!["developer".into()];
+        form.rows[3].agent = None;
+        form.location = Some(PathBuf::from("/p"));
+        let ProjectOutcome::Create { columns, .. } = form.submit() else {
+            panic!("expected create");
+        };
+        assert_eq!(columns[1].more_agents, ["tester"]);
+        assert!(columns[3].more_agents.is_empty());
     }
 
     #[test]

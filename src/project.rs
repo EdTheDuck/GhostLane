@@ -132,6 +132,20 @@ pub struct Column {
     /// Sub agent that works tickets moved in on AI Working; `None` = the session itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Further sub agents the AI CLI may pick instead of `agent`, whichever fits the ticket best. Only with `agent`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more_agents: Vec<String>,
+}
+
+impl Column {
+    /// `agent` then `more_agents`; empty = the session itself.
+    pub fn agents(&self) -> Vec<&str> {
+        self.agent
+            .iter()
+            .chain(self.agent.is_some().then_some(&self.more_agents).into_iter().flatten())
+            .map(String::as_str)
+            .collect()
+    }
 }
 
 /// Markers around the ticket guide GhostLane keeps in an AI CLI's instructions file.
@@ -165,6 +179,7 @@ pub struct ColumnEdit {
     pub ai_prompt: Option<String>,
     pub wip_limit: Option<u32>,
     pub agent: Option<String>,
+    pub more_agents: Vec<String>,
 }
 
 pub struct Project {
@@ -247,6 +262,12 @@ impl Project {
             if c.agent.as_deref().is_some_and(|a| !crate::agents::valid_name(a)) {
                 c.agent = None;
             }
+            let mut seen: Vec<String> = c.agent.iter().cloned().collect();
+            c.more_agents.retain(|a| {
+                let keep = c.agent.is_some() && crate::agents::valid_name(a) && !seen.contains(a);
+                seen.push(a.clone());
+                keep
+            });
         }
         let root = ghost_path.parent().map(Path::to_path_buf).unwrap_or_default();
         let mut p = Project {
@@ -288,6 +309,7 @@ impl Project {
                 ai_prompt: None,
                 wip_limit: None,
                 agent: None,
+                more_agents: Vec::new(),
             })
             .collect();
         let meta = GhostFile {
@@ -648,6 +670,7 @@ impl Project {
                     ai_prompt: e.ai_prompt.clone(),
                     wip_limit: e.wip_limit.filter(|&n| n > 0),
                     agent: e.agent.clone(),
+                    more_agents: e.more_agents.clone(),
                 }
             })
             .collect();
@@ -1149,15 +1172,17 @@ mod tests {
         let path = d.path().join("p.ghost");
         fs::write(
             &path,
-            "name: P\ncolumns:\n- {name: A, folder: a, agent: tester}\n- {name: B, folder: b, agent: \"x; rm -rf /\"}\n",
+            "name: P\ncolumns:\n- {name: A, folder: a, agent: tester, more_agents: [reviewer, tester, \"x; y\", reviewer]}\n\
+             - {name: B, folder: b, agent: \"x; rm -rf /\", more_agents: [reviewer]}\n",
         )
         .unwrap();
         let p = Project::load(&path).unwrap();
-        assert_eq!(p.meta.columns[0].agent.as_deref(), Some("tester"));
+        assert_eq!(p.meta.columns[0].agents(), ["tester", "reviewer"]);
         assert_eq!(p.meta.columns[1].agent, None);
+        assert!(p.meta.columns[1].more_agents.is_empty(), "only with a first agent");
         p.save_meta().unwrap();
         let p = Project::load(&path).unwrap();
-        assert_eq!(p.meta.columns[0].agent.as_deref(), Some("tester"));
+        assert_eq!(p.meta.columns[0].agents(), ["tester", "reviewer"]);
     }
 
     #[test]
