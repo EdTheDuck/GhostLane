@@ -2852,11 +2852,12 @@ impl App {
                     if let Err(e) = p.save_meta() {
                         self.toast(format!("Couldn't save the project's settings: {e}"));
                     }
-                    if let Err(e) = write_ai_guide(&p, &settings, &agents) {
-                        self.toast(e);
-                    }
+                    // First, so the Git agent knows whether tickets get committed.
                     if let Err(e) = p.set_git_excluded(git_excluded) {
                         self.toast(format!("Couldn't update .gitignore: {e}"));
+                    }
+                    if let Err(e) = write_ai_guide(&p, &settings, &agents) {
+                        self.toast(e);
                     }
                     self.config.projects.insert(p.ghost_path.clone(), settings);
                     self.add_project(p, ctx);

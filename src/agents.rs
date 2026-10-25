@@ -507,6 +507,8 @@ fn instructions(p: &Project, role: Role, push: bool) -> String {
         .find(|s| stage_agent(p, s) == Role::Developer.id())
         .map_or(0, |s| s.from);
     let label = |c: usize| p.column_label(c);
+    // Tickets kept in git go into the commit in the column they finish in.
+    let with_ticket = role == Role::Git && !p.git_excluded();
     let (and_push, and_pushed, or_pushing) = if push {
         (" and push", " and pushed", " or pushing")
     } else {
@@ -542,6 +544,10 @@ fn instructions(p: &Project, role: Role, push: bool) -> String {
                 label(done),
                 label(rework)
             ),
+            (Some(done), Role::Git) if with_ticket => format!(
+                "Move it to {} and then commit{and_push} the work, the ticket included.",
+                label(done)
+            ),
             (Some(done), Role::Git) => format!("Once the work is committed{and_pushed}, move it to {}.", label(done)),
             (None, _) => "When you are done, leave it there.".to_string(),
         };
@@ -571,17 +577,31 @@ fn instructions(p: &Project, role: Role, push: bool) -> String {
              4. Move the ticket on as described above. When it fails, say exactly what failed and how to \
              reproduce it in the note.\n",
         ),
-        Role::Git => out.push_str(&format!(
-            "3. Stage everything with `git add -A` and commit it with the ticket's number and title as the \
-             message, like `00012: Add the login page`. {} Don't change, revert or leave out any files.\n\
-             4. Move the ticket on as described above. If committing{or_pushing} fails, add the error under \
-             `## Notes` and leave the ticket in your working column.\n",
-            if push {
-                "Then push it with `git push`."
+        Role::Git => {
+            let commit = format!(
+                "Stage everything with `git add -A` and commit it with the ticket's number and title as the message, \
+                 like `00012: Add the login page`. {} Don't change, revert or leave out any files.",
+                if push {
+                    "Then push it with `git push`."
+                } else {
+                    "Don't push."
+                }
+            );
+            out.push_str(&if with_ticket {
+                format!(
+                    "3. Move the ticket on as described above first, so the commit holds it in its new column.\n\
+                     4. {commit}\n\
+                     5. If committing{or_pushing} fails, add the error under `## Notes` and move the ticket back to \
+                     your working column.\n"
+                )
             } else {
-                "Don't push."
-            }
-        )),
+                format!(
+                    "3. {commit}\n\
+                     4. Move the ticket on as described above. If committing{or_pushing} fails, add the error under \
+                     `## Notes` and leave the ticket in your working column.\n"
+                )
+            })
+        }
     }
     out.push('\n');
     out.push_str(&p.ai_guide().replace("## GhostLane tickets", "## The board"));
@@ -719,12 +739,19 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut p = default_project(d.path());
         p.meta.columns[3].agent = Some("git".into());
+        // Tickets kept in git: the ticket moves first, so the commit holds it in Done.
         let git = instructions(&p, Role::Git, true);
         assert!(git.contains(
             "Pick up tickets from **Ready For Test** (`tickets/ready_for_test/`). Before you start, move the ticket \
-             to **In Test** (`tickets/in_test/`). Once the work is committed and pushed, move it to **Done**"
+             to **In Test** (`tickets/in_test/`). Move it to **Done** (`tickets/done/`) and then commit and push the \
+             work, the ticket included."
         ));
+        assert!(git.contains("3. Move the ticket on as described above first"));
         assert!(git.contains("Then push it with `git push`."));
+        p.set_git_excluded(true).unwrap();
+        let git = instructions(&p, Role::Git, true);
+        assert!(git.contains("Once the work is committed and pushed, move it to **Done**"));
+        assert!(git.contains("3. Stage everything with `git add -A`"));
         assert!(instructions(&p, Role::Git, false).contains("Don't push."));
         assert!(!instructions(&p, Role::Tester, false).contains("Pick up tickets from"));
     }
