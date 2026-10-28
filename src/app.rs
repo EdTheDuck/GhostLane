@@ -2252,7 +2252,6 @@ impl App {
 
     /// Bottom panel: the terminal (75% of the width) and the AI queue (25%); either one alone gets it all.
     fn terminal_panel(&mut self, ui: &mut Ui) {
-        self.terminals.poll();
         let collapsed = self.config.terminal_collapsed;
         let queue_open = !self.config.queue_closed;
         let frame = Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 6));
@@ -3429,13 +3428,15 @@ fn strip_unc(p: PathBuf) -> PathBuf {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// Everything that keeps the AI going. eframe skips `ui` while the window is minimized or hidden behind others,
+    /// but still calls this, so runs end, prompts get their Enter and the next ticket starts in the background too.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.terminals.poll();
         self.poll_watcher();
         self.poll_generation();
-        self.update_windows(&ctx);
-        self.poll_ai_runs(&ctx);
-        self.poll_jobs(&ctx);
+        self.update_windows(ctx);
+        self.poll_ai_runs(ctx);
+        self.poll_jobs(ctx);
         self.save_auto();
         if let Some(v) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.update = Some(v);
@@ -3445,10 +3446,14 @@ impl eframe::App for App {
             .as_ref()
             .map_or_else(Vec::new, |rx| rx.try_iter().collect());
         for path in handed {
-            self.open_path(path, &ctx);
+            self.open_path(path, ctx);
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
         self.shortcuts(&ctx, &mut actions);
 
