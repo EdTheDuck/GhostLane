@@ -143,6 +143,7 @@ pub enum Action {
     QueueTickets(Vec<u32>),
     /// Put a ticket at the end of the queue without starting anything.
     AddToQueue(u32),
+    RemoveFromQueue(u32),
     SetPriority {
         ids: Vec<u32>,
         priority: Priority,
@@ -979,6 +980,11 @@ impl App {
                     } else {
                         self.projects[i].queue.push(id);
                     }
+                }
+            }
+            Action::RemoveFromQueue(id) => {
+                if let Some(op) = self.active.and_then(|i| self.projects.get_mut(i)) {
+                    op.queue.retain(|&q| q != id);
                 }
             }
             Action::SetPriority { ids, priority } => {

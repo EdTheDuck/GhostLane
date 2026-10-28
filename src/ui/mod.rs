@@ -171,11 +171,20 @@ pub fn danger_icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
 /// With `fill_on_hover` it also switches to the filled Phosphor glyph.
 pub fn glyph_button(ui: &mut Ui, glyph: &str, idle: Color32, hover: Color32, fill_on_hover: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
-    paint_glyph(ui, rect, &response, glyph, idle, hover, fill_on_hover);
+    let filled = fill_on_hover && (response.hovered() || response.has_focus());
+    paint_glyph(ui, rect, &response, glyph, idle, hover, filled);
     pointer(response)
 }
 
-/// Draws an icon button's glyph in `rect`, `hover` coloured while `response` is hovered or focused.
+/// Icon-only button that always shows the filled Phosphor glyph, for a switch that is on.
+pub fn solid_glyph_button(ui: &mut Ui, glyph: &str, color: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+    paint_glyph(ui, rect, &response, glyph, color, color, true);
+    pointer(response)
+}
+
+/// Draws an icon button's glyph in `rect`, `hover` coloured while `response` is hovered or focused, `filled` in the
+/// filled Phosphor variant.
 fn paint_glyph(
     ui: &Ui,
     rect: egui::Rect,
@@ -183,13 +192,13 @@ fn paint_glyph(
     glyph: &str,
     idle: Color32,
     hover: Color32,
-    fill_on_hover: bool,
+    filled: bool,
 ) {
     let enabled = ui.is_enabled();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, glyph));
     if ui.is_rect_visible(rect) {
         let hot = response.hovered() || response.has_focus();
-        let family = if hot && fill_on_hover {
+        let family = if filled {
             egui::FontFamily::Name(theme::ICON_FILL.into())
         } else {
             egui::FontFamily::Proportional

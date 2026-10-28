@@ -427,6 +427,7 @@ fn column_ui(
         filter,
         cursor,
         scroll_to_cursor,
+        queue,
         ..
     } = op
     else {
@@ -556,6 +557,7 @@ fn column_ui(
                         filtered: &filter.labels,
                         epic,
                         epics: &project.epics,
+                        queued: queue.contains(&t.id),
                     };
                     let card = card(ui, t, play, marks, (picked, dragging, at), actions);
                     if at && *scroll_to_cursor {
@@ -686,6 +688,8 @@ struct Marks<'a> {
     epic: Option<(&'a Epic, bool)>,
     /// The project's epics, offered in the card's menu.
     epics: &'a [Epic],
+    /// Waiting in the AI queue: its ▶ takes it out again.
+    queued: bool,
 }
 
 /// `selected`: the card is part of the selection, and dragging it takes `dragging` cards along. `cursor`: the arrow
@@ -788,6 +792,7 @@ fn card_contents(
         blockers,
         filtered,
         epic,
+        queued,
         ..
     }: Marks,
     actions: &mut Vec<Action>,
@@ -864,6 +869,12 @@ fn card_contents(
         .response
         .rect;
     let Some((glyph, tip)) = play else { return };
+    let (glyph, tip, hover, action) = if queued {
+        let tip = "In the AI queue: click to take it out";
+        (icon::LIST_CHECKS, tip, theme::DANGER, Action::RemoveFromQueue(t.id))
+    } else {
+        (glyph, tip, theme::ACCENT, Action::RunAi(t.id))
+    };
     // Fixed slot at the right edge, vertically centred.
     let slot = egui::Rect::from_min_size(
         egui::pos2(left + full - PLAY, text_rect.center().y - PLAY / 2.0),
@@ -871,12 +882,12 @@ fn card_contents(
     );
     let clicked = ui
         .put(slot, |ui: &mut Ui| {
-            super::glyph_button(ui, glyph, theme::ACCENT, theme::ACCENT, true)
+            super::glyph_button(ui, glyph, theme::ACCENT, hover, true)
         })
         .on_hover_text(tip)
         .clicked();
     if clicked {
-        actions.push(Action::RunAi(t.id));
+        actions.push(action);
     }
 }
 
@@ -1010,6 +1021,21 @@ mod tests {
         h.state_mut().2 = false;
         h.run();
         assert_eq!(h.get_all_by_label(icon::PLAY).count(), 1);
+    }
+
+    #[test]
+    fn a_queued_tickets_button_takes_it_out_of_the_queue() {
+        let d = tempfile::tempdir().unwrap();
+        let mut h = harness(d.path());
+        h.state_mut().0.queue.push(1);
+        h.state_mut().2 = true;
+        h.run();
+        assert_eq!(h.query_all_by_label(icon::LIST_PLUS).count(), 0);
+        h.get_by_label(icon::LIST_CHECKS).click();
+        h.run();
+        let actions = &h.state().1;
+        assert!(actions.iter().any(|a| matches!(a, Action::RemoveFromQueue(1))));
+        assert!(!actions.iter().any(|a| matches!(a, Action::RunAi(_))));
     }
 
     #[test]

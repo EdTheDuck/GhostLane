@@ -130,11 +130,12 @@ fn epic_card(ui: &mut Ui, p: &Project, e: &Epic, filter: &Filter, actions: &mut 
                         } else {
                             "Show only this epic's tickets"
                         };
-                        let idle = if filtering { theme::EPIC } else { theme::TEXT_MUTED };
-                        if super::glyph_button(ui, icon::FUNNEL, idle, theme::EPIC, true)
-                            .on_hover_text(tip)
-                            .clicked()
-                        {
+                        let funnel = if filtering {
+                            super::solid_glyph_button(ui, icon::FUNNEL, theme::EPIC)
+                        } else {
+                            super::glyph_button(ui, icon::FUNNEL, theme::TEXT_MUTED, theme::EPIC, true)
+                        };
+                        if funnel.on_hover_text(tip).clicked() {
                             actions.push(Action::FilterByEpic(e.id));
                         }
                     });
