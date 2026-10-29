@@ -3431,7 +3431,7 @@ impl eframe::App for App {
     /// Everything that keeps the AI going. eframe skips `ui` while the window is minimized or hidden behind others,
     /// but still calls this, so runs end, prompts get their Enter and the next ticket starts in the background too.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.terminals.poll();
+        self.terminals.poll(ctx);
         self.poll_watcher();
         self.poll_generation();
         self.update_windows(ctx);

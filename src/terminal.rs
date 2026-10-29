@@ -549,10 +549,23 @@ pub fn theme() -> TerminalTheme {
     }))
 }
 
+/// Quiet time after a TUI shows typed text before Enter goes in.
+const ENTER_SETTLE: Duration = Duration::from_millis(300);
+/// Longest wait for that before Enter goes in anyway.
+const ENTER_GIVE_UP: Duration = Duration::from_secs(10);
+
+/// Should the Enter for text typed at `typed` go in now? Only once the TUI has printed since (it read the text)
+/// and then stayed quiet: a busy TUI reads text and Enter in one chunk and takes a long one as a paste, Enter
+/// included, so the prompt sits unsent.
+fn enter_due(typed: Instant, last_output: Option<Instant>, now: Instant) -> bool {
+    let settled = last_output.is_some_and(|out| out > typed && now.duration_since(out) >= ENTER_SETTLE);
+    settled || now.duration_since(typed) >= ENTER_GIVE_UP
+}
+
 pub struct Session {
     pub backend: TerminalBackend,
     pub exited: bool,
-    /// Enter still to send after `type_prompt`.
+    /// When `type_prompt` typed text whose Enter is still to send.
     pending_enter: Option<Instant>,
     /// When the shell (or the program running in it) last printed something.
     last_output: Option<Instant>,
@@ -579,14 +592,8 @@ impl Terminals {
     }
 
     /// Marks sessions whose shell has exited (they stay until `restart`) and sends delayed Enters.
-    pub fn poll(&mut self) {
+    pub fn poll(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        for (_, s) in self.sessions.values_mut() {
-            if s.pending_enter.is_some_and(|at| at <= now) {
-                s.pending_enter = None;
-                s.backend.process_command(BackendCommand::Write(b"\r".to_vec()));
-            }
-        }
         while let Ok((id, event)) = self.rx.try_recv() {
             let Some((_, s)) = self.sessions.values_mut().find(|(sid, _)| *sid == id) else {
                 continue;
@@ -595,6 +602,15 @@ impl Terminals {
                 PtyEvent::Exit => s.exited = true,
                 PtyEvent::Wakeup => s.last_output = Some(now),
                 _ => {}
+            }
+        }
+        for (_, s) in self.sessions.values_mut() {
+            let Some(typed) = s.pending_enter else { continue };
+            if enter_due(typed, s.last_output, now) {
+                s.pending_enter = None;
+                s.backend.process_command(BackendCommand::Write(b"\r".to_vec()));
+            } else {
+                ctx.request_repaint_after(ENTER_SETTLE);
             }
         }
     }
@@ -689,14 +705,12 @@ impl Session {
             .process_command(BackendCommand::Write(format!("{command}\r").into_bytes()));
     }
 
-    /// Types `text` into a running TUI and presses Enter a moment later; sent in one burst,
-    /// many TUIs treat the Enter as part of a paste instead of a submit.
+    /// Types `text` into a running TUI and presses Enter once it has shown the text (see `enter_due`).
     pub fn type_prompt(&mut self, text: &str, ctx: &egui::Context) {
-        const DELAY: Duration = Duration::from_millis(150);
         self.backend
             .process_command(BackendCommand::Write(text.as_bytes().to_vec()));
-        self.pending_enter = Some(Instant::now() + DELAY);
-        ctx.request_repaint_after(DELAY);
+        self.pending_enter = Some(Instant::now());
+        ctx.request_repaint_after(ENTER_SETTLE);
     }
 
     pub fn shell_pid(&self) -> u32 {
@@ -726,6 +740,19 @@ mod tests {
             Some(&fill_prompt(prompt, path, id, dir)?),
             shell,
         ))
+    }
+
+    #[test]
+    fn enter_waits_for_the_tui_to_show_the_text() {
+        let typed = Instant::now();
+        let ms = |n| typed + Duration::from_millis(n);
+        // Nothing printed since typing (output before it doesn't count): wait, until giving up.
+        assert!(!enter_due(typed, None, ms(1000)));
+        assert!(!enter_due(ms(100), Some(ms(50)), ms(1000)));
+        assert!(enter_due(typed, None, typed + ENTER_GIVE_UP));
+        // Printed, but not quiet long enough yet.
+        assert!(!enter_due(typed, Some(ms(500)), ms(700)));
+        assert!(enter_due(typed, Some(ms(500)), ms(800)));
     }
 
     #[test]
